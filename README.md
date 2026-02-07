@@ -77,12 +77,12 @@ flowchart LR
     K --> L[Runtime + Lockfile Write]
     L --> M[Done]
 
-    subgraph Global Cache ~/.cache/scint
+    subgraph GlobalCache["Global Cache (~/.cache/scint)"]
       H
       I
     end
 
-    subgraph Project Runtime .bundle
+    subgraph ProjectRuntime["Project Runtime (.bundle)"]
       G
       K
       L

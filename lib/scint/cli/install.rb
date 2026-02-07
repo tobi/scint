@@ -99,6 +99,7 @@ module Scint
           scheduler.wait_for(:git_clone)
 
           resolved = resolve(gemfile, lockfile, cache)
+          resolved = adjust_meta_gems(resolved)
           force_purge_artifacts(resolved, bundle_path, cache) if @force
 
           # 7. Plan: diff resolved vs installed
@@ -135,6 +136,8 @@ module Scint
               build_candidates << entry
               scheduler.enqueue(:link, entry.spec.name,
                                 -> { link_gem(entry, cache, bundle_path) })
+            when :builtin
+              install_builtin_gem(entry, bundle_path)
             end
           end
 
@@ -184,6 +187,61 @@ module Scint
       end
 
       private
+
+      # --- Spec adjustment ---
+
+      # Post-resolution pass: remove bundler (we replace it) and inject scint.
+      # This ensures `require "bundler/setup"` loads our shim, and scint
+      # appears in the gem list just like bundler does for stock bundler.
+      def adjust_meta_gems(resolved)
+        resolved = resolved.reject { |s| s.name == "bundler" }
+
+        scint_spec = ResolvedSpec.new(
+          name: "scint",
+          version: VERSION,
+          platform: "ruby",
+          dependencies: [],
+          source: "scint (built-in)",
+          has_extensions: false,
+          remote_uri: nil,
+          checksum: nil,
+        )
+        resolved << scint_spec
+
+        resolved
+      end
+
+      # Install scint (or other built-in gems) by symlinking to our own lib
+      # and writing a minimal gemspec. No download or extraction needed.
+      def install_builtin_gem(entry, bundle_path)
+        spec = entry.spec
+        ruby_dir = File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
+        full_name = spec_full_name(spec)
+
+        # Symlink gem dir → scint's lib parent
+        gem_dest = File.join(ruby_dir, "gems", full_name)
+        scint_root = File.expand_path("../../..", __FILE__)
+        unless File.exist?(gem_dest)
+          FS.mkdir_p(File.dirname(gem_dest))
+          File.symlink(scint_root, gem_dest)
+        end
+
+        # Write gemspec
+        spec_dir = File.join(ruby_dir, "specifications")
+        spec_path = File.join(spec_dir, "#{full_name}.gemspec")
+        unless File.exist?(spec_path)
+          FS.mkdir_p(spec_dir)
+          content = <<~RUBY
+            Gem::Specification.new do |s|
+              s.name = #{spec.name.inspect}
+              s.version = #{spec.version.to_s.inspect}
+              s.summary = "Fast, parallel gem installer (bundler replacement)"
+              s.require_paths = ["lib"]
+            end
+          RUBY
+          FS.atomic_write(spec_path, content)
+        end
+      end
 
       # --- Phase implementations ---
 
@@ -391,24 +449,31 @@ module Scint
         uri, revision = git_source_ref(source)
 
         bare_repo = cache.git_path(uri)
-        clone_git_repo(uri, bare_repo) unless Dir.exist?(bare_repo)
 
-        extracted = cache.extracted_path(spec)
-        return if Dir.exist?(extracted)
+        # Serialize all git operations per bare repo — git uses index.lock
+        # and can't handle concurrent checkouts from the same repo.
+        git_mutex_for(bare_repo).synchronize do
+          clone_git_repo(uri, bare_repo) unless Dir.exist?(bare_repo)
 
-        tmp = "#{extracted}.#{Process.pid}.#{Thread.current.object_id}.tmp"
-        FileUtils.rm_rf(tmp)
-        FS.mkdir_p(tmp)
+          extracted = cache.extracted_path(spec)
+          return if Dir.exist?(extracted)
 
-        cmd = ["git", "--git-dir", bare_repo, "--work-tree", tmp, "checkout", "-f", revision, "--", "."]
-        _out, err, status = Open3.capture3(*cmd)
-        unless status.success?
-          raise InstallError, "Git checkout failed for #{spec.name} (#{uri}@#{revision}): #{err.to_s.strip}"
+          tmp = "#{extracted}.#{Process.pid}.#{Thread.current.object_id}.tmp"
+          begin
+            FileUtils.rm_rf(tmp)
+            FS.mkdir_p(tmp)
+
+            cmd = ["git", "--git-dir", bare_repo, "--work-tree", tmp, "checkout", "-f", revision, "--", "."]
+            _out, err, status = Open3.capture3(*cmd)
+            unless status.success?
+              raise InstallError, "Git checkout failed for #{spec.name} (#{uri}@#{revision}): #{err.to_s.strip}"
+            end
+
+            FS.atomic_move(tmp, extracted)
+          ensure
+            FileUtils.rm_rf(tmp) if tmp && File.exist?(tmp)
+          end
         end
-
-        FS.atomic_move(tmp, extracted)
-      ensure
-        FileUtils.rm_rf(tmp) if defined?(tmp) && tmp && File.exist?(tmp)
       end
 
       def git_source_ref(source)
@@ -418,6 +483,14 @@ module Scint
         end
 
         [source.to_s, "HEAD"]
+      end
+
+      def git_mutex_for(repo_path)
+        @git_mutexes_lock ||= Thread::Mutex.new
+        @git_mutexes_lock.synchronize do
+          @git_mutexes ||= {}
+          @git_mutexes[repo_path] ||= Thread::Mutex.new
+        end
       end
 
       def clone_git_repo(uri, bare_repo)
