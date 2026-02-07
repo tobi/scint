@@ -51,7 +51,7 @@ class LockfileWriterTest < Minitest::Test
     assert_includes out, "DEPENDENCIES\n  nio4r (>= 2.5)\n  rack (~> 2.2)!"
     assert_includes out, "CHECKSUMS"
     assert_includes out, "RUBY VERSION\n  ruby 3.3.0"
-    assert_includes out, "BUNDLED WITH\n   0.1.0"
+    refute_includes out, "BUNDLED WITH"
   end
 
   def test_writer_output_is_parseable_for_core_sections

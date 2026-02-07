@@ -6,7 +6,7 @@ module Scint
     # Produces output compatible with stock bundler.
     #
     # Sections in order: source blocks (GEM/GIT/PATH), PLATFORMS,
-    # DEPENDENCIES, CHECKSUMS (if present), RUBY VERSION, BUNDLED WITH.
+    # DEPENDENCIES, CHECKSUMS (if present), RUBY VERSION.
     class Writer
       def self.write(lockfile_data)
         new(lockfile_data).generate
@@ -24,7 +24,6 @@ module Scint
         add_dependencies(out)
         add_checksums(out)
         add_ruby_version(out)
-        add_bundled_with(out)
 
         out
       end
@@ -168,11 +167,6 @@ module Scint
         out << "  #{@data.ruby_version}\n"
       end
 
-      def add_bundled_with(out)
-        return unless @data.bundler_version
-        out << "\nBUNDLED WITH\n"
-        out << "   #{@data.bundler_version}\n"
-      end
     end
   end
 end
