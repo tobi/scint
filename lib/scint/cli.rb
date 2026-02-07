@@ -2,7 +2,7 @@
 
 module Scint
   module CLI
-    COMMANDS = %w[install exec cache version help].freeze
+    COMMANDS = %w[install add remove exec cache version help].freeze
 
     def self.run(argv)
       argv = argv.dup
@@ -12,6 +12,12 @@ module Scint
       when "install", "i"
         require_relative "cli/install"
         CLI::Install.new(argv).run
+      when "add"
+        require_relative "cli/add"
+        CLI::Add.new(argv).run
+      when "remove", "rm"
+        require_relative "cli/remove"
+        CLI::Remove.new(argv).run
       when "exec", "e"
         require_relative "cli/exec"
         CLI::Exec.new(argv).run
@@ -47,6 +53,8 @@ module Scint
 
         Commands:
           install    Install gems from Gemfile (default)
+          add        Add gem(s) to Gemfile and install
+          remove     Remove gem(s) from Gemfile and install
           exec       Execute a command in the bundle context
           cache      Manage scint cache (list/clear/dir)
           version    Print version

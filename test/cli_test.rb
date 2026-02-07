@@ -2,6 +2,8 @@
 
 require_relative "test_helper"
 require "scint/cli"
+require "scint/cli/add"
+require "scint/cli/remove"
 
 class CLITest < Minitest::Test
   def with_captured_io
@@ -48,6 +50,30 @@ class CLITest < Minitest::Test
 
         assert_equal "", err
         assert_equal File.join(dir, "scint") + "\n", out
+      end
+    end
+  end
+
+  def test_run_add_command_dispatches
+    fake = Object.new
+    fake.define_singleton_method(:run) { 0 }
+
+    Scint::CLI::Add.stub(:new, ->(*) { fake }) do
+      _out, _err = with_captured_io do
+        status = Scint::CLI.run(["add", "rack", "--skip-install"])
+        assert_equal 0, status
+      end
+    end
+  end
+
+  def test_run_remove_command_dispatches
+    fake = Object.new
+    fake.define_singleton_method(:run) { 0 }
+
+    Scint::CLI::Remove.stub(:new, ->(*) { fake }) do
+      _out, _err = with_captured_io do
+        status = Scint::CLI.run(["remove", "rack", "--skip-install"])
+        assert_equal 0, status
       end
     end
   end
