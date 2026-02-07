@@ -121,6 +121,23 @@ class FSTest < Minitest::Test
     end
   end
 
+  def test_hardlink_tree_skips_destination_subtree_when_nested_in_source
+    with_tmpdir do |dir|
+      src = File.join(dir, "project")
+      dst = File.join(src, ".bundle", "ruby", "3.4.0", "gems", "demo-1.0.0")
+
+      FileUtils.mkdir_p(File.join(src, "lib"))
+      FileUtils.mkdir_p(File.join(src, ".bundle"))
+      File.write(File.join(src, "lib", "demo.rb"), "module Demo; end\n")
+      File.write(File.join(src, ".bundle", "config"), "---\n")
+
+      Scint::FS.hardlink_tree(src, dst)
+
+      assert File.exist?(File.join(dst, "lib", "demo.rb"))
+      refute Dir.exist?(File.join(dst, ".bundle"))
+    end
+  end
+
   def test_hardlink_tree_raises_when_source_missing
     with_tmpdir do |dir|
       src = File.join(dir, "missing")

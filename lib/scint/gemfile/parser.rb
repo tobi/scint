@@ -231,6 +231,13 @@ module Scint
         end
       end
 
+      def install_if(*conditions, &blk)
+        raise GemfileError, "install_if requires a block" unless block_given?
+        return unless conditions.all? { |condition| condition_truthy?(condition) }
+
+        yield
+      end
+
       # Silently ignore plugin declarations
       def plugin(*args); end
 
@@ -246,6 +253,12 @@ module Scint
       end
 
       private
+
+      def condition_truthy?(condition)
+        return condition.call if condition.respond_to?(:call)
+
+        !!condition
+      end
 
       def add_default_git_sources
         git_source(:github) do |repo_name|

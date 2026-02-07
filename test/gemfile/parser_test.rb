@@ -383,6 +383,52 @@ class GemfileParserTest < Minitest::Test
     end
   end
 
+  def test_install_if_with_truthy_condition_evaluates_block
+    with_tmpdir do |dir|
+      gemfile = File.join(dir, "Gemfile")
+      File.write(gemfile, <<~RUBY)
+        source "https://rubygems.org"
+        group :test do
+          install_if -> { true } do
+            gem "rack"
+          end
+        end
+      RUBY
+
+      dep = Scint::Gemfile::Parser.parse(gemfile).dependencies.first
+      assert_equal "rack", dep.name
+      assert_equal [:test], dep.groups
+    end
+  end
+
+  def test_install_if_with_false_condition_skips_block
+    with_tmpdir do |dir|
+      gemfile = File.join(dir, "Gemfile")
+      File.write(gemfile, <<~RUBY)
+        source "https://rubygems.org"
+        install_if -> { false } do
+          gem "rack"
+        end
+      RUBY
+
+      result = Scint::Gemfile::Parser.parse(gemfile)
+      assert_empty result.dependencies
+    end
+  end
+
+  def test_install_if_requires_a_block
+    with_tmpdir do |dir|
+      gemfile = File.join(dir, "Gemfile")
+      File.write(gemfile, <<~RUBY)
+        source "https://rubygems.org"
+        install_if true
+      RUBY
+
+      error = assert_raises(Scint::GemfileError) { Scint::Gemfile::Parser.parse(gemfile) }
+      assert_includes error.message, "install_if requires a block"
+    end
+  end
+
   def test_gem_with_explicit_source_option
     with_tmpdir do |dir|
       gemfile = File.join(dir, "Gemfile")

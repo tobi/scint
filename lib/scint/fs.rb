@@ -76,8 +76,8 @@ module Scint
     # Recursively hardlink all files from src_dir into dst_dir.
     # Directory structure is recreated; files are hardlinked.
     def hardlink_tree(src_dir, dst_dir)
-      src_dir = src_dir.to_s
-      dst_dir = dst_dir.to_s
+      src_dir = File.expand_path(src_dir.to_s)
+      dst_dir = File.expand_path(dst_dir.to_s)
       raise Errno::ENOENT, src_dir unless Dir.exist?(src_dir)
       mkdir_p(dst_dir)
 
@@ -88,6 +88,10 @@ module Scint
         Dir.each_child(src_root) do |entry|
           src_path = File.join(src_root, entry)
           dst_path = File.join(dst_root, entry)
+
+          # Guard against recursive copy when destination is nested under source.
+          next if dst_dir == src_path || dst_dir.start_with?("#{src_path}/")
+
           stat = File.lstat(src_path)
 
           if stat.directory?
