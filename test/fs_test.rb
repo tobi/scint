@@ -74,6 +74,22 @@ class FSTest < Minitest::Test
     end
   end
 
+  def test_hardlink_tree_is_idempotent_when_destination_exists
+    with_tmpdir do |dir|
+      src = File.join(dir, "src")
+      dst = File.join(dir, "dst")
+      FileUtils.mkdir_p(src)
+      File.binwrite(File.join(src, "file.txt"), "copied")
+
+      Scint::FS.hardlink_tree(src, dst)
+      Scint::FS.hardlink_tree(src, dst)
+
+      copied = File.join(dst, "file.txt")
+      assert File.exist?(copied)
+      assert_equal "copied", File.read(copied)
+    end
+  end
+
   def test_hardlink_tree_raises_when_source_missing
     with_tmpdir do |dir|
       src = File.join(dir, "missing")
@@ -82,6 +98,60 @@ class FSTest < Minitest::Test
       assert_raises(Errno::ENOENT) do
         Scint::FS.hardlink_tree(src, dst)
       end
+    end
+  end
+
+  def test_clone_tree_uses_cp_clone_on_macos
+    with_tmpdir do |dir|
+      src = File.join(dir, "src")
+      dst = File.join(dir, "dst")
+      FileUtils.mkdir_p(src)
+      File.binwrite(File.join(src, "a.txt"), "a")
+
+      called = false
+      Scint::Platform.stub(:macos?, true) do
+        Scint::FS.stub(:system, lambda { |*args|
+          called = true
+          assert_equal "cp", args[0]
+          assert_equal "-cR", args[1]
+          assert_equal File.join(src, "."), args[2]
+          assert_equal dst, args[3]
+          assert_equal({ [:out, :err] => File::NULL }, args[4])
+          FileUtils.mkdir_p(dst)
+          FileUtils.cp_r(File.join(src, "."), dst)
+          true
+        }) do
+          Scint::FS.clone_tree(src, dst)
+        end
+      end
+
+      assert called
+      assert_equal "a", File.binread(File.join(dst, "a.txt"))
+    end
+  end
+
+  def test_clone_tree_falls_back_to_hardlink_tree
+    with_tmpdir do |dir|
+      src = File.join(dir, "src")
+      dst = File.join(dir, "dst")
+      FileUtils.mkdir_p(src)
+      File.binwrite(File.join(src, "a.txt"), "a")
+
+      fallback_called = false
+      Scint::Platform.stub(:macos?, true) do
+        Scint::FS.stub(:system, ->(*_args) { false }) do
+          Scint::FS.stub(:hardlink_tree, lambda { |s, d|
+            fallback_called = true
+            FileUtils.mkdir_p(d)
+            FileUtils.cp_r(File.join(s, "."), d)
+          }) do
+            Scint::FS.clone_tree(src, dst)
+          end
+        end
+      end
+
+      assert fallback_called
+      assert_equal "a", File.binread(File.join(dst, "a.txt"))
     end
   end
 

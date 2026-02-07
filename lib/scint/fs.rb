@@ -44,6 +44,24 @@ module Scint
       FileUtils.cp(src, dst)
     end
 
+    # Recursively clone directory tree from src_dir into dst_dir.
+    # On macOS/APFS, prefers CoW clones via `cp -cR`.
+    # Falls back to hardlink_tree, then regular copy per-file if needed.
+    def clone_tree(src_dir, dst_dir)
+      src_dir = src_dir.to_s
+      dst_dir = dst_dir.to_s
+      raise Errno::ENOENT, src_dir unless Dir.exist?(src_dir)
+      mkdir_p(dst_dir)
+
+      # Fast path on macOS/APFS: copy-on-write clone of full tree.
+      if Platform.macos?
+        src_contents = File.join(src_dir, ".")
+        return if system("cp", "-cR", src_contents, dst_dir, [:out, :err] => File::NULL)
+      end
+
+      hardlink_tree(src_dir, dst_dir)
+    end
+
     # Recursively hardlink all files from src_dir into dst_dir.
     # Directory structure is recreated; files are hardlinked.
     def hardlink_tree(src_dir, dst_dir)
@@ -68,10 +86,26 @@ module Scint
           end
 
           mkdir_p(File.dirname(dst_path))
+          # Another worker may have already materialized this file.
+          next if File.exist?(dst_path)
+
           begin
             File.link(src_path, dst_path)
+          rescue Errno::EEXIST
+            # Lost a race to another concurrent linker; destination is valid.
+            next
           rescue SystemCallError
-            FileUtils.cp(src_path, dst_path)
+            # TOCTOU guard: destination may have appeared after File.link failed.
+            next if File.exist?(dst_path)
+
+            begin
+              clonefile(src_path, dst_path)
+            rescue StandardError
+              # If a concurrent worker created destination in the meantime,
+              # treat this as success; otherwise bubble up.
+              next if File.exist?(dst_path)
+              raise
+            end
           end
         end
       end

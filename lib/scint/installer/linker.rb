@@ -33,7 +33,7 @@ module Scint
         # 1. Link gem files into gems/{full_name}/
         gem_dest = File.join(ruby_dir, "gems", full_name)
         unless Dir.exist?(gem_dest)
-          FS.hardlink_tree(prepared_gem.extracted_path, gem_dest)
+          FS.clone_tree(prepared_gem.extracted_path, gem_dest)
         end
 
         # 2. Write gemspec into specifications/

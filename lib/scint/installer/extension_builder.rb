@@ -210,7 +210,7 @@ module Scint
                                     spec_full_name(spec))
         return if Dir.exist?(ext_install_dir)
 
-        FS.hardlink_tree(cached_ext, ext_install_dir)
+        FS.clone_tree(cached_ext, ext_install_dir)
       end
 
       def build_env(gem_dir, build_ruby_dir, make_jobs)

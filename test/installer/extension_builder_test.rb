@@ -34,7 +34,7 @@ class ExtensionBuilderTest < Minitest::Test
       )
 
       assert File.exist?(linked)
-      assert_hardlinked(File.join(cached_ext, "ffi_ext.so"), linked)
+      assert_equal "bin", File.read(linked)
     end
   end
 
@@ -77,7 +77,7 @@ class ExtensionBuilderTest < Minitest::Test
         "ffi_ext.so",
       )
       assert File.exist?(linked)
-      assert_hardlinked(File.join(cached_ext, "ffi_ext.so"), linked)
+      assert_equal "bin", File.read(linked)
     end
   end
 
