@@ -3,6 +3,7 @@
 require_relative "../fs"
 require_relative "../platform"
 require_relative "../errors"
+require "open3"
 
 module Bundler2
   module Installer
@@ -36,7 +37,7 @@ module Bundler2
           FS.mkdir_p(install_dir)
 
           ext_dirs.each do |ext_dir|
-            compile_extension(ext_dir, build_dir, install_dir, src_dir, spec)
+            compile_extension(ext_dir, build_dir, install_dir, src_dir, spec, ruby_dir)
           end
 
           # Write marker
@@ -52,6 +53,10 @@ module Bundler2
       end
 
       # --- private ---
+
+      def buildable_source_dir?(gem_dir)
+        find_extension_dirs(gem_dir).any?
+      end
 
       def find_extension_dirs(gem_dir)
         dirs = []
@@ -77,8 +82,8 @@ module Bundler2
         dirs.uniq
       end
 
-      def compile_extension(ext_dir, build_dir, install_dir, gem_dir, spec)
-        env = build_env(gem_dir)
+      def compile_extension(ext_dir, build_dir, install_dir, gem_dir, spec, ruby_dir)
+        env = build_env(gem_dir, ruby_dir)
 
         if File.exist?(File.join(ext_dir, "extconf.rb"))
           compile_extconf(ext_dir, build_dir, install_dir, env)
@@ -118,17 +123,17 @@ module Bundler2
 
       def link_extensions(cached_ext, ruby_dir, spec, abi_key)
         ext_install_dir = File.join(ruby_dir, "extensions",
-                                    Platform.arch, Platform.ruby_version,
+                                    Platform.gem_arch, Platform.extension_api_version,
                                     spec_full_name(spec))
         return if Dir.exist?(ext_install_dir)
 
         FS.hardlink_tree(cached_ext, ext_install_dir)
       end
 
-      def build_env(gem_dir)
+      def build_env(gem_dir, ruby_dir)
         {
-          "GEM_HOME" => nil,
-          "GEM_PATH" => nil,
+          "GEM_HOME" => ruby_dir,
+          "GEM_PATH" => ruby_dir,
           "MAKEFLAGS" => "-j#{Platform.cpu_count}",
           "CFLAGS" => "-I#{RbConfig::CONFIG["rubyhdrdir"]} -I#{RbConfig::CONFIG["rubyarchhdrdir"]}",
         }
@@ -136,15 +141,26 @@ module Bundler2
 
       def run_cmd(env, *cmd, chdir: nil)
         opts = { chdir: chdir }.compact
-        opts[:out] = File::NULL unless ENV["BUNDLER2_DEBUG"]
-        opts[:err] = File::NULL unless ENV["BUNDLER2_DEBUG"]
 
-        pid = Process.spawn(env, *cmd, **opts)
-        _, status = Process.wait2(pid)
+        if ENV["BUNDLER2_DEBUG"]
+          pid = Process.spawn(env, *cmd, **opts)
+          _, status = Process.wait2(pid)
+          unless status.success?
+            raise ExtensionBuildError,
+                  "Command failed (exit #{status.exitstatus}): #{cmd.join(" ")}"
+          end
+          return
+        end
+
+        out, err, status = Open3.capture3(env, *cmd, **opts)
 
         unless status.success?
+          details = [out, err].join
+          details = details.strip
+          message = "Command failed (exit #{status.exitstatus}): #{cmd.join(" ")}"
+          message = "#{message}\n#{details}" unless details.empty?
           raise ExtensionBuildError,
-                "Command failed (exit #{status.exitstatus}): #{cmd.join(" ")}"
+                message
         end
       end
 

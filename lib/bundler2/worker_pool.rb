@@ -86,19 +86,24 @@ module Bundler2
           loop do
             job = @queue.pop
             break if job == POISON
+
+            # Never let an exception kill the worker thread while a job is
+            # in flight, or scheduler waiters can block forever.
             begin
               job[:result] = @handler.call(job[:payload])
               job[:state] = :completed
-            rescue => e
+            rescue Exception => e
               job[:error] = e
               job[:state] = :failed
             end
+
             begin
               job[:callback]&.call(job)
-            rescue => e
+            rescue Exception => e
               $stderr.puts "Worker callback error: #{e.class}: #{e.message}"
               $stderr.puts e.backtrace.first(5).map { |l| "  #{l}" }.join("\n")
               job[:error] ||= e
+              job[:state] = :failed
             end
           end
         end

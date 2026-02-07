@@ -50,6 +50,7 @@ module Bundler2
     def hardlink_tree(src_dir, dst_dir)
       src_dir = src_dir.to_s
       dst_dir = dst_dir.to_s
+      raise Errno::ENOENT, src_dir unless Dir.exist?(src_dir)
 
       Dir.glob("**/*", File::FNM_DOTMATCH, base: src_dir).each do |rel|
         next if rel == "." || rel == ".."

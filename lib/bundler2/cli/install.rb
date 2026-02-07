@@ -47,13 +47,13 @@ module Bundler2
       def run
         start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-        cache = Cache::Layout.new
+        cache = Bundler2::Cache::Layout.new
         bundle_path = @path || ENV["BUNDLER_PATH"] || ".bundle"
         bundle_path = File.expand_path(bundle_path)
         worker_count = @jobs || [Platform.cpu_count * 2, 50].min
 
         # 1. Start the scheduler with 1 worker — scale up dynamically
-        scheduler = Scheduler.new(max_workers: worker_count)
+        scheduler = Scheduler.new(max_workers: worker_count, fail_fast: true)
         scheduler.start
 
         begin
@@ -99,29 +99,42 @@ module Bundler2
           scheduler.scale_workers(to_install.size)
 
           if to_install.empty?
-            $stdout.puts "Bundle complete! #{skipped} gems already installed."
+            elapsed_ms = elapsed_ms_since(start_time)
+            warn_missing_bundle_gitignore_entry
+            $stdout.puts "Bundle complete! #{skipped} gems already installed. (#{format_elapsed(elapsed_ms)})"
             return 0
           end
 
           # 8. Enqueue downloads — each one chains into extract → link
+          build_candidates = []
           plan.each do |entry|
             case entry.action
             when :download
-              download_id = scheduler.enqueue(
+              build_candidates << entry
+              scheduler.enqueue(
                 :download, entry.spec.name,
                 -> { download_gem(entry, cache) },
-                follow_up: ->(job) { enqueue_post_download(scheduler, entry, cache, bundle_path) }
+                follow_up: ->(_job) { enqueue_link_after_download(scheduler, entry, cache, bundle_path) }
               )
             when :link
               scheduler.enqueue(:link, entry.spec.name,
                                 -> { link_gem(entry, cache, bundle_path) })
             when :build_ext
-              scheduler.enqueue(:build_ext, entry.spec.name,
-                                -> { build_and_link(entry, cache, bundle_path) })
+              build_candidates << entry
+              scheduler.enqueue(:link, entry.spec.name,
+                                -> { link_gem(entry, cache, bundle_path) })
             end
           end
 
-          # 9. Wait for everything
+          # 9. Build native extensions only after all links are in place, so
+          # extconf scripts can activate dependency gems from local bundle dir.
+          scheduler.wait_for(:download)
+          scheduler.wait_for(:link)
+          unless scheduler.failed? || scheduler.aborted?
+            enqueue_builds(scheduler, build_candidates, cache, bundle_path)
+          end
+
+          # 10. Wait for everything
           scheduler.wait_all
 
           errors = scheduler.errors.dup
@@ -135,15 +148,24 @@ module Bundler2
             $stderr.puts "Warning: #{stats[:failed]} jobs failed but no error details captured"
           end
 
-          # 10. Write lockfile + runtime config
-          write_lockfile(resolved, gemfile)
-          write_runtime_config(resolved, bundle_path)
+          elapsed_ms = elapsed_ms_since(start_time)
+          failed = errors.map { |e| e[:name] }.uniq
+          requested = to_install.map { |e| e.spec.name }.uniq
+          installed = requested - failed
+          has_failures = errors.any? || stats[:failed] > 0
 
-          elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time
-          installed_count = to_install.size
-          $stdout.puts "Bundle complete! #{installed_count} gems installed, #{skipped} already up to date. (#{elapsed.round(2)}s)"
-
-          (errors.any? || stats[:failed] > 0) ? 1 : 0
+          if has_failures
+            warn_missing_bundle_gitignore_entry
+            $stdout.puts "Bundle failed! #{installed.size} gems installed, #{failed.size} failed, #{skipped} already up to date. (#{format_elapsed(elapsed_ms)})"
+            1
+          else
+            # 10. Write lockfile + runtime config only for successful installs
+            write_lockfile(resolved, gemfile)
+            write_runtime_config(resolved, bundle_path)
+            warn_missing_bundle_gitignore_entry
+            $stdout.puts "Bundle complete! #{installed.size} gems installed, #{skipped} already up to date. (#{format_elapsed(elapsed_ms)})"
+            0
+          end
         ensure
           scheduler.shutdown
         end
@@ -269,15 +291,10 @@ module Bundler2
         candidates.each do |gs|
           next unless File.exist?(gs)
           begin
-            prev_stderr = $stderr.dup
-            $stderr.reopen(File::NULL)
             spec = Gem::Specification.load(gs)
             return spec if spec
           rescue StandardError
             nil
-          ensure
-            $stderr.reopen(prev_stderr)
-            prev_stderr.close
           end
         end
         nil
@@ -292,12 +309,19 @@ module Bundler2
 
       def lockfile_to_resolved(lockfile)
         lockfile.specs.map do |ls|
+          source_uri =
+            if ls[:source].respond_to?(:uri)
+              ls[:source].uri.to_s
+            else
+              ls[:source].to_s
+            end
+
           ResolvedSpec.new(
             name: ls[:name],
             version: ls[:version],
             platform: ls[:platform],
             dependencies: ls[:dependencies],
-            source: ls[:source],
+            source: source_uri,
             has_extensions: false,
             remote_uri: nil,
             checksum: ls[:checksum],
@@ -331,41 +355,40 @@ module Bundler2
         unless Dir.exist?(extracted)
           FS.mkdir_p(extracted)
           pkg = GemPkg::Package.new
-          pkg.extract(dest_path, extracted)
+          result = pkg.extract(dest_path, extracted)
+          cache_gemspec(spec, result[:gemspec], cache)
         end
       end
 
-      def enqueue_post_download(scheduler, entry, cache, bundle_path)
-        # Check if gem has native extensions by looking at the extracted directory
-        extracted = cache.extracted_path(entry.spec)
-        needs_ext = entry.spec.respond_to?(:has_extensions) && entry.spec.has_extensions
-        needs_ext ||= has_ext_dir?(extracted)
+      def enqueue_link_after_download(scheduler, entry, cache, bundle_path)
+        scheduler.enqueue(:link, entry.spec.name,
+                          -> { link_gem(entry, cache, bundle_path) })
+      end
 
-        if needs_ext
+      def enqueue_builds(scheduler, entries, cache, bundle_path)
+        entries.each do |entry|
+          extracted = extracted_path_for_entry(entry, cache)
+          next unless Installer::ExtensionBuilder.buildable_source_dir?(extracted)
+
           scheduler.enqueue(:build_ext, entry.spec.name,
                             -> { build_and_link(entry, cache, bundle_path) })
-        else
-          scheduler.enqueue(:link, entry.spec.name,
-                            -> { link_gem(entry, cache, bundle_path) })
         end
       end
 
-      def has_ext_dir?(extracted_path)
-        Dir.exist?(File.join(extracted_path, "ext"))
+      def extracted_path_for_entry(entry, cache)
+        source_str = entry.spec.source.to_s
+        if source_str.start_with?("/") && Dir.exist?(source_str)
+          source_str
+        else
+          entry.cached_path || cache.extracted_path(entry.spec)
+        end
       end
 
       def link_gem(entry, cache, bundle_path)
         spec = entry.spec
-        source_str = spec.source.to_s
+        extracted = extracted_path_for_entry(entry, cache)
 
-        # For path gems, link directly from the source path
-        if source_str.start_with?("/") && Dir.exist?(source_str)
-          extracted = source_str
-        else
-          extracted = entry.cached_path || cache.extracted_path(spec)
-        end
-
-        gemspec = load_gemspec(extracted, spec)
+        gemspec = load_gemspec(extracted, spec, cache)
 
         prepared = PreparedGem.new(
           spec: spec,
@@ -378,7 +401,7 @@ module Bundler2
 
       def build_and_link(entry, cache, bundle_path)
         extracted = entry.cached_path || cache.extracted_path(entry.spec)
-        gemspec = load_gemspec(extracted, entry.spec)
+        gemspec = load_gemspec(extracted, entry.spec, cache)
 
         prepared = PreparedGem.new(
           spec: entry.spec,
@@ -391,22 +414,77 @@ module Bundler2
         Installer::Linker.link(prepared, bundle_path)
       end
 
-      def load_gemspec(extracted_path, spec)
-        pattern = File.join(extracted_path, "*.gemspec")
-        gemspec_files = Dir.glob(pattern)
+      def load_gemspec(extracted_path, spec, cache)
+        cached = load_cached_gemspec(spec, cache, extracted_path)
+        return cached if cached
 
-        if gemspec_files.any?
+        inbound = cache.inbound_path(spec)
+        return nil unless File.exist?(inbound)
+
+        begin
+          metadata = GemPkg::Package.new.read_metadata(inbound)
+          cache_gemspec(spec, metadata, cache)
+          metadata
+        rescue StandardError
+          nil
+        end
+      end
+
+      def load_cached_gemspec(spec, cache, extracted_path)
+        path = cache.spec_cache_path(spec)
+        return nil unless File.exist?(path)
+
+        data = File.binread(path)
+        gemspec = if data.start_with?("---")
+          Gem::Specification.from_yaml(data)
+        else
           begin
-            prev_stderr = $stderr.dup
-            $stderr.reopen(File::NULL)
-            return Gem::Specification.load(gemspec_files.first)
+            Marshal.load(data)
           rescue StandardError
-            nil
-          ensure
-            $stderr.reopen(prev_stderr)
-            prev_stderr.close
+            Gem::Specification.from_yaml(data)
           end
         end
+        return gemspec if cached_gemspec_valid?(gemspec, extracted_path)
+
+        nil
+      rescue StandardError
+        nil
+      end
+
+      def cached_gemspec_valid?(gemspec, extracted_path)
+        return false unless gemspec.respond_to?(:require_paths)
+
+        require_paths = Array(gemspec.require_paths).reject(&:empty?)
+        return true if require_paths.empty?
+
+        require_paths.all? do |rp|
+          dir = File.join(extracted_path, rp)
+          next false unless Dir.exist?(dir)
+
+          # Heuristic for stale cached metadata seen in some gems:
+          # `require_paths=["lib"]` while all entries live under a
+          # hyphenated nested directory (e.g. lib/concurrent-ruby).
+          if rp == "lib"
+            entries = Dir.children(dir)
+            top_level_rb = entries.any? do |entry|
+              path = File.join(dir, entry)
+              File.file?(path) && entry.end_with?(".rb")
+            end
+            next true if top_level_rb
+
+            nested_dirs = entries.select { |entry| File.directory?(File.join(dir, entry)) }
+            next false if nested_dirs.any? { |entry| entry.include?("-") }
+          end
+
+          true
+        end
+      end
+
+      def cache_gemspec(spec, gemspec, cache)
+        path = cache.spec_cache_path(spec)
+        FS.atomic_write(path, gemspec.to_yaml)
+      rescue StandardError
+        # Non-fatal: we'll read metadata from .gem next time.
       end
 
       # --- Lockfile + runtime config ---
@@ -475,11 +553,20 @@ module Bundler2
         resolved.each do |spec|
           full = spec_full_name(spec)
           gem_dir = File.join(ruby_dir, "gems", full)
-          load_paths = [File.join(gem_dir, "lib")]
+          spec_file = File.join(ruby_dir, "specifications", "#{full}.gemspec")
+          require_paths = read_require_paths(spec_file)
+          load_paths = require_paths
+            .map { |rp| File.join(gem_dir, rp) }
+            .select { |path| Dir.exist?(path) }
+
+          default_lib = File.join(gem_dir, "lib")
+          load_paths << default_lib if load_paths.empty? && Dir.exist?(default_lib)
+          load_paths.concat(detect_nested_lib_paths(gem_dir))
+          load_paths.uniq!
 
           # Add ext load path if extensions exist
           ext_dir = File.join(ruby_dir, "extensions",
-                              Platform.arch, Platform.ruby_version, full)
+                              Platform.gem_arch, Platform.extension_api_version, full)
           load_paths << ext_dir if Dir.exist?(ext_dir)
 
           data[spec.name] = {
@@ -492,10 +579,68 @@ module Bundler2
         FS.atomic_write(lock_path, Marshal.dump(data))
       end
 
+      def read_require_paths(spec_file)
+        return ["lib"] unless File.exist?(spec_file)
+
+        gemspec = Gem::Specification.load(spec_file)
+        paths = Array(gemspec&.require_paths).reject(&:empty?)
+        paths.empty? ? ["lib"] : paths
+      rescue StandardError
+        ["lib"]
+      end
+
+      def detect_nested_lib_paths(gem_dir)
+        lib_dir = File.join(gem_dir, "lib")
+        return [] unless Dir.exist?(lib_dir)
+
+        children = Dir.children(lib_dir)
+        top_level_rb = children.any? do |entry|
+          path = File.join(lib_dir, entry)
+          File.file?(path) && entry.end_with?(".rb")
+        end
+        return [] if top_level_rb
+
+        children
+          .map { |entry| File.join(lib_dir, entry) }
+          .select { |path| File.directory?(path) }
+      end
+
       def spec_full_name(spec)
         base = "#{spec.name}-#{spec.version}"
         plat = spec.respond_to?(:platform) ? spec.platform : nil
         (plat.nil? || plat.to_s == "ruby" || plat.to_s.empty?) ? base : "#{base}-#{plat}"
+      end
+
+      def elapsed_ms_since(start_time)
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time
+        (elapsed * 1000).round
+      end
+
+      def format_elapsed(elapsed_ms)
+        return "#{elapsed_ms}ms" if elapsed_ms <= 1000
+
+        "#{(elapsed_ms / 1000.0).round(2)}s"
+      end
+
+      def warn_missing_bundle_gitignore_entry
+        path = ".gitignore"
+        return unless File.file?(path)
+        return if gitignore_has_bundle_entry?(path)
+
+        $stderr.puts "Warning: .gitignore exists but does not ignore .bundle (add `.bundle/`)."
+      end
+
+      def gitignore_has_bundle_entry?(path)
+        File.foreach(path) do |line|
+          entry = line.strip
+          next if entry.empty? || entry.start_with?("#", "!")
+
+          normalized = entry.sub(%r{\A\./}, "")
+          return true if normalized.match?(%r{\A(?:\*\*/)?/?\.bundle(?:/.*)?\z})
+        end
+        false
+      rescue StandardError
+        false
       end
 
       def parse_options

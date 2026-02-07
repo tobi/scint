@@ -27,8 +27,8 @@ class ExtensionBuilderTest < Minitest::Test
       linked = File.join(
         ruby_bundle_dir(bundle_path),
         "extensions",
-        Bundler2::Platform.arch,
-        Bundler2::Platform.ruby_version,
+        Bundler2::Platform.gem_arch,
+        Bundler2::Platform.extension_api_version,
         "ffi-1.17.0",
         "ffi_ext.so",
       )
@@ -85,11 +85,38 @@ class ExtensionBuilderTest < Minitest::Test
   end
 
   def test_build_env_sets_expected_keys
-    env = Bundler2::Installer::ExtensionBuilder.send(:build_env, "/tmp/src")
+    env = Bundler2::Installer::ExtensionBuilder.send(:build_env, "/tmp/src", "/tmp/.bundle/ruby/3.4.0")
 
     assert env.key?("MAKEFLAGS")
     assert env.key?("CFLAGS")
-    assert_nil env["GEM_HOME"]
-    assert_nil env["GEM_PATH"]
+    assert_equal "/tmp/.bundle/ruby/3.4.0", env["GEM_HOME"]
+    assert_equal "/tmp/.bundle/ruby/3.4.0", env["GEM_PATH"]
+  end
+
+  def test_buildable_source_dir_false_for_non_native_ext_tree
+    with_tmpdir do |dir|
+      gem_dir = File.join(dir, "gem")
+      FileUtils.mkdir_p(File.join(gem_dir, "ext", "concurrent-ruby"))
+      File.write(File.join(gem_dir, "ext", "concurrent-ruby", "ConcurrentRubyService.java"), "")
+
+      assert_equal false, Bundler2::Installer::ExtensionBuilder.buildable_source_dir?(gem_dir)
+    end
+  end
+
+  def test_run_cmd_includes_captured_output_on_failure
+    env = {}
+    error = assert_raises(Bundler2::ExtensionBuildError) do
+      Bundler2::Installer::ExtensionBuilder.send(
+        :run_cmd,
+        env,
+        RbConfig.ruby,
+        "-e",
+        'STDOUT.puts("out line"); STDERR.puts("err line"); exit 12',
+      )
+    end
+
+    assert_includes error.message, "exit 12"
+    assert_includes error.message, "out line"
+    assert_includes error.message, "err line"
   end
 end

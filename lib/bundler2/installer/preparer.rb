@@ -172,14 +172,10 @@ module Bundler2
         pattern = File.join(extracted_dir, "*.gemspec")
         candidates = Dir.glob(pattern)
         if candidates.any?
-          # Suppress warnings from gemspecs that shell out (e.g. `git ls-files`)
-          prev_stderr = $stderr.dup
-          $stderr.reopen(File::NULL)
           begin
             ::Gem::Specification.load(candidates.first)
-          ensure
-            $stderr.reopen(prev_stderr)
-            prev_stderr.close
+          rescue StandardError
+            nil
           end
         end
       end

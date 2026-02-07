@@ -20,10 +20,11 @@ class ResolverTest < Minitest::Test
   class FakeProvider
     attr_reader :index_client
 
-    def initialize(versions:, dependencies:, has_extensions: {})
+    def initialize(versions:, dependencies:, has_extensions: {}, platforms: {})
       @versions = versions
       @dependencies = dependencies
       @has_extensions = has_extensions
+      @platforms = platforms
       @index_client = FakeIndexClient.new
     end
 
@@ -37,6 +38,10 @@ class ResolverTest < Minitest::Test
 
     def has_extensions?(name, version)
       !!@has_extensions[[name, version.to_s]]
+    end
+
+    def preferred_platform_for(name, version)
+      @platforms.fetch([name, version.to_s], "ruby")
     end
 
     def prefetch(_names)
@@ -110,6 +115,7 @@ class ResolverTest < Minitest::Test
       versions: { "rack" => ["2.2.8"] },
       dependencies: { ["rack", "2.2.8"] => { "dep" => Gem::Requirement.new(">= 1") } },
       has_extensions: { ["rack", "2.2.8"] => true },
+      platforms: { ["rack", "2.2.8"] => "arm64-darwin" },
     )
     resolver = Bundler2::Resolver::Resolver.new(provider: provider, dependencies: [])
 
@@ -118,8 +124,9 @@ class ResolverTest < Minitest::Test
 
     assert_equal "rack", spec.name
     assert_equal "2.2.8", spec.version
+    assert_equal "arm64-darwin", spec.platform
     assert_equal [{ name: "dep", version_reqs: [">= 1"] }], spec.dependencies
-    assert_equal true, spec.has_extensions
+    assert_equal false, spec.has_extensions
     assert_equal "https://example.test", spec.source
   end
 end

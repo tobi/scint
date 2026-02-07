@@ -126,6 +126,32 @@ module Bundler2
         has_platform_specific
       end
 
+      # Choose the most appropriate platform for a resolved version,
+      # preferring local binary gems over ruby source gems when available.
+      def preferred_platform_for(name, version)
+        return "ruby" if @path_gems.key?(name)
+
+        version_str = version.to_s
+        entries = info_for(name).select do |_n, ver, platform, _deps, _reqs|
+          ver == version_str && platform_match?(platform)
+        end
+        return "ruby" if entries.empty?
+
+        local_platforms = @platforms.reject { |p| p == "ruby" }
+        non_ruby = entries.map { |e| e[2] }.compact.reject { |p| p == "ruby" }.uniq
+
+        preferred = non_ruby.find do |platform|
+          local_platforms.any? do |local|
+            spec_plat = platform.is_a?(Gem::Platform) ? platform : Gem::Platform.new(platform)
+            local_plat = local.is_a?(Gem::Platform) ? local : Gem::Platform.new(local)
+            Gem::Platform.match_gem?(spec_plat, local_plat)
+          end
+        end
+        return preferred if preferred
+
+        entries.any? { |e| e[2] == "ruby" } ? "ruby" : entries.first[2].to_s
+      end
+
       # Returns the locked version for a gem, if any.
       def locked_version(name)
         v = @locked_specs[name]

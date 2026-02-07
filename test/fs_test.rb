@@ -74,6 +74,17 @@ class FSTest < Minitest::Test
     end
   end
 
+  def test_hardlink_tree_raises_when_source_missing
+    with_tmpdir do |dir|
+      src = File.join(dir, "missing")
+      dst = File.join(dir, "dst")
+
+      assert_raises(Errno::ENOENT) do
+        Bundler2::FS.hardlink_tree(src, dst)
+      end
+    end
+  end
+
   def test_atomic_move_handles_cross_device_rename
     with_tmpdir do |dir|
       src = File.join(dir, "src.txt")

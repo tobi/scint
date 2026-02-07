@@ -40,6 +40,11 @@ class LinkerTest < Minitest::Test
       assert File.exist?(binstub)
       assert_equal true, File.executable?(binstub)
       assert_includes File.read(binstub), "Gem.bin_path"
+
+      bundle_binstub = File.join(bundle_path, "bin", "rackup")
+      assert File.exist?(bundle_binstub)
+      assert_equal true, File.executable?(bundle_binstub)
+      assert_includes File.read(bundle_binstub), "exec(File.expand_path"
     end
   end
 
@@ -53,12 +58,16 @@ class LinkerTest < Minitest::Test
       ruby_dir = ruby_bundle_dir(bundle_path)
       spec_dir = File.join(ruby_dir, "specifications")
       bin_dir = File.join(ruby_dir, "bin")
+      bundle_bin_dir = File.join(bundle_path, "bin")
       FileUtils.mkdir_p(spec_dir)
       FileUtils.mkdir_p(bin_dir)
+      FileUtils.mkdir_p(bundle_bin_dir)
       spec_path = File.join(spec_dir, "rack-2.2.8.gemspec")
       bin_path = File.join(bin_dir, "rackup")
+      bundle_bin_path = File.join(bundle_bin_dir, "rackup")
       File.write(spec_path, "existing spec")
       File.write(bin_path, "existing bin")
+      File.write(bundle_bin_path, "existing bundle bin")
 
       spec = fake_spec(name: "rack", version: "2.2.8")
       gemspec = Gem::Specification.new do |s|
@@ -74,6 +83,7 @@ class LinkerTest < Minitest::Test
 
       assert_equal "existing spec", File.read(spec_path)
       assert_equal "existing bin", File.read(bin_path)
+      assert_equal "existing bundle bin", File.read(bundle_bin_path)
     end
   end
 
@@ -138,6 +148,39 @@ class LinkerTest < Minitest::Test
       binstub = File.join(ruby_bundle_dir(bundle_path), "bin", "demo-exe")
       assert File.exist?(binstub)
       assert_equal true, File.executable?(binstub)
+    end
+  end
+
+  def test_link_detects_executable_files_when_gemspec_has_none
+    with_tmpdir do |dir|
+      bundle_path = File.join(dir, ".bundle")
+      extracted = File.join(dir, "cache", "rake-13.3.1")
+      FileUtils.mkdir_p(File.join(extracted, "lib"))
+      FileUtils.mkdir_p(File.join(extracted, "exe"))
+      File.write(File.join(extracted, "lib", "rake.rb"), "module Rake; end\n")
+      File.write(File.join(extracted, "exe", "rake"), "#!/usr/bin/env ruby\n")
+
+      spec = fake_spec(name: "rake", version: "13.3.1")
+      gemspec = Gem::Specification.new do |s|
+        s.name = "rake"
+        s.version = Gem::Version.new("13.3.1")
+        s.authors = ["a"]
+        s.summary = "rake"
+        s.executables = []
+      end
+      prepared = Prepared.new(spec: spec, extracted_path: extracted, gemspec: gemspec, from_cache: true)
+
+      Bundler2::Installer::Linker.link(prepared, bundle_path)
+
+      ruby_stub = File.join(ruby_bundle_dir(bundle_path), "bin", "rake")
+      bundle_stub = File.join(bundle_path, "bin", "rake")
+      assert File.exist?(ruby_stub)
+      assert File.exist?(bundle_stub)
+
+      spec_path = File.join(ruby_bundle_dir(bundle_path), "specifications", "rake-13.3.1.gemspec")
+      spec_content = File.read(spec_path)
+      assert_includes spec_content, "s.bindir = \"exe\""
+      assert_includes spec_content, "s.executables = [\"rake\""
     end
   end
 end

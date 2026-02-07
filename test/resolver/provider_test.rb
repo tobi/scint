@@ -76,6 +76,18 @@ class ProviderTest < Minitest::Test
     assert_nil provider.locked_version("rails")
   end
 
+  def test_preferred_platform_for_prefers_local_binary_variant
+    provider = provider_with({
+      "nokogiri" => [
+        ["nokogiri", "1.19.0", "ruby", {}, {}],
+        ["nokogiri", "1.19.0", "arm64-darwin", {}, {}],
+      ],
+    }, platforms: ["ruby", "arm64-darwin-25"])
+
+    platform = provider.preferred_platform_for("nokogiri", Gem::Version.new("1.19.0"))
+    assert_equal "arm64-darwin", platform
+  end
+
   def test_prefetch_populates_internal_info_cache
     client = FakeIndexClient.new("rack" => [["rack", "2.2.8", "ruby", {}, {}]])
     provider = Bundler2::Resolver::Provider.new(client)

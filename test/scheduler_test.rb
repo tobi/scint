@@ -2,6 +2,7 @@
 
 require_relative "test_helper"
 require "bundler2/scheduler"
+require "timeout"
 
 class SchedulerTest < Minitest::Test
   class FakeProgress
@@ -94,6 +95,41 @@ class SchedulerTest < Minitest::Test
 
     waiter.join
     assert_equal true, waiter_done
+  ensure
+    scheduler.shutdown if scheduler
+  end
+
+  def test_wait_all_does_not_hang_when_worker_job_raises_exception
+    scheduler = Bundler2::Scheduler.new(max_workers: 1, progress: FakeProgress.new)
+    scheduler.start
+
+    scheduler.enqueue(:download, "crash", -> { raise Exception, "hard crash" })
+
+    Timeout.timeout(1) { scheduler.wait_all }
+
+    assert_equal 1, scheduler.stats[:failed]
+    assert_equal true, scheduler.errors.any? { |e| e[:name] == "crash" && e[:error].message == "hard crash" }
+  ensure
+    scheduler.shutdown if scheduler
+  end
+
+  def test_fail_fast_aborts_queue_after_first_error
+    scheduler = Bundler2::Scheduler.new(max_workers: 1, progress: FakeProgress.new, fail_fast: true)
+    scheduler.start
+
+    executed = []
+    scheduler.enqueue(:download, "bad", lambda {
+      executed << :bad
+      raise "boom"
+    })
+    scheduler.enqueue(:link, "later", -> { executed << :later })
+
+    Timeout.timeout(1) { scheduler.wait_all }
+
+    assert_equal true, scheduler.aborted?
+    assert_equal true, scheduler.failed?
+    assert_equal [:bad], executed
+    assert_nil scheduler.enqueue(:link, "after-abort", -> { :ok })
   ensure
     scheduler.shutdown if scheduler
   end

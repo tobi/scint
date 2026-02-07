@@ -24,11 +24,13 @@ module Bundler2
 
     # max_workers: hard ceiling (default cpu_count * 2, capped at 50)
     # initial_workers: how many threads to start with (default 1 — grow dynamically)
-    def initialize(max_workers: nil, initial_workers: 1, progress: nil)
+    def initialize(max_workers: nil, initial_workers: 1, progress: nil, fail_fast: false)
       @max_workers = [max_workers || Platform.cpu_count * 2, 50].min
       @initial_workers = [[initial_workers, 1].max, @max_workers].min
       @current_workers = @initial_workers
       @progress = progress || Progress.new
+      @fail_fast = fail_fast
+      @aborted = false
 
       @mutex = Thread::Mutex.new
       @cv = Thread::ConditionVariable.new
@@ -66,7 +68,14 @@ module Bundler2
       # Dispatcher thread: pulls from priority queue and feeds the pool
       @dispatcher = Thread.new do
         Thread.current.name = "scheduler-dispatch"
-        dispatch_loop
+        begin
+          dispatch_loop
+        rescue Exception => e
+          $stderr.puts "\n!!! DISPATCHER THREAD CRASHED !!!"
+          $stderr.puts "Exception: #{e.class}: #{e.message}"
+          $stderr.puts e.backtrace.first(10).map { |l| "  #{l}" }.join("\n")
+          raise
+        end
       end
     end
 
@@ -79,6 +88,8 @@ module Bundler2
 
       job = nil
       @mutex.synchronize do
+        return nil if @aborted
+
         id = @next_id += 1
         job = Job.new(
           id: id,
@@ -104,6 +115,7 @@ module Bundler2
         loop do
           pending_of_type = @pending.any? { |j| j.type == type }
           running_of_type = @running.values.any? { |j| j.type == type }
+          break if @aborted
           break unless pending_of_type || running_of_type
           @cv.wait(@mutex, 0.1)
         end
@@ -125,7 +137,7 @@ module Bundler2
     def wait_all
       @mutex.synchronize do
         loop do
-          break if @pending.empty? && @running.empty? && @in_flight_follow_ups == 0
+          break if @running.empty? && @in_flight_follow_ups == 0 && (@pending.empty? || @aborted)
           @cv.wait(@mutex, 0.1)
         end
       end
@@ -205,6 +217,10 @@ module Bundler2
       @mutex.synchronize { !@failed.empty? || !@errors.empty? }
     end
 
+    def aborted?
+      @mutex.synchronize { @aborted }
+    end
+
     private
 
     def dispatch_loop
@@ -214,6 +230,18 @@ module Bundler2
         @mutex.synchronize do
           loop do
             break if @shutting_down
+            break if @aborted && @running.empty?
+            if @aborted
+              @cv.wait(@mutex, 0.05)
+              next
+            end
+
+            # Backpressure: keep at most @current_workers in-flight so a
+            # fail-fast error can still halt most pending work.
+            if @running.size >= @current_workers
+              @cv.wait(@mutex, 0.05)
+              next
+            end
 
             job = pick_ready_job
             break if job
@@ -228,7 +256,7 @@ module Bundler2
           end
         end
 
-        break if @shutting_down && job.nil?
+        break if (@shutting_down || (@aborted && job.nil?)) && job.nil?
         next unless job
 
         @progress.on_start(job.id, job.type, job.name)
@@ -292,13 +320,14 @@ module Bundler2
           job.error = error
           @failed[job.id] = job
           @errors << { job_id: job.id, type: job.type, name: job.name, error: error }
+          @aborted = true if @fail_fast
         else
           job.state = :completed
           @completed[job.id] = job
 
           callbacks = @on_complete_callbacks[job.type].dup
 
-          if follow_up
+          if follow_up && !@aborted
             run_follow_up = true
             @in_flight_follow_ups += 1
           end

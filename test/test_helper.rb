@@ -119,7 +119,7 @@ module Bundler2TestHelpers
     io.string
   end
 
-  def create_fake_gem(path, name:, version:, platform: Gem::Platform::RUBY, files: {})
+  def create_fake_gem(path, name:, version:, platform: Gem::Platform::RUBY, files: {}, require_paths: ["lib"])
     spec = Gem::Specification.new do |s|
       s.name = name
       s.version = Gem::Version.new(version)
@@ -127,7 +127,7 @@ module Bundler2TestHelpers
       s.authors = ["bundler2-test"]
       s.summary = "test gem"
       s.files = files.keys
-      s.require_paths = ["lib"]
+      s.require_paths = require_paths
     end
 
     metadata_gz = gzip(spec.to_yaml)

@@ -220,16 +220,17 @@ module Bundler2
         name = package.name
         deps = @provider.dependencies_for(name, version)
         dep_list = deps.map { |n, r| { name: n, version_reqs: [r.to_s] } }
+        platform = @provider.preferred_platform_for(name, version)
 
         source = @provider.source_uri_for(name)
 
         Bundler2::ResolvedSpec.new(
           name: name,
           version: version.to_s,
-          platform: "ruby",
+          platform: platform,
           dependencies: dep_list,
           source: source,
-          has_extensions: @provider.has_extensions?(name, version),
+          has_extensions: (platform == "ruby") && @provider.has_extensions?(name, version),
           remote_uri: nil,
           checksum: nil,
         )

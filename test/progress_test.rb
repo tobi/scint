@@ -4,7 +4,7 @@ require_relative "test_helper"
 require "bundler2/progress"
 
 class ProgressTest < Minitest::Test
-  def test_summary_counts_completed_and_failed
+  def test_logs_tasks_sequentially_and_summarizes_failures
     out = StringIO.new
     progress = Bundler2::Progress.new(output: out)
 
@@ -17,7 +17,8 @@ class ProgressTest < Minitest::Test
     progress.on_fail(2, :download, "bad", StandardError.new("boom"))
 
     assert_equal "1 gems installed, 1 failed", progress.summary
-    assert_includes out.string, "Installed rack"
-    assert_includes out.string, "FAILED bad: boom"
+    assert_includes out.string, "[1/1] Linking rack"
+    assert_includes out.string, "[2/2] Downloading bad"
+    assert_includes out.string, "FAILED Downloading bad: boom"
   end
 end

@@ -16,6 +16,10 @@ class PlatformTest < Minitest::Test
     assert_equal true, Bundler2::Platform.match_platform?(Bundler2::Platform.local_platform.to_s)
   end
 
+  def test_gem_arch_matches_rubygems_platform_string
+    assert_equal Bundler2::Platform.local_platform.to_s, Bundler2::Platform.gem_arch
+  end
+
   def test_os_predicates_are_boolean
     assert_includes [true, false], Bundler2::Platform.windows?
     assert_includes [true, false], Bundler2::Platform.macos?

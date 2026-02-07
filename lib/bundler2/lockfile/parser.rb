@@ -41,8 +41,15 @@ module Bundler2
         $
       /x
 
-      def self.parse(lockfile_contents)
-        new(lockfile_contents).parse
+      # Accepts either lockfile contents or a file path.
+      def self.parse(lockfile_or_contents)
+        contents =
+          if lockfile_or_contents.is_a?(String) && File.exist?(lockfile_or_contents)
+            File.read(lockfile_or_contents)
+          else
+            lockfile_or_contents.to_s
+          end
+        new(contents).parse
       end
 
       def initialize(lockfile_contents)

@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+require_relative "extension_builder"
+require_relative "../platform"
+
 module Bundler2
   module Installer
     module Planner
@@ -30,9 +33,15 @@ module Bundler2
       def plan_one(spec, ruby_dir, cache_layout)
         full = cache_layout.full_name(spec)
         gem_path = File.join(ruby_dir, "gems", full)
+        spec_path = File.join(ruby_dir, "specifications", "#{full}.gemspec")
 
-        # Already installed?
-        if Dir.exist?(gem_path)
+        # Already installed? Require both gem files and specification.
+        if Dir.exist?(gem_path) && File.exist?(spec_path)
+          if extension_link_missing?(spec, ruby_dir, cache_layout)
+            extracted = cache_layout.extracted_path(spec)
+            return PlanEntry.new(spec: spec, action: :build_ext, cached_path: extracted, gem_path: gem_path)
+          end
+
           return PlanEntry.new(spec: spec, action: :skip, cached_path: nil, gem_path: gem_path)
         end
 
@@ -48,10 +57,25 @@ module Bundler2
       end
 
       def needs_ext_build?(spec, cache_layout)
-        return false unless spec.respond_to?(:has_extensions) && spec.has_extensions
+        extracted = cache_layout.extracted_path(spec)
+        ExtensionBuilder.buildable_source_dir?(extracted)
+      end
 
-        ext_dir = cache_layout.ext_path(spec)
-        !Dir.exist?(ext_dir)
+      def extension_link_missing?(spec, ruby_dir, cache_layout)
+        extracted = cache_layout.extracted_path(spec)
+        return false unless Dir.exist?(extracted)
+        return false unless ExtensionBuilder.buildable_source_dir?(extracted)
+
+        full = cache_layout.full_name(spec)
+        ext_install_dir = File.join(
+          ruby_dir,
+          "extensions",
+          Platform.gem_arch,
+          Platform.extension_api_version,
+          full,
+        )
+
+        !Dir.exist?(ext_install_dir)
       end
 
       def ruby_install_dir(bundle_path)
@@ -65,7 +89,8 @@ module Bundler2
         0
       end
 
-      private_class_method :plan_one, :needs_ext_build?, :ruby_install_dir, :estimated_size
+      private_class_method :plan_one, :needs_ext_build?, :extension_link_missing?,
+                           :ruby_install_dir, :estimated_size
     end
   end
 end

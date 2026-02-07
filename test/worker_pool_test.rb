@@ -53,7 +53,7 @@ class WorkerPoolTest < Minitest::Test
     pool.stop
     $stderr = old_err
 
-    assert_equal :completed, job_ref[:state]
+    assert_equal :failed, job_ref[:state]
     refute_nil job_ref[:error]
     assert_includes job_ref[:error].message, "callback boom"
   ensure

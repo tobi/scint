@@ -40,8 +40,16 @@ module Bundler2
       RUBY_VERSION
     end
 
+    def extension_api_version
+      ::Gem.extension_api_version
+    end
+
     def arch
       RbConfig::CONFIG["arch"]
+    end
+
+    def gem_arch
+      local_platform.to_s
     end
 
     def os
