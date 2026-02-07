@@ -2,6 +2,7 @@
 
 require_relative "../test_helper"
 require "scint/cli/cache"
+require "scint/cache/prewarm"
 
 class CLICacheTest < Minitest::Test
   def with_captured_io
@@ -91,5 +92,64 @@ class CLICacheTest < Minitest::Test
 
     assert_equal "", out
     assert_includes err, "Unknown cache subcommand"
+  end
+
+  def test_add_requires_inputs
+    out, err = with_captured_io do
+      status = Scint::CLI::Cache.new(["add"]).run
+      assert_equal 1, status
+    end
+
+    assert_equal "", out
+    assert_includes err, "Usage: scint cache add"
+  end
+
+  def test_add_runs_prewarm_and_prints_summary
+    cli = Scint::CLI::Cache.new(["add", "rack"])
+    spec = fake_spec(name: "rack", version: "2.2.8")
+
+    captured_specs = nil
+    fake_prewarm = Object.new
+    fake_prewarm.define_singleton_method(:run) do |specs|
+      captured_specs = specs
+      { warmed: 1, skipped: 0, ignored: 0, failed: 0, failures: [] }
+    end
+
+    cli.stub(:collect_specs_for_add, [spec]) do
+      Scint::Cache::Prewarm.stub(:new, ->(**_) { fake_prewarm }) do
+        out, err = with_captured_io do
+          status = cli.run
+          assert_equal 0, status
+        end
+
+        assert_equal "", err
+        assert_includes out, "Cache add complete: 1 warmed"
+      end
+    end
+
+    assert_equal [spec], captured_specs
+  end
+
+  def test_add_returns_failure_when_prewarm_reports_errors
+    cli = Scint::CLI::Cache.new(["add", "rack"])
+    spec = fake_spec(name: "rack", version: "2.2.8")
+
+    fake_prewarm = Object.new
+    fake_prewarm.define_singleton_method(:run) do |_specs|
+      err = Scint::CacheError.new("boom")
+      { warmed: 0, skipped: 0, ignored: 0, failed: 1, failures: [{ spec: spec, error: err }] }
+    end
+
+    cli.stub(:collect_specs_for_add, [spec]) do
+      Scint::Cache::Prewarm.stub(:new, ->(**_) { fake_prewarm }) do
+        out, err = with_captured_io do
+          status = cli.run
+          assert_equal 1, status
+        end
+
+        assert_includes err, "Cache prewarm failed"
+        assert_includes out, "Cache add: 0 warmed"
+      end
+    end
   end
 end

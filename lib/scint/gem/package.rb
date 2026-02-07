@@ -3,6 +3,7 @@
 require "rubygems/package"
 require "zlib"
 require "stringio"
+require_relative "extractor"
 require_relative "../fs"
 
 module Scint
