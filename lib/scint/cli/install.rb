@@ -116,8 +116,9 @@ module Scint
 
           if to_install.empty?
             elapsed_ms = elapsed_ms_since(start_time)
+            worker_count = scheduler.stats[:workers]
             warn_missing_bundle_gitignore_entry
-            $stdout.puts "\n#{GREEN}#{total_gems}#{RESET} gems installed total#{install_breakdown(cached: cached_gems, updated: updated_gems)}. #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
+            $stdout.puts "\n#{GREEN}#{total_gems}#{RESET} gems installed total#{install_breakdown(cached: cached_gems, updated: updated_gems)}. #{DIM}(#{format_run_footer(elapsed_ms, worker_count)})#{RESET}"
             return 0
           end
 
@@ -151,6 +152,7 @@ module Scint
           end
 
           elapsed_ms = elapsed_ms_since(start_time)
+          worker_count = stats[:workers]
           failed = errors.filter_map { |e| e[:name] }.uniq
           failed_count = failed.size
           failed_count = 1 if failed_count.zero? && stats[:failed] > 0
@@ -159,14 +161,14 @@ module Scint
 
           if has_failures
             warn_missing_bundle_gitignore_entry
-            $stdout.puts "\n#{RED}Bundle failed!#{RESET} #{installed_total}/#{total_gems} gems installed total#{install_breakdown(cached: cached_gems, updated: updated_gems, compiled: compiled_gems, failed: failed_count)}. #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
+            $stdout.puts "\n#{RED}Bundle failed!#{RESET} #{installed_total}/#{total_gems} gems installed total#{install_breakdown(cached: cached_gems, updated: updated_gems, compiled: compiled_gems, failed: failed_count)}. #{DIM}(#{format_run_footer(elapsed_ms, worker_count)})#{RESET}"
             1
           else
             # 10. Write lockfile + runtime config only for successful installs
             write_lockfile(resolved, gemfile)
             write_runtime_config(resolved, bundle_path)
             warn_missing_bundle_gitignore_entry
-            $stdout.puts "\n#{GREEN}#{total_gems}#{RESET} gems installed total#{install_breakdown(cached: cached_gems, updated: updated_gems, compiled: compiled_gems)}. #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
+            $stdout.puts "\n#{GREEN}#{total_gems}#{RESET} gems installed total#{install_breakdown(cached: cached_gems, updated: updated_gems, compiled: compiled_gems)}. #{DIM}(#{format_run_footer(elapsed_ms, worker_count)})#{RESET}"
             0
           end
         ensure
@@ -221,7 +223,7 @@ module Scint
         lib_dest = File.join(gem_dest, "lib")
         unless Dir.exist?(lib_dest)
           FS.mkdir_p(lib_dest)
-          FS.hardlink_tree(scint_root, lib_dest)
+          FS.clone_tree(scint_root, lib_dest)
         end
 
         # Write gemspec
@@ -635,11 +637,10 @@ module Scint
       end
 
       def compile_slots_for(worker_count)
-        # Keep one worker lane available for non-compile tasks and cap native
-        # compiles at two concurrent jobs.
-        max_compile = [2, Platform.cpu_count].min
-        available = [worker_count - 1, 1].max
-        [max_compile, available].min
+        # Keep native builds serialized to avoid build-env races and reduce
+        # memory/CPU spikes from concurrent extension compiles.
+        _ = worker_count
+        1
       end
 
       def install_task_limits(worker_count, compile_slots)
@@ -878,7 +879,7 @@ module Scint
           next unless Dir.exist?(source_gem_dir)
 
           target_gem_dir = File.join(target_ruby_dir, "gems", full_name)
-          FS.hardlink_tree(source_gem_dir, target_gem_dir) unless Dir.exist?(target_gem_dir)
+          FS.clone_tree(source_gem_dir, target_gem_dir) unless Dir.exist?(target_gem_dir)
 
           target_spec_dir = File.join(target_ruby_dir, "specifications")
           target_spec_path = File.join(target_spec_dir, "#{full_name}.gemspec")
@@ -1132,6 +1133,12 @@ module Scint
         return "#{elapsed_ms}ms" if elapsed_ms <= 1000
 
         "#{(elapsed_ms / 1000.0).round(2)}s"
+      end
+
+      def format_run_footer(elapsed_ms, worker_count)
+        workers = worker_count.to_i
+        noun = workers == 1 ? "worker" : "workers"
+        "#{format_elapsed(elapsed_ms)}, #{workers} #{noun} used"
       end
 
       def warn_missing_bundle_gitignore_entry

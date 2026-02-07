@@ -204,21 +204,21 @@ class CLIInstallTest < Minitest::Test
     install = Scint::CLI::Install.new([])
     compile_slots = install.send(:compile_slots_for, 8)
     limits = install.send(:install_task_limits, 8, compile_slots)
-    assert_equal 2, compile_slots
-    assert_equal 5, limits[:download]
-    assert_equal 5, limits[:extract]
-    assert_equal 5, limits[:link]
-    assert_equal 2, limits[:build_ext]
+    assert_equal 1, compile_slots
+    assert_equal 6, limits[:download]
+    assert_equal 6, limits[:extract]
+    assert_equal 6, limits[:link]
+    assert_equal 1, limits[:build_ext]
     assert_equal 1, limits[:binstub]
   end
 
-  def test_compile_slots_for_caps_parallel_compiles_to_two
+  def test_compile_slots_for_uses_single_compile_lane
     install = Scint::CLI::Install.new([])
 
     assert_equal 1, install.send(:compile_slots_for, 1)
     assert_equal 1, install.send(:compile_slots_for, 2)
-    assert_equal 2, install.send(:compile_slots_for, 3)
-    assert_equal 2, install.send(:compile_slots_for, 20)
+    assert_equal 1, install.send(:compile_slots_for, 3)
+    assert_equal 1, install.send(:compile_slots_for, 20)
   end
 
   def test_enqueue_install_dag_download_entry_schedules_build_after_extract
@@ -264,6 +264,16 @@ class CLIInstallTest < Minitest::Test
     install = Scint::CLI::Install.new([])
     assert_equal "1.0s", install.send(:format_elapsed, 1001)
     assert_equal "2.35s", install.send(:format_elapsed, 2349)
+  end
+
+  def test_format_run_footer_uses_singular_worker_label
+    install = Scint::CLI::Install.new([])
+    assert_equal "999ms, 1 worker used", install.send(:format_run_footer, 999, 1)
+  end
+
+  def test_format_run_footer_uses_plural_worker_label
+    install = Scint::CLI::Install.new([])
+    assert_equal "2.35s, 4 workers used", install.send(:format_run_footer, 2349, 4)
   end
 
   def test_read_require_paths_uses_gemspec_paths
@@ -384,6 +394,106 @@ class CLIInstallTest < Minitest::Test
       resolved = install.send(:lockfile_to_resolved, lockfile)
       assert_equal 1, resolved.size
       assert_equal "arm64-darwin", resolved.first.platform
+    end
+  end
+
+  def test_warm_compiled_cache_is_reused_for_ruby_lockfile_variant
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      source = Scint::Source::Rubygems.new(remotes: ["https://rubygems.org/"])
+      lockfile = Scint::Lockfile::LockfileData.new(
+        specs: [
+          { name: "ffi", version: "1.17.0", platform: "ruby", dependencies: [], source: source, checksum: nil },
+        ],
+        dependencies: {},
+        platforms: [],
+        sources: [source],
+        bundler_version: nil,
+        ruby_version: nil,
+        checksums: nil,
+      )
+
+      install.stub(:preferred_platforms_for_locked_specs, {}) do
+        resolved = install.send(:lockfile_to_resolved, lockfile)
+        spec = resolved.first
+        ext_src = File.join(cache.extracted_path(spec), "ext", "ffi_c")
+        FileUtils.mkdir_p(ext_src)
+        File.write(File.join(ext_src, "extconf.rb"), "")
+        FileUtils.mkdir_p(cache.ext_path(spec))
+        File.write(File.join(cache.ext_path(spec), "gem.build_complete"), "")
+
+        plan = Scint::Installer::Planner.plan(resolved, File.join(dir, ".bundle"), cache)
+        assert_equal :link, plan.first.action
+      end
+    end
+  end
+
+  def test_warm_compiled_cache_is_reused_after_platform_upgrade_from_lockfile
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      source = Scint::Source::Rubygems.new(remotes: ["https://rubygems.org/"])
+      lockfile = Scint::Lockfile::LockfileData.new(
+        specs: [
+          { name: "ffi", version: "1.17.0", platform: "ruby", dependencies: [], source: source, checksum: nil },
+        ],
+        dependencies: {},
+        platforms: [],
+        sources: [source],
+        bundler_version: nil,
+        ruby_version: nil,
+        checksums: nil,
+      )
+
+      install.stub(:preferred_platforms_for_locked_specs, { "ffi-1.17.0" => "arm64-darwin" }) do
+        resolved = install.send(:lockfile_to_resolved, lockfile)
+        spec = resolved.first
+        assert_equal "arm64-darwin", spec.platform
+
+        ext_src = File.join(cache.extracted_path(spec), "ext", "ffi_c")
+        FileUtils.mkdir_p(ext_src)
+        File.write(File.join(ext_src, "extconf.rb"), "")
+        FileUtils.mkdir_p(cache.ext_path(spec))
+        File.write(File.join(cache.ext_path(spec), "gem.build_complete"), "")
+
+        plan = Scint::Installer::Planner.plan(resolved, File.join(dir, ".bundle"), cache)
+        assert_equal :link, plan.first.action
+      end
+    end
+  end
+
+  def test_warm_compiled_cache_is_reused_when_lockfile_platform_is_normalized
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      source = Scint::Source::Rubygems.new(remotes: ["https://rubygems.org/"])
+      lockfile = Scint::Lockfile::LockfileData.new(
+        specs: [
+          { name: "ffi", version: "1.17.0", platform: "arm64-darwin-24", dependencies: [], source: source, checksum: nil },
+        ],
+        dependencies: {},
+        platforms: [],
+        sources: [source],
+        bundler_version: nil,
+        ruby_version: nil,
+        checksums: nil,
+      )
+
+      install.stub(:preferred_platforms_for_locked_specs, { "ffi-1.17.0" => "arm64-darwin" }) do
+        resolved = install.send(:lockfile_to_resolved, lockfile)
+        spec = resolved.first
+        assert_equal "arm64-darwin", spec.platform
+
+        ext_src = File.join(cache.extracted_path(spec), "ext", "ffi_c")
+        FileUtils.mkdir_p(ext_src)
+        File.write(File.join(ext_src, "extconf.rb"), "")
+        FileUtils.mkdir_p(cache.ext_path(spec))
+        File.write(File.join(cache.ext_path(spec), "gem.build_complete"), "")
+
+        plan = Scint::Installer::Planner.plan(resolved, File.join(dir, ".bundle"), cache)
+        assert_equal :link, plan.first.action
+      end
     end
   end
 
