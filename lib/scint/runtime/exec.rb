@@ -16,7 +16,7 @@ module Scint
       #
       # command: the program to run (e.g. "rails")
       # args:    array of arguments
-      # lock_path: path to .scint/scint.lock.marshal
+      # lock_path: path to .bundle/scint.lock.marshal
       def exec(command, args, lock_path)
         original_env = ENV.to_hash
         lock_data = Setup.load_lock(lock_path)

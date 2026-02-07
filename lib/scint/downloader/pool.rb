@@ -13,9 +13,10 @@ module Scint
 
       attr_reader :size
 
-      def initialize(size: nil, on_progress: nil)
+      def initialize(size: nil, on_progress: nil, credentials: nil)
         @size = size || [Platform.cpu_count * 2, 50].min
         @on_progress = on_progress
+        @credentials = credentials
         @fetchers = {} # thread_id => Fetcher
         @fetcher_mutex = Thread::Mutex.new
       end
@@ -95,7 +96,7 @@ module Scint
       def thread_fetcher
         tid = Thread.current.object_id
         @fetcher_mutex.synchronize do
-          @fetchers[tid] ||= Fetcher.new
+          @fetchers[tid] ||= Fetcher.new(credentials: @credentials)
         end
       end
 

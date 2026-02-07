@@ -60,7 +60,7 @@ module Bundler
     end
 
     def bundle_path
-      root.join(".scint")
+      root.join(".bundle")
     end
 
     def load
@@ -140,13 +140,13 @@ module Bundler
 
       gemfile = ENV["BUNDLE_GEMFILE"]
       if gemfile && !gemfile.empty?
-        candidate = File.join(File.dirname(gemfile), ".scint", RUNTIME_LOCK)
+        candidate = File.join(File.dirname(gemfile), ".bundle", RUNTIME_LOCK)
         return candidate if File.exist?(candidate)
       end
 
       dir = Dir.pwd
       loop do
-        candidate = File.join(dir, ".scint", RUNTIME_LOCK)
+        candidate = File.join(dir, ".bundle", RUNTIME_LOCK)
         return candidate if File.exist?(candidate)
 
         parent = File.dirname(dir)

@@ -8,7 +8,7 @@ class BundlerShimTest < Minitest::Test
   def test_bundler_setup_and_require_use_scint_runtime_lock
     with_tmpdir do |dir|
       project_dir = File.join(dir, "app")
-      bundle_dir = File.join(project_dir, ".scint")
+      bundle_dir = File.join(project_dir, ".bundle")
       lock_path = File.join(bundle_dir, "scint.lock.marshal")
       gem_lib = File.join(project_dir, "vendor", "my_gem", "lib")
       gemfile_path = File.join(project_dir, "Gemfile")
@@ -46,7 +46,7 @@ class BundlerShimTest < Minitest::Test
   def test_bundler_original_env_and_unbundled_env_are_available
     with_tmpdir do |dir|
       project_dir = File.join(dir, "app")
-      bundle_dir = File.join(project_dir, ".scint")
+      bundle_dir = File.join(project_dir, ".bundle")
       lock_path = File.join(bundle_dir, "scint.lock.marshal")
       gemfile_path = File.join(project_dir, "Gemfile")
 

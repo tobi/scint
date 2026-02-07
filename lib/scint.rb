@@ -3,6 +3,16 @@
 module Scint
   VERSION = "0.1.0"
 
+  # Color support: respects NO_COLOR (https://no-color.org) and TERM=dumb.
+  COLOR = !ENV.key?("NO_COLOR") && ENV["TERM"] != "dumb" && $stderr.tty?
+
+  GREEN  = COLOR ? "\e[32m" : ""
+  RED    = COLOR ? "\e[31m" : ""
+  YELLOW = COLOR ? "\e[33m" : ""
+  BOLD   = COLOR ? "\e[1m"  : ""
+  DIM    = COLOR ? "\e[2m"  : ""
+  RESET  = COLOR ? "\e[0m"  : ""
+
   # XDG-based cache root
   def self.cache_root
     @cache_root ||= File.join(

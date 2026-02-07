@@ -26,7 +26,7 @@ class CLIExecTest < Minitest::Test
     with_tmpdir do |dir|
       root = File.join(dir, "project")
       nested = File.join(root, "a", "b")
-      lock_dir = File.join(root, ".scint")
+      lock_dir = File.join(root, ".bundle")
       lock_path = File.join(lock_dir, Scint::CLI::Exec::RUNTIME_LOCK)
 
       FileUtils.mkdir_p(nested)
@@ -54,7 +54,7 @@ class CLIExecTest < Minitest::Test
     with_tmpdir do |dir|
       root = File.join(dir, "project")
       nested = File.join(root, "a", "b")
-      bundle_dir = File.join(root, ".scint")
+      bundle_dir = File.join(root, ".bundle")
       ruby_dir = ruby_bundle_dir(bundle_dir)
       specs_dir = File.join(ruby_dir, "specifications")
       gems_dir = File.join(ruby_dir, "gems")
@@ -85,7 +85,7 @@ class CLIExecTest < Minitest::Test
         end
       end
 
-      rebuilt_path = File.join(root, ".scint", Scint::CLI::Exec::RUNTIME_LOCK)
+      rebuilt_path = File.join(root, ".bundle", Scint::CLI::Exec::RUNTIME_LOCK)
       assert_equal File.realpath(rebuilt_path), File.realpath(called[2])
       assert File.exist?(rebuilt_path)
 
@@ -99,7 +99,7 @@ class CLIExecTest < Minitest::Test
     with_tmpdir do |dir|
       root = File.join(dir, "project")
       nested = File.join(root, "a", "b")
-      bundle_dir = File.join(root, ".scint")
+      bundle_dir = File.join(root, ".bundle")
       ruby_dir = ruby_bundle_dir(bundle_dir)
       specs_dir = File.join(ruby_dir, "specifications")
       gems_dir = File.join(ruby_dir, "gems")
@@ -137,7 +137,7 @@ class CLIExecTest < Minitest::Test
         end
       end
 
-      rebuilt_path = File.join(root, ".scint", Scint::CLI::Exec::RUNTIME_LOCK)
+      rebuilt_path = File.join(root, ".bundle", Scint::CLI::Exec::RUNTIME_LOCK)
       data = Marshal.load(File.binread(rebuilt_path))
       assert_equal [File.realpath(custom_lib_dir)],
                    data.fetch("concurrent-ruby")[:load_paths].map { |p| File.realpath(p) }
@@ -148,7 +148,7 @@ class CLIExecTest < Minitest::Test
     with_tmpdir do |dir|
       root = File.join(dir, "project")
       nested = File.join(root, "a", "b")
-      bundle_dir = File.join(root, ".scint")
+      bundle_dir = File.join(root, ".bundle")
       ruby_dir = ruby_bundle_dir(bundle_dir)
       specs_dir = File.join(ruby_dir, "specifications")
       gems_dir = File.join(ruby_dir, "gems")
@@ -187,7 +187,7 @@ class CLIExecTest < Minitest::Test
         end
       end
 
-      rebuilt_path = File.join(root, ".scint", Scint::CLI::Exec::RUNTIME_LOCK)
+      rebuilt_path = File.join(root, ".bundle", Scint::CLI::Exec::RUNTIME_LOCK)
       data = Marshal.load(File.binread(rebuilt_path))
       load_paths = data.fetch("concurrent-ruby")[:load_paths].map { |p| File.realpath(p) }
 

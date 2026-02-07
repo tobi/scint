@@ -17,11 +17,12 @@ module Scint
 
       attr_reader :source_uri
 
-      def initialize(source_uri, cache_dir: nil)
+      def initialize(source_uri, cache_dir: nil, credentials: nil)
         @source_uri = source_uri.to_s.chomp("/")
         @uri = URI.parse(@source_uri)
         @cache = Cache.new(cache_dir || default_cache_dir)
         @parser = Parser.new
+        @credentials = credentials
         @mutex = Thread::Mutex.new
         @fetched = {}  # track which endpoints we've already fetched this session
         @connections = Thread::Queue.new
@@ -248,6 +249,7 @@ module Scint
           request["Accept-Encoding"] = ACCEPT_ENCODING
           request["If-None-Match"] = %("#{etag}") if etag
           request["Range"] = "bytes=#{range_start}-" if range_start
+          @credentials&.apply!(request, uri)
 
           conn.request(request)
         ensure

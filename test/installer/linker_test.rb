@@ -8,7 +8,7 @@ class LinkerTest < Minitest::Test
 
   def test_link_hardlinks_files_writes_gemspec_and_binstub
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".scint")
+      bundle_path = File.join(dir, ".bundle")
       extracted = File.join(dir, "cache", "rack-2.2.8")
       FileUtils.mkdir_p(File.join(extracted, "lib"))
       File.write(File.join(extracted, "lib", "rack.rb"), "module Rack; end\n")
@@ -50,7 +50,7 @@ class LinkerTest < Minitest::Test
 
   def test_link_does_not_overwrite_existing_spec_or_binstub
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".scint")
+      bundle_path = File.join(dir, ".bundle")
       extracted = File.join(dir, "cache", "rack-2.2.8")
       FileUtils.mkdir_p(File.join(extracted, "lib"))
       File.write(File.join(extracted, "lib", "rack.rb"), "module Rack; end\n")
@@ -89,7 +89,7 @@ class LinkerTest < Minitest::Test
 
   def test_link_uses_minimal_gemspec_when_none_available
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".scint")
+      bundle_path = File.join(dir, ".bundle")
       extracted = File.join(dir, "cache", "rack-2.2.8")
       FileUtils.mkdir_p(File.join(extracted, "lib"))
       File.write(File.join(extracted, "lib", "rack.rb"), "module Rack; end\n")
@@ -106,7 +106,7 @@ class LinkerTest < Minitest::Test
 
   def test_link_batch_links_multiple_gems
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".scint")
+      bundle_path = File.join(dir, ".bundle")
 
       a_src = File.join(dir, "cache", "a-1.0.0")
       b_src = File.join(dir, "cache", "b-1.0.0")
@@ -130,7 +130,7 @@ class LinkerTest < Minitest::Test
 
   def test_link_extracts_executables_from_hash_gemspec
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".scint")
+      bundle_path = File.join(dir, ".bundle")
       extracted = File.join(dir, "cache", "demo-1.0.0")
       FileUtils.mkdir_p(File.join(extracted, "lib"))
       File.write(File.join(extracted, "lib", "demo.rb"), "module Demo; end\n")
@@ -153,7 +153,7 @@ class LinkerTest < Minitest::Test
 
   def test_link_detects_executable_files_when_gemspec_has_none
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".scint")
+      bundle_path = File.join(dir, ".bundle")
       extracted = File.join(dir, "cache", "rake-13.3.1")
       FileUtils.mkdir_p(File.join(extracted, "lib"))
       FileUtils.mkdir_p(File.join(extracted, "exe"))

@@ -121,7 +121,7 @@ class CLIInstallTest < Minitest::Test
       spec = fake_spec(name: "ffi", version: "1.17.0", has_extensions: true)
       entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
 
-      install.send(:enqueue_link_after_download, scheduler, entry, cache, File.join(dir, ".scint"))
+      install.send(:enqueue_link_after_download, scheduler, entry, cache, File.join(dir, ".bundle"))
       assert_equal :link, scheduler.enqueued.last[:type]
     end
   end
@@ -146,7 +146,7 @@ class CLIInstallTest < Minitest::Test
       FileUtils.mkdir_p(java_ext)
       File.write(File.join(java_ext, "ConcurrentRubyService.java"), "")
 
-      install.send(:enqueue_builds, scheduler, [native_entry, java_entry], cache, File.join(dir, ".scint"))
+      install.send(:enqueue_builds, scheduler, [native_entry, java_entry], cache, File.join(dir, ".bundle"))
 
       types = scheduler.enqueued.map { |e| [e[:type], e[:name]] }
       assert_includes types, [:build_ext, "ffi"]
@@ -210,6 +210,34 @@ class CLIInstallTest < Minitest::Test
     assert_equal "https://rubygems.org/", resolved.first.source
   end
 
+  def test_lockfile_to_resolved_preserves_git_source_objects
+    install = Scint::CLI::Install.new([])
+    source = Scint::Source::Git.new(uri: "https://github.com/acme/demo.git", revision: "abc123")
+    lockfile = Scint::Lockfile::LockfileData.new(
+      specs: [
+        {
+          name: "demo",
+          version: "1.0.0",
+          platform: "ruby",
+          dependencies: [],
+          source: source,
+          checksum: nil,
+        },
+      ],
+      dependencies: {},
+      platforms: [],
+      sources: [source],
+      bundler_version: nil,
+      ruby_version: nil,
+      checksums: nil,
+    )
+
+    resolved = install.send(:lockfile_to_resolved, lockfile)
+    assert_equal Scint::Source::Git, resolved.first.source.class
+    assert_equal "https://github.com/acme/demo.git", resolved.first.source.uri
+    assert_equal "abc123", resolved.first.source.revision
+  end
+
   def test_warn_missing_bundle_gitignore_entry_warns_when_missing
     with_tmpdir do |dir|
       with_cwd(dir) do
@@ -218,7 +246,7 @@ class CLIInstallTest < Minitest::Test
         install = Scint::CLI::Install.new([])
         with_captured_stderr do |err|
           install.send(:warn_missing_bundle_gitignore_entry)
-          assert_includes err.string, "does not ignore .scint"
+          assert_includes err.string, "does not ignore .bundle"
         end
       end
     end
@@ -227,7 +255,7 @@ class CLIInstallTest < Minitest::Test
   def test_warn_missing_bundle_gitignore_entry_noop_when_bundle_present
     with_tmpdir do |dir|
       with_cwd(dir) do
-        File.write(".gitignore", "tmp/\n.scint/\n")
+        File.write(".gitignore", "tmp/\n.bundle/\n")
 
         install = Scint::CLI::Install.new([])
         with_captured_stderr do |err|
@@ -235,6 +263,69 @@ class CLIInstallTest < Minitest::Test
           assert_equal "", err.string
         end
       end
+    end
+  end
+
+  def test_parse_options_accepts_force_flag
+    install = Scint::CLI::Install.new(["--force"])
+    assert_equal true, install.instance_variable_get(:@force)
+  end
+
+  def test_force_purge_artifacts_removes_cache_and_local_bundle_entries
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new(["--force"])
+      bundle_path = File.join(dir, ".bundle")
+      ruby_dir = ruby_bundle_dir(bundle_path)
+
+      spec = fake_spec(name: "rack", version: "2.2.8")
+      full = cache.full_name(spec)
+
+      inbound = cache.inbound_path(spec)
+      extracted = cache.extracted_path(spec)
+      spec_cache = cache.spec_cache_path(spec)
+      global_ext = cache.ext_path(spec)
+      local_gem = File.join(ruby_dir, "gems", full)
+      local_spec = File.join(ruby_dir, "specifications", "#{full}.gemspec")
+      local_ext = File.join(ruby_dir, "extensions",
+                            Scint::Platform.gem_arch, Scint::Platform.extension_api_version, full)
+      bundle_bin = File.join(bundle_path, "bin")
+      ruby_bin = File.join(ruby_dir, "bin")
+      runtime_lock = File.join(bundle_path, Scint::CLI::Install::RUNTIME_LOCK)
+
+      FileUtils.mkdir_p(File.dirname(inbound))
+      File.write(inbound, "gem-bytes")
+      FileUtils.mkdir_p(extracted)
+      File.write(File.join(extracted, "x"), "x")
+      FileUtils.mkdir_p(File.dirname(spec_cache))
+      File.write(spec_cache, "meta")
+      FileUtils.mkdir_p(global_ext)
+      File.write(File.join(global_ext, "gem.build_complete"), "")
+      FileUtils.mkdir_p(local_gem)
+      File.write(File.join(local_gem, "rack.rb"), "")
+      FileUtils.mkdir_p(File.dirname(local_spec))
+      File.write(local_spec, "Gem::Specification.new")
+      FileUtils.mkdir_p(local_ext)
+      File.write(File.join(local_ext, "rack_ext.so"), "bin")
+      FileUtils.mkdir_p(bundle_bin)
+      File.write(File.join(bundle_bin, "rackup"), "")
+      FileUtils.mkdir_p(ruby_bin)
+      File.write(File.join(ruby_bin, "rackup"), "")
+      FileUtils.mkdir_p(bundle_path)
+      File.write(runtime_lock, "lock")
+
+      install.send(:force_purge_artifacts, [spec], bundle_path, cache)
+
+      refute File.exist?(inbound)
+      refute Dir.exist?(extracted)
+      refute File.exist?(spec_cache)
+      refute Dir.exist?(global_ext)
+      refute Dir.exist?(local_gem)
+      refute File.exist?(local_spec)
+      refute Dir.exist?(local_ext)
+      refute Dir.exist?(bundle_bin)
+      refute Dir.exist?(ruby_bin)
+      refute File.exist?(runtime_lock)
     end
   end
 end

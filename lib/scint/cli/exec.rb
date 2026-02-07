@@ -36,12 +36,12 @@ module Scint
       private
 
       def find_lock_path
-        # Walk up from cwd looking for .scint/scint.lock.marshal.
+        # Walk up from cwd looking for .bundle/scint.lock.marshal.
         # If missing but Gemfile.lock + installed gems exist, rebuild it.
         dir = Dir.pwd
         loop do
-          bundle_dir = File.join(dir, ".scint")
-          candidate = File.join(dir, ".scint", RUNTIME_LOCK)
+          bundle_dir = File.join(dir, ".bundle")
+          candidate = File.join(dir, ".bundle", RUNTIME_LOCK)
           return candidate if File.exist?(candidate)
 
           rebuilt = rebuild_runtime_lock(dir, bundle_dir, candidate)

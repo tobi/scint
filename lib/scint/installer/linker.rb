@@ -9,9 +9,9 @@ module Scint
     module Linker
       module_function
 
-      # Link a single extracted gem into .scint/ruby/{version}/
+      # Link a single extracted gem into .bundle/ruby/{version}/
       # prepared_gem: PreparedGem struct (spec, extracted_path, gemspec, from_cache)
-      # bundle_path:  root .scint/ directory
+      # bundle_path:  root .bundle/ directory
       def link(prepared_gem, bundle_path)
         ruby_dir = ruby_install_dir(bundle_path)
         spec = prepared_gem.spec

@@ -5,11 +5,11 @@ require "scint/installer/planner"
 require "scint/cache/layout"
 
 class PlannerTest < Minitest::Test
-  Spec = Struct.new(:name, :version, :platform, :has_extensions, :size, keyword_init: true)
+  Spec = Struct.new(:name, :version, :platform, :has_extensions, :size, :source, keyword_init: true)
 
   def test_plan_one_marks_skip_when_already_installed
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".scint")
+      bundle_path = File.join(dir, ".bundle")
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = Spec.new(name: "rack", version: "2.2.8", platform: "ruby", has_extensions: false)
 
@@ -27,7 +27,7 @@ class PlannerTest < Minitest::Test
 
   def test_plan_one_marks_build_ext_when_installed_but_extension_link_missing
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".scint")
+      bundle_path = File.join(dir, ".bundle")
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = Spec.new(name: "bootsnap", version: "1.22.0", platform: "ruby", has_extensions: false)
 
@@ -49,7 +49,7 @@ class PlannerTest < Minitest::Test
 
   def test_plan_one_does_not_skip_when_gemspec_missing
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".scint")
+      bundle_path = File.join(dir, ".bundle")
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = Spec.new(name: "rack", version: "2.2.8", platform: "ruby", has_extensions: false)
 
@@ -63,7 +63,7 @@ class PlannerTest < Minitest::Test
 
   def test_plan_one_marks_link_when_extracted_cache_exists
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".scint")
+      bundle_path = File.join(dir, ".bundle")
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = Spec.new(name: "rack", version: "2.2.8", platform: "ruby", has_extensions: false)
 
@@ -77,7 +77,7 @@ class PlannerTest < Minitest::Test
 
   def test_plan_one_marks_link_when_no_ext_directory_exists
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".scint")
+      bundle_path = File.join(dir, ".bundle")
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = Spec.new(name: "ffi", version: "1.17.0", platform: "ruby", has_extensions: true)
 
@@ -90,7 +90,7 @@ class PlannerTest < Minitest::Test
 
   def test_plan_one_marks_build_ext_when_ext_directory_exists_and_not_cached
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".scint")
+      bundle_path = File.join(dir, ".bundle")
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = Spec.new(name: "ffi", version: "1.17.0", platform: "ruby", has_extensions: true)
 
@@ -105,7 +105,7 @@ class PlannerTest < Minitest::Test
 
   def test_plan_one_marks_build_ext_when_extensions_cached
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".scint")
+      bundle_path = File.join(dir, ".bundle")
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = Spec.new(name: "ffi", version: "1.17.0", platform: "ruby", has_extensions: true)
 
@@ -121,7 +121,7 @@ class PlannerTest < Minitest::Test
 
   def test_plan_one_marks_build_ext_when_native_dir_exists_even_if_flag_false
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".scint")
+      bundle_path = File.join(dir, ".bundle")
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = Spec.new(name: "bootsnap", version: "1.22.0", platform: "ruby", has_extensions: false)
 
@@ -136,7 +136,7 @@ class PlannerTest < Minitest::Test
 
   def test_plan_sorts_downloads_by_estimated_size_before_rest
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".scint")
+      bundle_path = File.join(dir, ".bundle")
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
 
       big = Spec.new(name: "big", version: "1.0.0", platform: "ruby", has_extensions: false, size: 50)
@@ -149,6 +149,54 @@ class PlannerTest < Minitest::Test
 
       assert_equal %i[download download link], entries.map(&:action)
       assert_equal ["big", "small", "cached"], entries.map { |e| e.spec.name }
+    end
+  end
+
+  def test_plan_one_marks_link_for_relative_local_path_source
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        bundle_path = File.join(dir, ".bundle")
+        layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+        local_dir = File.join(dir, "components", "crm")
+        FileUtils.mkdir_p(local_dir)
+
+        spec = Spec.new(
+          name: "crm",
+          version: "0.1.0",
+          platform: "ruby",
+          has_extensions: false,
+          source: "components/crm",
+        )
+
+        entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
+        assert_equal :link, entry.action
+        assert_equal File.realpath(local_dir), File.realpath(entry.cached_path)
+      end
+    end
+  end
+
+  def test_plan_one_marks_build_ext_for_relative_local_path_source_with_extconf
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        bundle_path = File.join(dir, ".bundle")
+        layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+        local_dir = File.join(dir, "components", "native")
+        ext_dir = File.join(local_dir, "ext", "native")
+        FileUtils.mkdir_p(ext_dir)
+        File.write(File.join(ext_dir, "extconf.rb"), "")
+
+        spec = Spec.new(
+          name: "native",
+          version: "0.1.0",
+          platform: "ruby",
+          has_extensions: false,
+          source: "components/native",
+        )
+
+        entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
+        assert_equal :build_ext, entry.action
+        assert_equal File.realpath(local_dir), File.realpath(entry.cached_path)
+      end
     end
   end
 end

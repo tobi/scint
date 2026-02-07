@@ -11,9 +11,10 @@ module Scint
     class Fetcher
       MAX_REDIRECTS = 5
 
-      def initialize
+      def initialize(credentials: nil)
         @connections = {} # "host:port" => Net::HTTP
         @mutex = Thread::Mutex.new
+        @credentials = credentials
       end
 
       # Download a single file from uri to dest_path.
@@ -34,6 +35,7 @@ module Scint
             http = connection_for(current_uri)
             request = Net::HTTP::Get.new(current_uri.request_uri)
             request["Accept-Encoding"] = "identity"
+            @credentials&.apply!(request, current_uri)
 
             response = http.request(request)
 

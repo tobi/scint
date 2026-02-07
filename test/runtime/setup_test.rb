@@ -12,7 +12,7 @@ class RuntimeSetupTest < Minitest::Test
   def test_setup_adds_existing_load_paths_and_sets_bundle_gemfile
     with_tmpdir do |dir|
       project = File.join(dir, "app")
-      bundle_dir = File.join(project, ".scint")
+      bundle_dir = File.join(project, ".bundle")
       lock_path = File.join(bundle_dir, "scint.lock.marshal")
       FileUtils.mkdir_p(bundle_dir)
 
@@ -42,7 +42,7 @@ class RuntimeSetupTest < Minitest::Test
 
   def test_setup_does_not_override_existing_bundle_gemfile
     with_tmpdir do |dir|
-      bundle_dir = File.join(dir, ".scint")
+      bundle_dir = File.join(dir, ".bundle")
       lock_path = File.join(bundle_dir, "scint.lock.marshal")
       FileUtils.mkdir_p(bundle_dir)
       File.binwrite(lock_path, Marshal.dump({}))
@@ -56,7 +56,7 @@ class RuntimeSetupTest < Minitest::Test
 
   def test_setup_leaves_bundle_gemfile_nil_when_gemfile_missing
     with_tmpdir do |dir|
-      bundle_dir = File.join(dir, ".scint")
+      bundle_dir = File.join(dir, ".bundle")
       lock_path = File.join(bundle_dir, "scint.lock.marshal")
       FileUtils.mkdir_p(bundle_dir)
       File.binwrite(lock_path, Marshal.dump({}))

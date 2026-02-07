@@ -56,6 +56,7 @@ module Scint
           --jobs N   Number of parallel workers (default: auto)
           --path P   Install gems to path
           --verbose  Verbose output
+          --force    Reinstall all gems, ignoring cache and local bundle state
       HELP
     end
   end

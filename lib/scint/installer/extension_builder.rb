@@ -12,7 +12,7 @@ module Scint
 
       # Build native extensions for a prepared gem.
       # prepared_gem: PreparedGem struct
-      # bundle_path:  .scint/ root
+      # bundle_path:  .bundle/ root
       # abi_key:      e.g. "ruby-3.3.0-arm64-darwin24" (defaults to Platform.abi_key)
       def build(prepared_gem, bundle_path, cache_layout, abi_key: Platform.abi_key)
         spec = prepared_gem.spec
@@ -90,7 +90,7 @@ module Scint
         elsif File.exist?(File.join(ext_dir, "CMakeLists.txt"))
           compile_cmake(ext_dir, build_dir, install_dir, env)
         elsif File.exist?(File.join(ext_dir, "Rakefile"))
-          compile_rake(ext_dir, build_dir, install_dir, env)
+          compile_rake(ext_dir, build_dir, install_dir, ruby_dir, env)
         else
           raise ExtensionBuildError, "No known build system in #{ext_dir}"
         end
@@ -112,13 +112,41 @@ module Scint
         run_cmd(env, "cmake", "--install", build_dir)
       end
 
-      def compile_rake(ext_dir, build_dir, install_dir, env)
-        run_cmd(env, RbConfig.ruby, "-S", "rake", "compile",
-                chdir: ext_dir)
+      def compile_rake(ext_dir, build_dir, install_dir, ruby_dir, env)
+        rake_exe = find_rake_executable(ruby_dir)
+        begin
+          if rake_exe
+            run_cmd(env, RbConfig.ruby, rake_exe, "compile",
+                    chdir: ext_dir)
+          else
+            run_cmd(env, RbConfig.ruby, "-S", "rake", "compile",
+                    chdir: ext_dir)
+          end
+        rescue ExtensionBuildError => e
+          # Some gems ship a Rakefile but do not expose a compile task.
+          # Treat this as "nothing to build" rather than a hard failure.
+          raise unless e.message.include?("Don't know how to build task 'compile'")
+          return
+        end
         # Copy built artifacts to install_dir
         Dir.glob(File.join(ext_dir, "**", "*.{so,bundle,dll,dylib}")).each do |so|
           FileUtils.cp(so, install_dir)
         end
+      end
+
+      def find_rake_executable(ruby_dir)
+        gems_dir = File.join(ruby_dir, "gems")
+        return nil unless Dir.exist?(gems_dir)
+
+        # Prefer highest installed rake version.
+        rake_dirs = Dir.glob(File.join(gems_dir, "rake-*")).sort.reverse
+        rake_dirs.each do |dir|
+          %w[exe bin].each do |subdir|
+            path = File.join(dir, subdir, "rake")
+            return path if File.file?(path)
+          end
+        end
+        nil
       end
 
       def link_extensions(cached_ext, ruby_dir, spec, abi_key)
@@ -131,10 +159,13 @@ module Scint
       end
 
       def build_env(gem_dir, ruby_dir)
+        ruby_bin = File.join(ruby_dir, "bin")
+        path = [ruby_bin, ENV["PATH"]].compact.reject(&:empty?).join(File::PATH_SEPARATOR)
         {
           "GEM_HOME" => ruby_dir,
           "GEM_PATH" => ruby_dir,
           "MAKEFLAGS" => "-j#{Platform.cpu_count}",
+          "PATH" => path,
           "CFLAGS" => "-I#{RbConfig::CONFIG["rubyhdrdir"]} -I#{RbConfig::CONFIG["rubyarchhdrdir"]}",
         }
       end
@@ -178,7 +209,7 @@ module Scint
 
       private_class_method :find_extension_dirs, :compile_extension,
                            :compile_extconf, :compile_cmake, :compile_rake,
-                           :link_extensions, :build_env, :run_cmd,
+                           :find_rake_executable, :link_extensions, :build_env, :run_cmd,
                            :spec_full_name, :ruby_install_dir
     end
   end

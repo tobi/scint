@@ -30,6 +30,8 @@ require_relative "../installer/extension_builder"
 require_relative "../vendor/pub_grub"
 require_relative "../resolver/provider"
 require_relative "../resolver/resolver"
+require_relative "../credentials"
+require "open3"
 
 module Scint
   module CLI
@@ -41,6 +43,7 @@ module Scint
         @jobs = nil
         @path = nil
         @verbose = false
+        @force = false
         parse_options
       end
 
@@ -48,9 +51,12 @@ module Scint
         start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
         cache = Scint::Cache::Layout.new
-        bundle_path = @path || ENV["BUNDLER_PATH"] || ".scint"
+        bundle_path = @path || ENV["BUNDLER_PATH"] || ".bundle"
         bundle_path = File.expand_path(bundle_path)
         worker_count = @jobs || [Platform.cpu_count * 2, 50].min
+
+        # 0. Build credential store from config files (~/.bundle/config, XDG scint/credentials)
+        @credentials = Credentials.new
 
         # 1. Start the scheduler with 1 worker — scale up dynamically
         scheduler = Scheduler.new(max_workers: worker_count, fail_fast: true)
@@ -60,13 +66,17 @@ module Scint
           # 2. Parse Gemfile
           gemfile = Scint::Gemfile::Parser.parse("Gemfile")
 
+          # Register credentials from Gemfile sources and dependencies
+          @credentials.register_sources(gemfile.sources)
+          @credentials.register_dependencies(gemfile.dependencies)
+
           # Scale workers based on dependency count
           dep_count = gemfile.dependencies.size
           scheduler.scale_workers(dep_count)
 
           # 3. Enqueue index fetches for all sources immediately
           gemfile.sources.each do |source|
-            scheduler.enqueue(:fetch_index, source.to_s,
+            scheduler.enqueue(:fetch_index, source[:uri] || source.to_s,
                               -> { fetch_index(source, cache) })
           end
 
@@ -74,6 +84,7 @@ module Scint
           lockfile = nil
           if File.exist?("Gemfile.lock")
             lockfile = Scint::Lockfile::Parser.parse("Gemfile.lock")
+            @credentials.register_lockfile_sources(lockfile.sources)
           end
 
           # 5. Enqueue git clones for git sources
@@ -88,6 +99,7 @@ module Scint
           scheduler.wait_for(:git_clone)
 
           resolved = resolve(gemfile, lockfile, cache)
+          force_purge_artifacts(resolved, bundle_path, cache) if @force
 
           # 7. Plan: diff resolved vs installed
           plan = Installer::Planner.plan(resolved, bundle_path, cache)
@@ -101,7 +113,7 @@ module Scint
           if to_install.empty?
             elapsed_ms = elapsed_ms_since(start_time)
             warn_missing_bundle_gitignore_entry
-            $stdout.puts "Bundle complete! #{skipped} gems already installed. (#{format_elapsed(elapsed_ms)})"
+            $stdout.puts "\n#{GREEN}Bundle complete!#{RESET} #{skipped} gems already installed. #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
             return 0
           end
 
@@ -140,12 +152,12 @@ module Scint
           errors = scheduler.errors.dup
           stats = scheduler.stats
           if errors.any?
-            $stderr.puts "Some gems failed to install:"
+            $stderr.puts "#{RED}Some gems failed to install:#{RESET}"
             errors.each do |err|
-              $stderr.puts "  #{err[:name]}: #{err[:error].message}"
+              $stderr.puts "  #{BOLD}#{err[:name]}#{RESET}: #{err[:error].message}"
             end
           elsif stats[:failed] > 0
-            $stderr.puts "Warning: #{stats[:failed]} jobs failed but no error details captured"
+            $stderr.puts "#{YELLOW}Warning: #{stats[:failed]} jobs failed but no error details captured#{RESET}"
           end
 
           elapsed_ms = elapsed_ms_since(start_time)
@@ -156,14 +168,14 @@ module Scint
 
           if has_failures
             warn_missing_bundle_gitignore_entry
-            $stdout.puts "Bundle failed! #{installed.size} gems installed, #{failed.size} failed, #{skipped} already up to date. (#{format_elapsed(elapsed_ms)})"
+            $stdout.puts "\n#{RED}Bundle failed!#{RESET} #{installed.size} gems installed, #{RED}#{failed.size} failed#{RESET}, #{skipped} already up to date. #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
             1
           else
             # 10. Write lockfile + runtime config only for successful installs
             write_lockfile(resolved, gemfile)
             write_runtime_config(resolved, bundle_path)
             warn_missing_bundle_gitignore_entry
-            $stdout.puts "Bundle complete! #{installed.size} gems installed, #{skipped} already up to date. (#{format_elapsed(elapsed_ms)})"
+            $stdout.puts "\n#{GREEN}Bundle complete!#{RESET} #{GREEN}#{installed.size}#{RESET} gems installed, #{skipped} already up to date. #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
             0
           end
         ensure
@@ -217,7 +229,7 @@ module Scint
         # Create one Index::Client per unique source URI
         clients = {}
         all_uris.each do |uri|
-          clients[uri] = Index::Client.new(uri)
+          clients[uri] = Index::Client.new(uri, credentials: @credentials)
         end
         default_client = clients[default_uri]
 
@@ -309,11 +321,12 @@ module Scint
 
       def lockfile_to_resolved(lockfile)
         lockfile.specs.map do |ls|
-          source_uri =
-            if ls[:source].respond_to?(:uri)
-              ls[:source].uri.to_s
+          source = ls[:source]
+          source_value =
+            if source.is_a?(Source::Rubygems)
+              source.uri.to_s
             else
-              ls[:source].to_s
+              source
             end
 
           ResolvedSpec.new(
@@ -321,7 +334,7 @@ module Scint
             version: ls[:version],
             platform: ls[:platform],
             dependencies: ls[:dependencies],
-            source: source_uri,
+            source: source_value,
             has_extensions: false,
             remote_uri: nil,
             checksum: ls[:checksum],
@@ -331,9 +344,14 @@ module Scint
 
       def download_gem(entry, cache)
         spec = entry.spec
-        source_uri = spec.source.to_s
+        source = spec.source
+        if git_source?(source)
+          prepare_git_source(entry, cache)
+          return
+        end
+        source_uri = source.to_s
 
-        # Path/git gems are not downloaded from a remote
+        # Path gems are not downloaded from a remote
         return if source_uri.start_with?("/") || !source_uri.start_with?("http")
 
         full_name = spec_full_name(spec)
@@ -345,7 +363,7 @@ module Scint
         FS.mkdir_p(File.dirname(dest_path))
 
         unless File.exist?(dest_path)
-          pool = Downloader::Pool.new(size: 1)
+          pool = Downloader::Pool.new(size: 1, credentials: @credentials)
           pool.download(download_uri, dest_path)
           pool.close
         end
@@ -357,6 +375,56 @@ module Scint
           pkg = GemPkg::Package.new
           result = pkg.extract(dest_path, extracted)
           cache_gemspec(spec, result[:gemspec], cache)
+        end
+      end
+
+      def git_source?(source)
+        return true if source.is_a?(Source::Git)
+
+        source_str = source.to_s
+        source_str.end_with?(".git") || source_str.include?(".git/")
+      end
+
+      def prepare_git_source(entry, cache)
+        spec = entry.spec
+        source = spec.source
+        uri, revision = git_source_ref(source)
+
+        bare_repo = cache.git_path(uri)
+        clone_git_repo(uri, bare_repo) unless Dir.exist?(bare_repo)
+
+        extracted = cache.extracted_path(spec)
+        return if Dir.exist?(extracted)
+
+        tmp = "#{extracted}.#{Process.pid}.#{Thread.current.object_id}.tmp"
+        FileUtils.rm_rf(tmp)
+        FS.mkdir_p(tmp)
+
+        cmd = ["git", "--git-dir", bare_repo, "--work-tree", tmp, "checkout", "-f", revision, "--", "."]
+        _out, err, status = Open3.capture3(*cmd)
+        unless status.success?
+          raise InstallError, "Git checkout failed for #{spec.name} (#{uri}@#{revision}): #{err.to_s.strip}"
+        end
+
+        FS.atomic_move(tmp, extracted)
+      ensure
+        FileUtils.rm_rf(tmp) if defined?(tmp) && tmp && File.exist?(tmp)
+      end
+
+      def git_source_ref(source)
+        if source.is_a?(Source::Git)
+          revision = source.revision || source.ref || source.branch || source.tag || "HEAD"
+          return [source.uri.to_s, revision.to_s]
+        end
+
+        [source.to_s, "HEAD"]
+      end
+
+      def clone_git_repo(uri, bare_repo)
+        FS.mkdir_p(File.dirname(bare_repo))
+        _out, err, status = Open3.capture3("git", "clone", "--bare", uri.to_s, bare_repo)
+        unless status.success?
+          raise InstallError, "Git clone failed for #{uri}: #{err.to_s.strip}"
         end
       end
 
@@ -616,6 +684,31 @@ module Scint
         (elapsed * 1000).round
       end
 
+      def force_purge_artifacts(resolved, bundle_path, cache)
+        ruby_dir = File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
+        ext_root = File.join(ruby_dir, "extensions", Platform.gem_arch, Platform.extension_api_version)
+
+        resolved.each do |spec|
+          full = cache.full_name(spec)
+
+          # Global cache artifacts.
+          FileUtils.rm_f(cache.inbound_path(spec))
+          FileUtils.rm_rf(cache.extracted_path(spec))
+          FileUtils.rm_f(cache.spec_cache_path(spec))
+          FileUtils.rm_rf(cache.ext_path(spec))
+
+          # Local bundle artifacts.
+          FileUtils.rm_rf(File.join(ruby_dir, "gems", full))
+          FileUtils.rm_f(File.join(ruby_dir, "specifications", "#{full}.gemspec"))
+          FileUtils.rm_rf(File.join(ext_root, full))
+        end
+
+        # Binstubs are regenerated from gemspec metadata.
+        FileUtils.rm_rf(File.join(bundle_path, "bin"))
+        FileUtils.rm_rf(File.join(ruby_dir, "bin"))
+        FileUtils.rm_f(File.join(bundle_path, RUNTIME_LOCK))
+      end
+
       def format_elapsed(elapsed_ms)
         return "#{elapsed_ms}ms" if elapsed_ms <= 1000
 
@@ -627,7 +720,7 @@ module Scint
         return unless File.file?(path)
         return if gitignore_has_bundle_entry?(path)
 
-        $stderr.puts "Warning: .gitignore exists but does not ignore .scint (add `.scint/`)."
+        $stderr.puts "#{YELLOW}Warning: .gitignore exists but does not ignore .bundle (add `.bundle/`).#{RESET}"
       end
 
       def gitignore_has_bundle_entry?(path)
@@ -636,7 +729,7 @@ module Scint
           next if entry.empty? || entry.start_with?("#", "!")
 
           normalized = entry.sub(%r{\A\./}, "")
-          return true if normalized.match?(%r{\A(?:\*\*/)?/?\.scint(?:/.*)?\z})
+          return true if normalized.match?(%r{\A(?:\*\*/)?/?\.bundle(?:/.*)?\z})
         end
         false
       rescue StandardError
@@ -655,6 +748,9 @@ module Scint
             i += 2
           when "--verbose"
             @verbose = true
+            i += 1
+          when "--force", "-f"
+            @force = true
             i += 1
           else
             i += 1

@@ -45,6 +45,13 @@ module Scint
           return PlanEntry.new(spec: spec, action: :skip, cached_path: nil, gem_path: gem_path)
         end
 
+        # Local path sources are linked directly from their source tree.
+        local_source = local_source_path(spec)
+        if local_source
+          action = ExtensionBuilder.buildable_source_dir?(local_source) ? :build_ext : :link
+          return PlanEntry.new(spec: spec, action: action, cached_path: local_source, gem_path: gem_path)
+        end
+
         # Extracted in global cache?
         extracted = cache_layout.extracted_path(spec)
         if Dir.exist?(extracted)
@@ -89,8 +96,33 @@ module Scint
         0
       end
 
+      def local_source_path(spec)
+        source =
+          if spec.respond_to?(:source)
+            spec.source
+          else
+            spec[:source]
+          end
+        return nil unless source
+
+        source_str =
+          if source.respond_to?(:path)
+            source.path.to_s
+          elsif source.respond_to?(:uri) && source.class.name.end_with?("::Path")
+            source.uri.to_s
+          else
+            source.to_s
+          end
+        return nil if source_str.empty?
+        return nil if source_str.start_with?("http://", "https://")
+        return nil if source_str.end_with?(".git") || source_str.include?(".git/")
+
+        absolute = File.expand_path(source_str, Dir.pwd)
+        Dir.exist?(absolute) ? absolute : nil
+      end
+
       private_class_method :plan_one, :needs_ext_build?, :extension_link_missing?,
-                           :ruby_install_dir, :estimated_size
+                           :ruby_install_dir, :estimated_size, :local_source_path
     end
   end
 end

@@ -9,7 +9,7 @@ class ExtensionBuilderTest < Minitest::Test
 
   def test_build_reuses_cached_extensions_without_compiling
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".scint")
+      bundle_path = File.join(dir, ".bundle")
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = fake_spec(name: "ffi", version: "1.17.0")
       prepared = Prepared.new(spec: spec, extracted_path: File.join(dir, "src"), gemspec: nil, from_cache: true)
@@ -40,7 +40,7 @@ class ExtensionBuilderTest < Minitest::Test
 
   def test_build_raises_when_no_extension_directories_exist
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".scint")
+      bundle_path = File.join(dir, ".bundle")
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       extracted = File.join(dir, "extracted")
       FileUtils.mkdir_p(extracted)
@@ -85,12 +85,12 @@ class ExtensionBuilderTest < Minitest::Test
   end
 
   def test_build_env_sets_expected_keys
-    env = Scint::Installer::ExtensionBuilder.send(:build_env, "/tmp/src", "/tmp/.scint/ruby/3.4.0")
+    env = Scint::Installer::ExtensionBuilder.send(:build_env, "/tmp/src", "/tmp/.bundle/ruby/3.4.0")
 
     assert env.key?("MAKEFLAGS")
     assert env.key?("CFLAGS")
-    assert_equal "/tmp/.scint/ruby/3.4.0", env["GEM_HOME"]
-    assert_equal "/tmp/.scint/ruby/3.4.0", env["GEM_PATH"]
+    assert_equal "/tmp/.bundle/ruby/3.4.0", env["GEM_HOME"]
+    assert_equal "/tmp/.bundle/ruby/3.4.0", env["GEM_PATH"]
   end
 
   def test_buildable_source_dir_false_for_non_native_ext_tree
@@ -118,5 +118,31 @@ class ExtensionBuilderTest < Minitest::Test
     assert_includes error.message, "exit 12"
     assert_includes error.message, "out line"
     assert_includes error.message, "err line"
+  end
+
+  def test_compile_rake_treats_missing_compile_task_as_noop
+    with_tmpdir do |dir|
+      ext_dir = File.join(dir, "ext")
+      build_dir = File.join(dir, "build")
+      install_dir = File.join(dir, "install")
+      ruby_dir = File.join(dir, ".bundle", "ruby", "3.4.0")
+      FileUtils.mkdir_p(ext_dir)
+      FileUtils.mkdir_p(build_dir)
+      FileUtils.mkdir_p(install_dir)
+      FileUtils.mkdir_p(ruby_dir)
+
+      missing_compile = Scint::ExtensionBuildError.new("rake aborted!\nDon't know how to build task 'compile'")
+      Scint::Installer::ExtensionBuilder.stub(:run_cmd, ->(*_args, **_opts) { raise missing_compile }) do
+        # Should not raise for missing compile task.
+        Scint::Installer::ExtensionBuilder.send(
+          :compile_rake,
+          ext_dir,
+          build_dir,
+          install_dir,
+          ruby_dir,
+          {},
+        )
+      end
+    end
   end
 end

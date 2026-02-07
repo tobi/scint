@@ -32,38 +32,35 @@ class CLICacheTest < Minitest::Test
     end
   end
 
-  def test_list_prints_empty_message_when_cache_missing
+  def test_size_prints_empty_message_when_cache_missing
     with_tmpdir do |dir|
       with_env("XDG_CACHE_HOME", dir) do
         out, _err = with_captured_io do
-          status = Scint::CLI::Cache.new(["list"]).run
+          status = Scint::CLI::Cache.new(["size"]).run
           assert_equal 0, status
         end
 
-        assert_equal "(cache is empty)\n", out
+        assert_equal "0 B (cache is empty)\n", out
       end
     end
   end
 
-  def test_list_shows_entries
+  def test_size_shows_subdir_breakdown
     with_tmpdir do |dir|
       with_env("XDG_CACHE_HOME", dir) do
         root = File.join(dir, "scint")
         inbound = File.join(root, "inbound")
-        marker = File.join(root, "marker.txt")
 
         FileUtils.mkdir_p(inbound)
         File.write(File.join(inbound, "rack-2.2.8.gem"), "gem")
-        File.write(marker, "x")
 
         out, _err = with_captured_io do
-          status = Scint::CLI::Cache.new(["list"]).run
+          status = Scint::CLI::Cache.new(["size"]).run
           assert_equal 0, status
         end
 
         assert_includes out, "inbound"
-        assert_includes out, "marker.txt"
-        assert_includes out, root
+        assert_includes out, "total"
       end
     end
   end
@@ -81,7 +78,7 @@ class CLICacheTest < Minitest::Test
         end
 
         assert_equal [], Dir.children(root)
-        assert_includes out, "Cleared cache: #{root}"
+        assert_includes out, "Cleared 1 entries from #{root}"
       end
     end
   end

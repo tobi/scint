@@ -8,7 +8,7 @@ class RuntimeExecTest < Minitest::Test
   def test_exec_sets_environment_and_invokes_kernel_exec
     with_tmpdir do |dir|
       project = File.join(dir, "app")
-      bundle_dir = File.join(project, ".scint")
+      bundle_dir = File.join(project, ".bundle")
       lock_path = File.join(bundle_dir, "scint.lock.marshal")
       FileUtils.mkdir_p(bundle_dir)
 
@@ -62,7 +62,7 @@ class RuntimeExecTest < Minitest::Test
 
   def test_exec_sets_bundle_gemfile_to_nil_when_project_has_no_gemfile
     with_tmpdir do |dir|
-      bundle_dir = File.join(dir, ".scint")
+      bundle_dir = File.join(dir, ".bundle")
       lock_path = File.join(bundle_dir, "scint.lock.marshal")
       FileUtils.mkdir_p(bundle_dir)
       File.binwrite(lock_path, Marshal.dump({}))
