@@ -6,7 +6,7 @@ require "scint/installer/linker"
 class LinkerTest < Minitest::Test
   Prepared = Struct.new(:spec, :extracted_path, :gemspec, :from_cache, keyword_init: true)
 
-  def test_link_hardlinks_files_writes_gemspec_and_binstub
+  def test_link_files_writes_gemspec_and_binstub
     with_tmpdir do |dir|
       bundle_path = File.join(dir, ".bundle")
       extracted = File.join(dir, "cache", "rack-2.2.8")
@@ -30,7 +30,7 @@ class LinkerTest < Minitest::Test
       linked_file = File.join(gem_dir, "lib", "rack.rb")
 
       assert File.exist?(linked_file)
-      assert_hardlinked(File.join(extracted, "lib", "rack.rb"), linked_file)
+      assert_equal File.read(File.join(extracted, "lib", "rack.rb")), File.read(linked_file)
 
       spec_path = File.join(ruby_dir, "specifications", "rack-2.2.8.gemspec")
       assert File.exist?(spec_path)

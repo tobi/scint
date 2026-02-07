@@ -338,23 +338,19 @@ class ProgressTest < Minitest::Test
     thread&.join(1)
   end
 
-  def test_non_interactive_slow_operation_emit
+  def test_non_interactive_emits_phase_completion
     out = StringIO.new
     progress = Scint::Progress.new(output: out)
 
     progress.on_enqueue(1, :download, "bigfile")
     progress.on_start(1, :download, "bigfile")
 
-    # Backdate the start time to simulate slow operation
-    progress.instance_variable_get(:@job_started_at)[1] =
-      Process.clock_gettime(Process::CLOCK_MONOTONIC) - 2.0
-
     progress.on_complete(1, :download, "bigfile")
 
     text = out.string
     assert_includes text, "Downloading"
     assert_includes text, "bigfile"
-    assert_match(/\d+\.\d{2}s/, text)
+    assert_match(/Downloads 1\/1 in (?:\d+ms|\d+\.\d{2}s)/, text)
   end
 
   def test_stream_active_or_pending_with_pending_jobs
@@ -412,20 +408,19 @@ class ProgressTest < Minitest::Test
     assert_equal false, result
   end
 
-  def test_reserve_phase_detail_space_pads_with_empty_rows
+  def test_phase_rows_for_build_without_tail_has_status_only
     out = FakeTTY.new
     progress = Scint::Progress.new(output: out)
 
-    # Set up state that has 1 detail row but reserved 3
-    progress.instance_variable_get(:@phase_reserved_detail_rows)[:download] = 3
-    progress.instance_variable_get(:@total)[:download] = 5
+    progress.on_enqueue(1, :build_ext, "rack")
+    progress.on_start(1, :build_ext, "rack")
 
-    details = ["row1"]
-    active_jobs = [{ type: :download, name: "gem1" }]
-    rows = progress.send(:reserve_phase_detail_space, :download, details, 5, 0, active_jobs)
+    rows = progress.send(:phase_rows_for, :build_ext, "⠋")
 
-    assert_equal 3, rows.length
-    assert_equal "row1", rows[0]
+    assert_equal 1, rows.length
+    assert_includes rows.first, "Compiling... (0/1)"
+  ensure
+    progress.stop
   end
 
   def test_clear_live_block_locked_moves_cursor_and_clears_lines
@@ -443,10 +438,8 @@ class ProgressTest < Minitest::Test
     text = out.string
     # Should move cursor up by (live_rows - 1) = 2 at the start
     assert_includes text, "\e[2A", "Expected cursor-up escape for 2 lines"
-    # Should clear each line with spaces (overwriting previous content)
-    assert_includes text, "\r#{' ' * 20}", "Expected first line cleared with 20 spaces"
-    assert_includes text, "\r#{' ' * 15}", "Expected second line cleared with 15 spaces"
-    assert_includes text, "\r#{' ' * 10}", "Expected third line cleared with 10 spaces"
+    # Current clear strategy uses EL (Erase in Line) escape.
+    assert_equal 3, text.scan(/\r\e\[K/).length
     # Should end with cursor back at start
     assert_includes text, "\r"
     # live_rows should be reset to 0

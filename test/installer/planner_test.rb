@@ -360,7 +360,7 @@ class PlannerTest < Minitest::Test
         hash_spec = { source: "vendor/hashgem", name: "hashgem", version: "0.1.0" }
 
         result = Scint::Installer::Planner.send(:local_source_path, hash_spec)
-        assert_equal File.expand_path("vendor/hashgem", dir), result
+        assert_equal File.realpath(local_dir), File.realpath(result)
       end
     end
   end
@@ -403,7 +403,7 @@ class PlannerTest < Minitest::Test
         )
 
         result = Scint::Installer::Planner.send(:local_source_path, spec)
-        assert_equal File.expand_path("vendor/urigem", dir), result
+        assert_equal File.realpath(local_dir), File.realpath(result)
       end
     end
   end

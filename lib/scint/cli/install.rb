@@ -572,8 +572,15 @@ module Scint
             FileUtils.rm_rf(tmp)
             FileUtils.mkdir_p(tmp)
 
-            cmd = ["git", "--git-dir", bare_repo, "--work-tree", tmp, "checkout", "-f", resolved_revision, "--", "."]
-            _out, err, status = Open3.capture3(*cmd)
+            _out, err, status = git_capture3(
+              "--git-dir", bare_repo,
+              "--work-tree", tmp,
+              "checkout",
+              "-f",
+              resolved_revision,
+              "--",
+              ".",
+            )
             unless status.success?
               raise InstallError, "Git checkout failed for #{spec.name} (#{uri}@#{resolved_revision}): #{err.to_s.strip}"
             end
@@ -606,15 +613,14 @@ module Scint
 
       def clone_git_repo(uri, bare_repo)
         FS.mkdir_p(File.dirname(bare_repo))
-        _out, err, status = Open3.capture3("git", "clone", "--bare", uri.to_s, bare_repo)
+        _out, err, status = git_capture3("clone", "--bare", uri.to_s, bare_repo)
         unless status.success?
           raise InstallError, "Git clone failed for #{uri}: #{err.to_s.strip}"
         end
       end
 
       def fetch_git_repo(bare_repo)
-        _out, err, status = Open3.capture3(
-          "git",
+        _out, err, status = git_capture3(
           "--git-dir", bare_repo,
           "fetch",
           "--prune",
@@ -628,11 +634,15 @@ module Scint
       end
 
       def resolve_git_revision(bare_repo, revision)
-        out, err, status = Open3.capture3("git", "--git-dir", bare_repo, "rev-parse", "#{revision}^{commit}")
+        out, err, status = git_capture3("--git-dir", bare_repo, "rev-parse", "#{revision}^{commit}")
         unless status.success?
           raise InstallError, "Unable to resolve git revision #{revision.inspect} in #{bare_repo}: #{err.to_s.strip}"
         end
         out.strip
+      end
+
+      def git_capture3(*args)
+        Open3.capture3("git", "-c", "core.fsmonitor=false", *args)
       end
 
       def git_checkout_marker_path(dir)
