@@ -127,6 +127,25 @@ class ExtensionBuilderTest < Minitest::Test
     end
   end
 
+  def test_find_extension_dirs_ignores_nested_cmake_subprojects
+    with_tmpdir do |dir|
+      gem_dir = File.join(dir, "gem")
+      top = File.join(gem_dir, "ext", "cppjieba")
+      nested = File.join(gem_dir, "ext", "cppjieba", "deps", "limonp")
+      sibling = File.join(gem_dir, "ext", "other")
+      [top, nested, sibling].each { |path| FileUtils.mkdir_p(path) }
+
+      File.write(File.join(top, "CMakeLists.txt"), "")
+      File.write(File.join(nested, "CMakeLists.txt"), "")
+      File.write(File.join(sibling, "CMakeLists.txt"), "")
+
+      dirs = Scint::Installer::ExtensionBuilder.send(:find_extension_dirs, gem_dir)
+      assert_includes dirs, top
+      assert_includes dirs, sibling
+      refute_includes dirs, nested
+    end
+  end
+
   def test_build_env_sets_expected_keys
     env = Scint::Installer::ExtensionBuilder.send(:build_env, "/tmp/src", "/tmp/cache/install-env/ruby/3.4.0", 3)
 
@@ -228,20 +247,58 @@ class ExtensionBuilderTest < Minitest::Test
   end
 
   def test_compile_extconf_uses_adaptive_make_jobs
-    calls = []
-    Scint::Installer::ExtensionBuilder.stub(:run_cmd, ->(env, *cmd, **opts) { calls << { env: env, cmd: cmd, opts: opts } }) do
-      Scint::Installer::ExtensionBuilder.send(
-        :compile_extconf,
-        "/tmp/ext",
-        "/tmp/build",
-        "/tmp/install",
-        { "MAKEFLAGS" => "-j5" },
-        5,
-      )
-    end
+    with_tmpdir do |dir|
+      ext_dir = File.join(dir, "ext")
+      build_dir = File.join(dir, "build")
+      install_dir = File.join(dir, "install")
+      FileUtils.mkdir_p(ext_dir)
+      FileUtils.mkdir_p(build_dir)
+      FileUtils.mkdir_p(install_dir)
+      File.write(File.join(ext_dir, "extconf.rb"), "puts 'ok'\n")
 
-    assert_equal 3, calls.size
-    assert_equal ["make", "-j5", "-C", "/tmp/build"], calls[1][:cmd]
+      calls = []
+      Scint::Installer::ExtensionBuilder.stub(:run_cmd, ->(env, *cmd, **opts) { calls << { env: env, cmd: cmd, opts: opts } }) do
+        Scint::Installer::ExtensionBuilder.send(
+          :compile_extconf,
+          ext_dir,
+          build_dir,
+          install_dir,
+          { "MAKEFLAGS" => "-j5" },
+          5,
+        )
+      end
+
+      assert_equal 3, calls.size
+      assert_equal ["make", "-j5", "-C", build_dir], calls[1][:cmd]
+    end
+  end
+
+  def test_compile_extconf_runs_from_cloned_build_tree
+    with_tmpdir do |dir|
+      ext_dir = File.join(dir, "ext")
+      build_dir = File.join(dir, "build")
+      install_dir = File.join(dir, "install")
+      FileUtils.mkdir_p(ext_dir)
+      FileUtils.mkdir_p(build_dir)
+      FileUtils.mkdir_p(install_dir)
+      File.write(File.join(ext_dir, "extconf.rb"), "puts 'ok'\n")
+      FileUtils.mkdir_p(File.join(ext_dir, "src"))
+
+      calls = []
+      Scint::Installer::ExtensionBuilder.stub(:run_cmd, ->(_env, *cmd, **_opts) { calls << cmd }) do
+        Scint::Installer::ExtensionBuilder.send(
+          :compile_extconf,
+          ext_dir,
+          build_dir,
+          install_dir,
+          {},
+          2,
+        )
+      end
+
+      assert File.exist?(File.join(build_dir, "extconf.rb"))
+      assert_equal File.join(build_dir, "extconf.rb"), calls[0][1]
+    end
   end
 
   def test_run_cmd_emits_tail_callback_with_command
@@ -296,6 +353,32 @@ class ExtensionBuilderTest < Minitest::Test
         "native-1.0.0",
       )
       assert Dir.exist?(linked)
+    end
+  end
+
+  def test_build_uses_distinct_build_dirs_for_multiple_extensions
+    with_tmpdir do |dir|
+      bundle_path = File.join(dir, ".bundle")
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      spec = fake_spec(name: "native", version: "1.0.0")
+      extracted = File.join(dir, "src")
+      FileUtils.mkdir_p(extracted)
+      prepared = Prepared.new(spec: spec, extracted_path: extracted, gemspec: nil, from_cache: false)
+      abi_key = "ruby-test-arch"
+
+      ext_dirs = [File.join(extracted, "ext", "a"), File.join(extracted, "ext", "b")]
+      build_dirs = []
+
+      Scint::Installer::ExtensionBuilder.stub(:find_extension_dirs, ->(_src) { ext_dirs }) do
+        Scint::Installer::ExtensionBuilder.stub(:compile_extension, lambda { |_ext, build, *_rest|
+          build_dirs << build
+        }) do
+          assert Scint::Installer::ExtensionBuilder.build(prepared, bundle_path, layout, abi_key: abi_key)
+        end
+      end
+
+      assert_equal 2, build_dirs.size
+      assert_equal 2, build_dirs.uniq.size
     end
   end
 

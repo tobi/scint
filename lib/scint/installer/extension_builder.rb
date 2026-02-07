@@ -32,13 +32,18 @@ module Scint
         raise ExtensionBuildError, "No extension directories found for #{spec.name}" if ext_dirs.empty?
 
         FS.with_tempdir("scint-ext") do |tmpdir|
-          build_dir = File.join(tmpdir, "build")
+          build_root = File.join(tmpdir, "build")
           install_dir = File.join(tmpdir, "install")
-          FS.mkdir_p(build_dir)
+          FS.mkdir_p(build_root)
           FS.mkdir_p(install_dir)
 
-          ext_dirs.each do |ext_dir|
-            compile_extension(ext_dir, build_dir, install_dir, src_dir, spec, build_ruby_dir, compile_slots, output_tail)
+          ext_dirs.each_with_index do |ext_dir, idx|
+            # Keep isolated build trees per extension directory. Some gems
+            # invoke multiple CMake projects under ext/ and CMake caches are
+            # source-tree specific.
+            ext_build_dir = File.join(build_root, idx.to_s)
+            FS.mkdir_p(ext_build_dir)
+            compile_extension(ext_dir, ext_build_dir, install_dir, src_dir, spec, build_ruby_dir, compile_slots, output_tail)
           end
 
           # Write marker
@@ -120,9 +125,18 @@ module Scint
           dirs << File.dirname(path)
         end
 
-        # CMakeLists.txt in ext/
-        Dir.glob(File.join(gem_dir, "ext", "**", "CMakeLists.txt")).each do |path|
-          dir = File.dirname(path)
+        # CMakeLists.txt in ext/. Keep only top-level CMake roots, so vendored
+        # subprojects (e.g. deps/*) are not built standalone.
+        cmake_dirs = Dir.glob(File.join(gem_dir, "ext", "**", "CMakeLists.txt"))
+                        .map { |path| File.dirname(path) }
+                        .uniq
+                        .sort_by { |dir| [dir.length, dir] }
+        cmake_roots = []
+        cmake_dirs.each do |dir|
+          next if cmake_roots.any? { |root| dir.start_with?("#{root}/") }
+          cmake_roots << dir
+        end
+        cmake_roots.each do |dir|
           dirs << dir unless dirs.include?(dir)
         end
 
@@ -152,7 +166,11 @@ module Scint
       end
 
       def compile_extconf(ext_dir, build_dir, install_dir, env, make_jobs, output_tail = nil)
-        run_cmd(env, RbConfig.ruby, File.join(ext_dir, "extconf.rb"),
+        # Build from a cloned source tree so extconf scripts that assume
+        # relative paths (e.g. Dir.chdir("src")) still work out-of-tree.
+        FS.clone_tree(ext_dir, build_dir)
+
+        run_cmd(env, RbConfig.ruby, File.join(build_dir, "extconf.rb"),
                 "--with-opt-dir=#{RbConfig::CONFIG["prefix"]}",
                 chdir: build_dir, output_tail: output_tail)
         run_cmd(env, "make", "-j#{make_jobs}", "-C", build_dir, output_tail: output_tail)
