@@ -79,11 +79,15 @@ class CLITest < Minitest::Test
   end
 
   def test_run_maps_bundler_error_to_status_code
-    _out, err = with_captured_io do
-      status = Scint::CLI.run(["install"])
-      assert_equal 4, status
-    end
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        _out, err = with_captured_io do
+          status = Scint::CLI.run(["install"])
+          assert_equal 4, status
+        end
 
-    assert_includes err, "Error:"
+        assert_includes err, "Error:"
+      end
+    end
   end
 end
