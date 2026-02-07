@@ -12,7 +12,7 @@ module Scint
     # Thread-safe. Uses ETag/Range for efficient updates.
     class Client
       ACCEPT_ENCODING = "gzip"
-      USER_AGENT = "scint/0.1.0"
+      USER_AGENT = "scint/#{Scint::VERSION}"
       DEFAULT_TIMEOUT = 15
 
       attr_reader :source_uri

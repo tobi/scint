@@ -1,0 +1,20 @@
+PATH
+  remote: .
+  specs:
+    scint (0.5.0)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    rake (13.3.1)
+
+PLATFORMS
+  arm64-darwin-25
+  ruby
+
+DEPENDENCIES
+  rake (~> 13.0)
+  scint!
+
+BUNDLED WITH
+   2.6.9
