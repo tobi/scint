@@ -50,8 +50,8 @@ class LockfileWriterTest < Minitest::Test
     assert_includes out, "PLATFORMS\n  ruby\n  x86_64-linux"
     assert_includes out, "DEPENDENCIES\n  nio4r (>= 2.5)\n  rack (~> 2.2)!"
     assert_includes out, "CHECKSUMS"
-    assert_includes out, "RUBY VERSION\n  ruby 3.3.0"
-    refute_includes out, "BUNDLED WITH"
+    assert_includes out, "RUBY VERSION\n   ruby 3.3.0"
+    assert_includes out, "BUNDLED WITH\n   0.1.0"
   end
 
   def test_writer_output_is_parseable_for_core_sections
@@ -174,8 +174,8 @@ class LockfileWriterTest < Minitest::Test
 
     out = Scint::Lockfile::Writer.write(data)
 
-    assert_includes out, "CHECKSUMS\n  rack-2.2.8\n"
-    refute_match(/rack-2\.2\.8 /, out)
+    assert_includes out, "CHECKSUMS\n  rack (2.2.8)\n"
+    refute_match(/rack \(2\.2\.8\) /, out)
   end
 
   def test_writer_spec_with_source_object
@@ -203,5 +203,32 @@ class LockfileWriterTest < Minitest::Test
 
     out = Scint::Lockfile::Writer.write(data)
     assert_includes out, "    rack (2.2.8)"
+  end
+
+  def test_writer_matches_git_sources_when_spec_uri_omits_dot_git
+    git_a = Scint::Source::Git.new(uri: "https://github.com/acme/a.git", revision: "aaa")
+    git_b = Scint::Source::Git.new(uri: "https://github.com/acme/b.git", revision: "bbb")
+
+    data = Scint::Lockfile::LockfileData.new(
+      specs: [
+        { name: "a", version: "1.0.0", platform: "ruby", source: "https://github.com/acme/a", dependencies: [] },
+        { name: "b", version: "1.0.0", platform: "ruby", source: "https://github.com/acme/b", dependencies: [] },
+      ],
+      dependencies: [],
+      platforms: ["ruby"],
+      sources: [git_a, git_b],
+      bundler_version: nil,
+      ruby_version: nil,
+      checksums: nil,
+    )
+
+    out = Scint::Lockfile::Writer.write(data)
+    parsed = Scint::Lockfile::Parser.parse(out)
+
+    a_spec = parsed.specs.find { |spec| spec[:name] == "a" }
+    b_spec = parsed.specs.find { |spec| spec[:name] == "b" }
+
+    assert_equal "https://github.com/acme/a.git", a_spec[:source].uri
+    assert_equal "https://github.com/acme/b.git", b_spec[:source].uri
   end
 end

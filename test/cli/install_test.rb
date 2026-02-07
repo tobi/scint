@@ -1304,6 +1304,118 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
+  def test_write_lockfile_preserves_lockfile_metadata_and_pins
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        install = Scint::CLI::Install.new([])
+        git_source = Scint::Source::Git.new(
+          uri: "https://github.com/demo/gitdep.git",
+          branch: "main",
+          revision: "deadbeef",
+        )
+        ruby_source = Scint::Source::Rubygems.new(remotes: ["https://rubygems.org/"])
+
+        lockfile = Scint::Lockfile::LockfileData.new(
+          specs: [
+            { name: "gitdep", version: "2.0.0", platform: "ruby", dependencies: [], source: git_source, checksum: nil },
+            { name: "rack", version: "2.2.8", platform: "ruby", dependencies: [], source: ruby_source, checksum: nil },
+          ],
+          dependencies: {
+            "gitdep" => { name: "gitdep", version_reqs: [">= 0"], pinned: true },
+            "rack" => { name: "rack", version_reqs: [">= 0"], pinned: false },
+          },
+          platforms: ["ruby", "x86_64-linux", "arm64-darwin-24"],
+          sources: [git_source, ruby_source],
+          bundler_version: "2.5.5",
+          ruby_version: "ruby 3.4.5p0",
+          checksums: { "rack-2.2.8" => ["sha256=abc123"] },
+        )
+
+        resolved = [
+          fake_spec(name: "gitdep", version: "2.0.0", source: "https://github.com/demo/gitdep.git"),
+          fake_spec(name: "rack", version: "2.2.8", source: "https://rubygems.org"),
+        ]
+
+        gemfile = Scint::Gemfile::ParseResult.new(
+          dependencies: [
+            Scint::Gemfile::Dependency.new("gitdep", source_options: { git: "https://github.com/demo/gitdep.git", branch: "main" }),
+            Scint::Gemfile::Dependency.new("rack"),
+          ],
+          sources: [{ type: :rubygems, uri: "https://rubygems.org" }],
+          ruby_version: nil,
+          platforms: [],
+        )
+
+        install.send(:write_lockfile, resolved, gemfile, lockfile)
+        content = File.read("Gemfile.lock")
+
+        assert_includes content, "gitdep!"
+        assert_includes content, "revision: deadbeef"
+        assert_includes content, "PLATFORMS\n  arm64-darwin-24\n  ruby\n  x86_64-linux"
+        assert_includes content, "CHECKSUMS\n  rack (2.2.8) sha256=abc123"
+        assert_includes content, "BUNDLED WITH\n   2.5.5"
+      end
+    end
+  end
+
+  def test_write_lockfile_preserves_existing_multisource_layout_when_resolved_is_subset
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        install = Scint::CLI::Install.new([])
+        git_one = Scint::Source::Git.new(uri: "https://github.com/demo/one.git", revision: "111")
+        git_two = Scint::Source::Git.new(uri: "https://github.com/demo/two.git", revision: "222")
+        ruby_source = Scint::Source::Rubygems.new(remotes: ["https://rubygems.org/"])
+
+        lockfile = Scint::Lockfile::LockfileData.new(
+          specs: [
+            { name: "one", version: "1.0.0", platform: "ruby", dependencies: [], source: git_one, checksum: nil },
+            { name: "two", version: "1.0.0", platform: "ruby", dependencies: [], source: git_two, checksum: nil },
+            { name: "rack", version: "2.2.8", platform: "ruby", dependencies: [], source: ruby_source, checksum: nil },
+            { name: "rack", version: "2.2.8", platform: "x86_64-linux", dependencies: [], source: ruby_source, checksum: nil },
+          ],
+          dependencies: {
+            "one" => { name: "one", version_reqs: [">= 0"], pinned: true },
+            "two" => { name: "two", version_reqs: [">= 0"], pinned: true },
+          },
+          platforms: ["ruby", "x86_64-linux"],
+          sources: [git_one, git_two, ruby_source],
+          bundler_version: "2.5.5",
+          ruby_version: nil,
+          checksums: nil,
+        )
+
+        resolved = [
+          fake_spec(name: "one", version: "1.0.0", source: "https://github.com/demo/one"),
+          fake_spec(name: "two", version: "1.0.0", source: "https://github.com/demo/two"),
+          fake_spec(name: "rack", version: "2.2.8", source: "https://rubygems.org"),
+        ]
+
+        gemfile = Scint::Gemfile::ParseResult.new(
+          dependencies: [
+            Scint::Gemfile::Dependency.new("one", source_options: { git: "https://github.com/demo/one.git" }),
+            Scint::Gemfile::Dependency.new("two", source_options: { git: "https://github.com/demo/two.git" }),
+            Scint::Gemfile::Dependency.new("rack"),
+          ],
+          sources: [{ type: :rubygems, uri: "https://rubygems.org" }],
+          ruby_version: nil,
+          platforms: [],
+        )
+
+        install.send(:write_lockfile, resolved, gemfile, lockfile)
+        parsed = Scint::Lockfile::Parser.parse("Gemfile.lock")
+
+        one_spec = parsed.specs.find { |spec| spec[:name] == "one" }
+        two_spec = parsed.specs.find { |spec| spec[:name] == "two" }
+        rack_variants = parsed.specs.select { |spec| spec[:name] == "rack" }
+
+        assert_equal "https://github.com/demo/one.git", one_spec[:source].uri
+        assert_equal "https://github.com/demo/two.git", two_spec[:source].uri
+        assert_equal 2, rack_variants.size
+        assert_includes parsed.platforms, "x86_64-linux"
+      end
+    end
+  end
+
   # --- write_runtime_config ---
 
   def test_write_runtime_config_creates_marshal_file

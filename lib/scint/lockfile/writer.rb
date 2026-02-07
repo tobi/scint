@@ -6,7 +6,7 @@ module Scint
     # Produces output compatible with stock bundler.
     #
     # Sections in order: source blocks (GEM/GIT/PATH), PLATFORMS,
-    # DEPENDENCIES, CHECKSUMS (if present), RUBY VERSION.
+    # DEPENDENCIES, CHECKSUMS (if present), RUBY VERSION, BUNDLED WITH.
     class Writer
       def self.write(lockfile_data)
         new(lockfile_data).generate
@@ -24,6 +24,7 @@ module Scint
         add_dependencies(out)
         add_checksums(out)
         add_ruby_version(out)
+        add_bundled_with(out)
 
         out
       end
@@ -32,43 +33,73 @@ module Scint
 
       def add_sources(out)
         # Group specs by source, preserving source order.
-        # Specs store source as a URI string; sources are Source objects.
-        # Match by checking if the spec's source URI matches any remote.
         specs_by_source = {}
         @data.sources.each { |s| specs_by_source[s] = [] }
 
         @data.specs.each do |spec|
-          spec_src = spec.is_a?(Hash) ? spec[:source] : spec.source
-          spec_uri = normalize_source_uri(spec_src)
+          target = match_source_for_spec(spec) || @data.sources.first
+          next unless target
 
-          matched = @data.sources.find do |source|
-            if source.respond_to?(:remotes)
-              source.remotes.any? { |r| normalize_source_uri(r) == spec_uri }
-            elsif source.respond_to?(:uri)
-              normalize_source_uri(source.uri) == spec_uri
-            else
-              source == spec_src
-            end
-          end
-
-          target = matched || @data.sources.first
           specs_by_source[target] ||= []
           specs_by_source[target] << spec
         end
 
-        first = true
+        emitted = false
         @data.sources.each do |source|
-          out << "\n" unless first
-          first = false
+          source_specs = specs_by_source[source] || []
+          next if source_specs.empty?
+
+          out << "\n" if emitted
+          emitted = true
 
           out << source.to_lock
-          add_specs(out, specs_by_source[source] || [])
+          add_specs(out, source_specs)
         end
       end
 
-      def normalize_source_uri(uri)
-        s = uri.to_s.chomp("/")
-        s.sub(%r{^https?://}, "").downcase
+      def match_source_for_spec(spec)
+        spec_source = spec.is_a?(Hash) ? spec[:source] : spec.source
+        return nil unless spec_source
+
+        @data.sources.find { |source| source_matches?(source, spec_source) }
+      end
+
+      def source_matches?(source, spec_source)
+        return true if source.equal?(spec_source)
+        return true if source == spec_source
+
+        spec_key = normalize_source_key(spec_source)
+        return false unless spec_key
+
+        if source.respond_to?(:remotes)
+          source.remotes.any? { |remote| normalize_source_key(remote) == spec_key }
+        elsif source.respond_to?(:uri)
+          normalize_source_key(source.uri) == spec_key
+        else
+          normalize_source_key(source) == spec_key
+        end
+      end
+
+      def normalize_source_key(source_ref)
+        raw =
+          if source_ref.respond_to?(:uri)
+            source_ref.uri.to_s
+          elsif source_ref.respond_to?(:path)
+            source_ref.path.to_s
+          else
+            source_ref.to_s
+          end
+        return nil if raw.empty?
+
+        if raw.match?(%r{\Ahttps?://}i)
+          raw = raw.sub(%r{\Ahttps?://}i, "")
+          raw = raw.sub(%r{\.git/?\z}i, "")
+          raw.chomp("/").downcase
+        elsif raw.start_with?("/") || raw.start_with?(".")
+          File.expand_path(raw)
+        else
+          raw.sub(%r{\.git/?\z}i, "").chomp("/").downcase
+        end
       end
 
       def add_specs(out, specs)
@@ -152,19 +183,37 @@ module Scint
         return unless @data.checksums
         out << "\nCHECKSUMS\n"
 
-        @data.checksums.sort.each do |key, values|
+        @data.checksums.each do |key, values|
+          rendered_key = format_checksum_key(key)
           if values && !values.empty?
-            out << "  #{key} #{values.join(",")}\n"
+            out << "  #{rendered_key} #{values.join(",")}\n"
           else
-            out << "  #{key}\n"
+            out << "  #{rendered_key}\n"
           end
         end
+      end
+
+      def format_checksum_key(key)
+        match = key.to_s.match(/\A(.+)-(\d[^-]*)(?:-(.+))?\z/)
+        return key unless match
+
+        name = match[1]
+        version = match[2]
+        platform = match[3]
+        version_str = platform ? "#{version}-#{platform}" : version
+        "#{name} (#{version_str})"
       end
 
       def add_ruby_version(out)
         return unless @data.ruby_version
         out << "\nRUBY VERSION\n"
-        out << "  #{@data.ruby_version}\n"
+        out << "   #{@data.ruby_version}\n"
+      end
+
+      def add_bundled_with(out)
+        return unless @data.bundler_version
+        out << "\nBUNDLED WITH\n"
+        out << "   #{@data.bundler_version}\n"
       end
 
     end

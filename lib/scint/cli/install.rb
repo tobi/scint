@@ -170,7 +170,7 @@ module Scint
             1
           else
             # 10. Write lockfile + runtime config only for successful installs
-            write_lockfile(resolved, gemfile)
+            write_lockfile(resolved, gemfile, lockfile)
             write_runtime_config(resolved, bundle_path)
             warn_missing_bundle_gitignore_entry
             $stdout.puts "\n#{GREEN}#{total_gems}#{RESET} gems installed total#{install_breakdown(cached: cached_gems, updated: updated_gems, compiled: compiled_gems)}. #{DIM}(#{format_run_footer(elapsed_ms, worker_count)})#{RESET}"
@@ -1013,60 +1013,363 @@ module Scint
 
       # --- Lockfile + runtime config ---
 
-      def write_lockfile(resolved, gemfile)
-        sources = []
-
-        # Build source objects for path and git gems
-        gemfile.dependencies.each do |dep|
-          opts = dep.source_options
-          if opts[:path]
-            sources << Source::Path.new(path: opts[:path], name: dep.name)
-          elsif opts[:git]
-            sources << Source::Git.new(
-              uri: opts[:git],
-              branch: opts[:branch],
-              tag: opts[:tag],
-              ref: opts[:ref],
-            )
-          end
-        end
-
-        # Build rubygems sources -- collect all unique URIs
-        rubygems_uris = gemfile.sources
-          .select { |s| s[:type] == :rubygems }
-          .map { |s| s[:uri] }
-          .uniq
-
-        # Group URIs that share specs into one Source::Rubygems each.
-        # The default source gets all remotes that aren't a separate scoped source.
-        scoped_uris = Set.new
-        gemfile.dependencies.each do |dep|
-          src = dep.source_options[:source]
-          scoped_uris << src if src
-        end
-
-        # Each scoped URI gets its own source object
-        scoped_uris.each do |uri|
-          sources << Source::Rubygems.new(remotes: [uri])
-        end
-
-        # Default rubygems source with remaining remotes
-        default_remotes = rubygems_uris.reject { |u| scoped_uris.include?(u) }
-        default_remotes = ["https://rubygems.org"] if default_remotes.empty?
-        sources << Source::Rubygems.new(remotes: default_remotes)
+      def write_lockfile(resolved, gemfile, lockfile = nil)
+        specs, sources, preserved_layout = build_lockfile_specs_and_sources(resolved, gemfile, lockfile)
 
         lockfile_data = Lockfile::LockfileData.new(
-          specs: resolved,
-          dependencies: gemfile.dependencies.map { |d| { name: d.name, version_reqs: d.version_reqs } },
-          platforms: [Platform.local_platform.to_s, "ruby"].uniq,
+          specs: specs,
+          dependencies: build_lockfile_dependencies(gemfile, lockfile),
+          platforms: preserved_layout && lockfile ? Array(lockfile.platforms) : build_lockfile_platforms(specs, lockfile),
           sources: sources,
-          bundler_version: Scint::VERSION,
-          ruby_version: nil,
-          checksums: nil,
+          bundler_version: lockfile&.bundler_version || Scint::VERSION,
+          ruby_version: lockfile&.ruby_version || gemfile.ruby_version,
+          checksums: preserved_layout && lockfile ? lockfile.checksums : build_lockfile_checksums(specs, lockfile),
         )
 
         content = Lockfile::Writer.write(lockfile_data)
         FS.atomic_write("Gemfile.lock", content)
+      end
+
+      def build_lockfile_specs_and_sources(resolved, gemfile, lockfile)
+        resolved_for_lockfile = filter_lockfile_specs(resolved)
+
+        if preserve_existing_lockfile_specs?(resolved_for_lockfile, lockfile)
+          specs = Array(lockfile.specs).map { |spec| normalize_lockfile_spec(spec) }
+          sources = uniq_sources(Array(lockfile.sources))
+          return [specs, sources, true]
+        end
+
+        dependency_sources = dependency_sources_from_gemfile(gemfile, lockfile)
+        existing_sources = Array(lockfile&.sources)
+        candidate_sources = uniq_sources(existing_sources + dependency_sources.values)
+
+        rubygems_uris = collect_lockfile_rubygems_uris(gemfile)
+        if rubygems_uris.empty? && candidate_sources.none? { |src| src.is_a?(Source::Rubygems) }
+          rubygems_uris << "https://rubygems.org"
+        end
+        rubygems_uris.each do |uri|
+          source = find_matching_rubygems_source(candidate_sources, uri)
+          candidate_sources << Source::Rubygems.new(remotes: [uri]) unless source
+        end
+        candidate_sources = uniq_sources(candidate_sources)
+
+        lock_source_by_full, lock_source_by_name_version = lockfile_sources_by_spec_key(lockfile)
+        default_rubygems_source = candidate_sources.find { |src| src.is_a?(Source::Rubygems) }
+
+        specs = resolved_for_lockfile.map do |spec|
+          normalized = normalize_resolved_spec(spec)
+          source = source_for_spec(
+            normalized,
+            dependency_sources: dependency_sources,
+            candidate_sources: candidate_sources,
+            lock_source_by_full: lock_source_by_full,
+            lock_source_by_name_version: lock_source_by_name_version,
+            fallback: default_rubygems_source,
+          )
+          normalized.merge(source: source)
+        end
+
+        sources = uniq_sources(specs.map { |spec| spec[:source] }.compact)
+        if sources.empty?
+          fallback = default_rubygems_source || Source::Rubygems.new(remotes: ["https://rubygems.org"])
+          sources = [fallback]
+          specs.each { |spec| spec[:source] = fallback }
+        end
+
+        [specs, sources, false]
+      end
+
+      def filter_lockfile_specs(specs)
+        specs.reject do |spec|
+          name = spec.is_a?(Hash) ? spec[:name].to_s : spec.name.to_s
+          name == "scint"
+        end
+      end
+
+      def preserve_existing_lockfile_specs?(resolved, lockfile)
+        return false unless lockfile && lockfile.respond_to?(:specs)
+
+        wanted = resolved.map { |spec| [spec.name.to_s, spec.version.to_s] }.uniq
+        return false if wanted.empty?
+
+        available = Set.new
+        Array(lockfile.specs).each do |spec|
+          available << [spec[:name].to_s, spec[:version].to_s]
+        end
+
+        wanted.all? { |tuple| available.include?(tuple) }
+      end
+
+      def normalize_lockfile_spec(spec)
+        if spec.is_a?(Hash)
+          {
+            name: spec[:name],
+            version: spec[:version],
+            platform: spec[:platform] || "ruby",
+            dependencies: spec[:dependencies] || [],
+            source: spec[:source],
+            checksum: spec[:checksum],
+          }
+        else
+          {
+            name: spec.name,
+            version: spec.version,
+            platform: spec.platform || "ruby",
+            dependencies: spec.dependencies || [],
+            source: spec.source,
+            checksum: spec.respond_to?(:checksum) ? spec.checksum : nil,
+          }
+        end
+      end
+
+      def normalize_resolved_spec(spec)
+        if spec.is_a?(Hash)
+          {
+            name: spec[:name],
+            version: spec[:version],
+            platform: spec[:platform] || "ruby",
+            dependencies: spec[:dependencies] || [],
+            source: spec[:source],
+            checksum: spec[:checksum],
+          }
+        else
+          {
+            name: spec.name,
+            version: spec.version,
+            platform: spec.platform || "ruby",
+            dependencies: spec.dependencies || [],
+            source: spec.source,
+            checksum: spec.respond_to?(:checksum) ? spec.checksum : nil,
+          }
+        end
+      end
+
+      def collect_lockfile_rubygems_uris(gemfile)
+        uris = gemfile.sources
+          .select { |src| src[:type] == :rubygems && src[:uri] }
+          .map { |src| src[:uri].to_s }
+
+        gemfile.dependencies.each do |dep|
+          inline = dep.source_options[:source]
+          uris << inline.to_s if inline
+        end
+
+        uris.uniq
+      end
+
+      def dependency_sources_from_gemfile(gemfile, lockfile)
+        existing_sources = Array(lockfile&.sources)
+        out = {}
+
+        gemfile.dependencies.each do |dep|
+          opts = dep.source_options
+
+          source =
+            if opts[:path]
+              find_matching_path_source(existing_sources, opts[:path]) ||
+                Source::Path.new(path: opts[:path], name: dep.name)
+            elsif opts[:git]
+              matched = find_matching_git_source(existing_sources, opts)
+              Source::Git.new(
+                uri: opts[:git],
+                revision: matched&.revision,
+                ref: opts[:ref] || matched&.ref,
+                branch: opts[:branch] || matched&.branch,
+                tag: opts[:tag] || matched&.tag,
+                submodules: opts.fetch(:submodules, matched&.submodules),
+                glob: matched&.glob,
+                name: dep.name,
+              )
+            elsif opts[:source]
+              find_matching_rubygems_source(existing_sources, opts[:source]) ||
+                Source::Rubygems.new(remotes: [opts[:source]])
+            end
+
+          out[dep.name] = source if source
+        end
+
+        out
+      end
+
+      def lockfile_sources_by_spec_key(lockfile)
+        by_full = {}
+        by_name_version = {}
+
+        Array(lockfile&.specs).each do |spec|
+          source = spec[:source]
+          next unless source
+
+          name = spec[:name].to_s
+          version = spec[:version].to_s
+          platform = (spec[:platform] || "ruby").to_s
+
+          by_full[[name, version, platform]] = source
+          by_name_version[[name, version]] ||= source
+        end
+
+        [by_full, by_name_version]
+      end
+
+      def source_for_spec(spec, dependency_sources:, candidate_sources:, lock_source_by_full:, lock_source_by_name_version:, fallback:)
+        key_full = [spec[:name].to_s, spec[:version].to_s, spec[:platform].to_s]
+        locked_source = lock_source_by_full[key_full] || lock_source_by_name_version[key_full[0, 2]]
+        return locked_source if locked_source
+
+        dep_source = dependency_sources[spec[:name].to_s]
+        return dep_source if dep_source
+
+        spec_source = spec[:source]
+        source = find_matching_source(candidate_sources, spec_source)
+        return source if source
+
+        spec_source = spec_source.to_s
+        if git_source?(spec_source)
+          source = Source::Git.new(uri: spec_source, name: spec[:name])
+          candidate_sources << source
+          return source
+        elsif spec_source.start_with?("/") || spec_source.start_with?(".")
+          source = Source::Path.new(path: spec_source, name: spec[:name])
+          candidate_sources << source
+          return source
+        end
+
+        if rubygems_source_uri?(spec_source.to_s)
+          source = Source::Rubygems.new(remotes: [spec_source.to_s])
+          candidate_sources << source
+          return source
+        end
+
+        fallback
+      end
+
+      def find_matching_source(sources, source_ref)
+        return nil if source_ref.nil?
+
+        sources.find do |source|
+          source_matches?(source, source_ref)
+        end
+      end
+
+      def source_matches?(source, source_ref)
+        return true if source.equal?(source_ref)
+        return true if source == source_ref
+
+        source_key = normalize_source_key(source_ref)
+        return false unless source_key
+
+        if source.is_a?(Source::Rubygems)
+          source.remotes.any? { |remote| normalize_source_key(remote) == source_key }
+        elsif source.respond_to?(:uri)
+          normalize_source_key(source.uri) == source_key
+        else
+          normalize_source_key(source) == source_key
+        end
+      end
+
+      def normalize_source_key(source_ref)
+        return nil if source_ref.nil?
+
+        raw =
+          if source_ref.respond_to?(:uri)
+            source_ref.uri.to_s
+          elsif source_ref.respond_to?(:path)
+            source_ref.path.to_s
+          else
+            source_ref.to_s
+          end
+        return nil if raw.empty?
+
+        if raw.match?(%r{\Ahttps?://}i)
+          raw = raw.sub(%r{\Ahttps?://}i, "")
+          raw = raw.sub(%r{\.git/?\z}i, "")
+          raw.chomp("/").downcase
+        elsif raw.start_with?("/") || raw.start_with?(".")
+          File.expand_path(raw)
+        else
+          raw.sub(%r{\.git/?\z}i, "").chomp("/").downcase
+        end
+      end
+
+      def find_matching_rubygems_source(sources, uri)
+        sources.find do |source|
+          source.is_a?(Source::Rubygems) && source.remotes.any? { |remote| source_matches?(remote, uri) }
+        end
+      end
+
+      def find_matching_path_source(sources, path)
+        sources.find { |source| source.is_a?(Source::Path) && source_matches?(source, path) }
+      end
+
+      def find_matching_git_source(sources, opts)
+        candidates = sources.select { |source| source.is_a?(Source::Git) && source_matches?(source, opts[:git]) }
+        return nil if candidates.empty?
+
+        candidates.find { |source| git_source_options_match?(source, opts) } || candidates.first
+      end
+
+      def git_source_options_match?(source, opts)
+        return false if opts[:branch] && source.branch.to_s != opts[:branch].to_s
+        return false if opts[:tag] && source.tag.to_s != opts[:tag].to_s
+        return false if opts[:ref] && source.ref.to_s != opts[:ref].to_s
+
+        true
+      end
+
+      def uniq_sources(sources)
+        out = []
+        sources.each do |source|
+          next unless source
+          out << source unless out.any? { |existing| existing.eql?(source) }
+        end
+        out
+      end
+
+      def build_lockfile_dependencies(gemfile, lockfile)
+        locked = lockfile&.dependencies || {}
+        gemfile.dependencies.map do |dep|
+          locked_dep = locked[dep.name]
+          {
+            name: dep.name,
+            version_reqs: dep.version_reqs,
+            pinned: !!(locked_dep && locked_dep[:pinned]),
+          }
+        end
+      end
+
+      def build_lockfile_platforms(specs, lockfile)
+        platforms = Set.new(Array(lockfile&.platforms))
+        specs.each do |spec|
+          platform = spec[:platform] || "ruby"
+          platforms << platform
+        end
+        platforms << "ruby"
+        platforms.to_a
+      end
+
+      def build_lockfile_checksums(specs, lockfile)
+        existing = lockfile&.checksums
+        checksums = {}
+
+        specs.each do |spec|
+          key = lockfile_spec_checksum_key(spec)
+          checksum = spec[:checksum]
+          if checksum && !Array(checksum).empty?
+            checksums[key] = Array(checksum)
+          elsif existing&.key?(key)
+            checksums[key] = Array(existing[key])
+          end
+        end
+
+        return nil if checksums.empty?
+
+        checksums
+      end
+
+      def lockfile_spec_checksum_key(spec)
+        name = spec[:name]
+        version = spec[:version]
+        platform = spec[:platform] || "ruby"
+        platform == "ruby" ? "#{name}-#{version}" : "#{name}-#{version}-#{platform}"
       end
 
       def write_runtime_config(resolved, bundle_path)
