@@ -18,7 +18,7 @@ module Scint
     }.freeze
     BUILD_TAIL_MAX = 6
     BUILD_TAIL_PREVIEW_LINES = 4
-    RENDER_HZ = 5
+    RENDER_HZ = 10
     RENDER_INTERVAL = 1.0 / RENDER_HZ
     MAX_DETAIL_ROWS_PER_PHASE = 4
     MAX_LINE_LEN = 220
@@ -26,10 +26,9 @@ module Scint
     MAX_PANEL_ROWS = 14
     SLOW_OPERATION_THRESHOLD_SECONDS = 1.0
     SPINNER_FRAMES = %w[⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏].freeze
-    IDLE_MARK = "○".freeze
-    PANEL_PHASE_ORDER = %i[download extract build_ext link].freeze
-    SLOW_OPERATION_TYPES = {
-      fetch_index: true,
+    IDLE_MARK = "•".freeze
+    PANEL_PHASE_ORDER = %i[download extract link build_ext].freeze
+    COMPLETION_LOG_TYPES = {
       download: true,
       extract: true,
       link: true,
@@ -50,6 +49,12 @@ module Scint
       extract: "Extraction",
       link: "Installing",
       build_ext: "Compiling",
+    }.freeze
+    COMPLETION_LABELS = {
+      download: "Downloaded",
+      extract: "Extracted",
+      link: "Installed",
+      build_ext: "Compiled",
     }.freeze
 
     def initialize(output: $stderr)
@@ -76,6 +81,7 @@ module Scint
       @phase_reserved_detail_rows = Hash.new(0)
       @setup_lines_printed = false
       @setup_gap_printed = false
+      @pending_log_lines = []
       @render_stop = false
       @render_thread = nil
     end
@@ -99,8 +105,9 @@ module Scint
 
       @mutex.synchronize do
         begin
+          flush_pending_logs_locked
           mark_completed_phase_elapsed_locked
-          render_live_locked if any_stream_activity?
+          render_live_locked if any_active_stream_jobs?
           if @interactive && @live_rows.positive?
             move_cursor_down(@live_rows - 1)
             @output.print "\r\n"
@@ -128,12 +135,16 @@ module Scint
 
       @mutex.synchronize do
         @active_jobs[job_id] = { type: type, name: name }
-        @job_started_at[job_id] = Process.clock_gettime(Process::CLOCK_MONOTONIC) if slow_operation_type?(type)
+        @job_started_at[job_id] = Process.clock_gettime(Process::CLOCK_MONOTONIC) if completion_log_type?(type)
         @started += 1
         emit_setup_gap_if_needed(type)
         @phase_started_at[type] ||= Process.clock_gettime(Process::CLOCK_MONOTONIC) if stream_type?(type)
-        if @interactive && stream_type?(type)
+        if @interactive
           start_render_thread_locked
+          unless stream_type?(type)
+            clear_live_block_locked
+            emit_setup_or_log_line(type, name)
+          end
         else
           clear_live_block_locked
           emit_setup_or_log_line(type, name)
@@ -147,7 +158,7 @@ module Scint
         active = @active_jobs.delete(job_id)
         @build_tail_by_name.delete(active[:name]) if active
         elapsed = consume_job_elapsed(job_id)
-        emit_slow_operation_locked(type, name, elapsed) if slow_operation?(type, elapsed)
+        emit_task_completion_locked(type, name, elapsed) if @interactive
         if !@interactive || !stream_type?(type)
           emit_phase_completion_locked(type)
         end
@@ -162,10 +173,19 @@ module Scint
         elapsed = consume_job_elapsed(job_id)
         @build_tail_by_name.delete(active[:name]) if active
         @failed[type] += 1
-        emit_slow_operation_locked(type, name, elapsed) if slow_operation?(type, elapsed)
-        clear_live_block_locked
         label = PHASE_LABELS[type] || type.to_s
-        @output.puts "#{RED}FAILED#{RESET} #{label} #{BOLD}#{name}#{RESET}: #{error.message}"
+        failed_timing = if elapsed && elapsed >= SLOW_OPERATION_THRESHOLD_SECONDS
+          " #{DIM}#{format_phase_elapsed(elapsed)}#{RESET}"
+        else
+          ""
+        end
+        failed_line = "#{RED}FAILED#{RESET} #{label} #{BOLD}#{name}#{RESET}: #{error.message}#{failed_timing}"
+        if @interactive
+          queue_log_line_locked(failed_line)
+        else
+          clear_live_block_locked
+          @output.puts failed_line
+        end
         if !@interactive
           emit_phase_completion_locked(type)
         end
@@ -211,8 +231,8 @@ module Scint
       HIDDEN_TYPES[type] == true
     end
 
-    def slow_operation_type?(type)
-      SLOW_OPERATION_TYPES[type] == true
+    def completion_log_type?(type)
+      COMPLETION_LOG_TYPES[type] == true
     end
 
     def consume_job_elapsed(job_id)
@@ -222,29 +242,57 @@ module Scint
       Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
     end
 
-    def slow_operation?(type, elapsed)
-      slow_operation_type?(type) &&
-        elapsed &&
-        elapsed >= SLOW_OPERATION_THRESHOLD_SECONDS
+    def emit_task_completion_locked(type, name, elapsed)
+      return unless completion_log_type?(type)
+
+      label = COMPLETION_LABELS[type] || (PHASE_LABELS[type] || type.to_s)
+      timing = if elapsed && elapsed >= SLOW_OPERATION_THRESHOLD_SECONDS
+        " #{DIM}#{format_phase_elapsed(elapsed)}#{RESET}"
+      else
+        ""
+      end
+      line = "#{GREEN}#{IDLE_MARK}#{RESET} #{DIM}#{label} #{BOLD}#{name}#{RESET}#{timing}"
+
+      queue_log_line_locked(line)
     end
 
-    def emit_slow_operation_locked(type, name, elapsed)
-      label = PHASE_LABELS[type] || type.to_s
-      line = "#{DIM}#{IDLE_MARK} #{label} #{BOLD}#{name}#{RESET} #{DIM}#{format_phase_elapsed(elapsed)}#{RESET}"
+    def queue_log_line_locked(line)
+      @pending_log_lines << line
+    end
 
-      if @interactive
-        clear_live_block_locked
-        @output.print "\r"
-        @output.puts fit_line(line, @render_width)
-        render_live_locked if any_stream_activity?
-      else
-        @output.puts fit_line(line, 180)
+    def flush_pending_logs_locked
+      return if @pending_log_lines.empty?
+
+      lines = @pending_log_lines.dup
+      @pending_log_lines.clear
+      lines.each_with_index do |line, idx|
+        write_scrollback_line_locked(line, flush: idx == lines.length - 1)
       end
+    end
+
+    def write_scrollback_line_locked(line, flush: true)
+      rendered = fit_line(line, @render_width)
+
+      unless @interactive && @live_rows.positive?
+        @output.print "\r"
+        @output.puts rendered
+        @output.flush if flush && @output.respond_to?(:flush)
+        return
+      end
+
+      # Insert one scrollback line above the active block without clearing
+      # existing rows first. This reduces visible flicker during fast updates.
+      move_cursor_up(@live_rows - 1)
+      @output.print "\e[1L"
+      @output.print "\r#{rendered}\e[K\n"
+      move_cursor_down(@live_rows - 1)
+      @output.print "\r"
+      @output.flush if flush && @output.respond_to?(:flush)
     end
 
     def render_live_locked
       return unless @interactive
-      return unless any_stream_activity?
+      return unless any_active_stream_jobs? || any_active_setup_jobs?
 
       mark_completed_phase_elapsed_locked
 
@@ -252,7 +300,11 @@ module Scint
       spinner = SPINNER_FRAMES[@spinner_idx % SPINNER_FRAMES.length]
       @spinner_idx += 1
 
-      lines.concat(phase_lines(spinner))
+      if any_active_stream_jobs?
+        lines.concat(phase_lines(spinner))
+      else
+        lines << "#{GREEN}#{spinner}#{RESET} Processing..."
+      end
       lines = clamp_panel_rows(lines)
 
       redraw_live_block_locked(lines)
@@ -283,7 +335,8 @@ module Scint
     end
 
     def phase_lines(spinner)
-      PANEL_PHASE_ORDER.flat_map do |type|
+      active_types = PANEL_PHASE_ORDER.select { |type| !active_stream_jobs_for(type).empty? }
+      active_types.flat_map do |type|
         phase_rows_for(type, spinner)
       end
     end
@@ -297,69 +350,21 @@ module Scint
       label = PHASE_SUMMARY_LABELS[type] || (PHASE_LABELS[type] || type.to_s)
       line = phase_status_line(type, active, label, completed, total, spinner)
       detail_rows = phase_detail_rows_for(type, active)
-      [line, *reserve_phase_detail_space(type, detail_rows, total, completed, active)]
+      [line, *detail_rows.first(MAX_DETAIL_ROWS_PER_PHASE)]
     end
 
     def phase_status_line(type, active_jobs, label, completed, total, spinner)
       base = "#{label}... (#{completed}/#{total})"
-      if active_jobs.empty?
-        elapsed = @phase_elapsed[type]
-        elapsed_text = elapsed ? " · #{format_phase_elapsed(elapsed)}" : ""
-        "#{DIM}#{IDLE_MARK} #{base}#{elapsed_text}#{RESET}"
-      else
-        name = active_jobs.first[:name]
-        "#{spinner} #{base} · #{BOLD}#{name}#{RESET}"
-      end
+      name = active_jobs.first[:name]
+      "#{GREEN}#{spinner}#{RESET} #{base} · #{BOLD}#{name}#{RESET}"
     end
 
     def phase_detail_rows_for(type, active_jobs)
       return [] if active_jobs.empty?
 
-      if type == :build_ext
-        compile_tail_rows_for(active_jobs.first[:name])
-      else
-        active_rows_for(type, active_jobs)
-      end
-    end
+      return compile_tail_rows_for(active_jobs.first[:name]) if type == :build_ext
 
-    def reserve_phase_detail_space(type, details, total, completed, active_jobs)
-      if phase_complete?(type, total, completed, active_jobs)
-        @phase_reserved_detail_rows[type] = 0
-        return []
-      end
-
-      desired = [details.length, MAX_DETAIL_ROWS_PER_PHASE].min
-      @phase_reserved_detail_rows[type] = [@phase_reserved_detail_rows[type], desired].max
-      reserved = @phase_reserved_detail_rows[type]
-
-      rows = details.first(reserved)
-      while rows.length < reserved
-        rows << "#{DIM}  #{RESET}"
-      end
-      rows
-    end
-
-    def phase_complete?(type, total, completed, active_jobs)
-      return false if total.zero?
-
-      if completed >= total && active_jobs.empty?
-        mark_phase_elapsed_locked(type)
-        return true
-      end
-
-      false
-    end
-
-    def active_rows_for(_type, active_jobs)
-      return [] if active_jobs.empty?
-      if active_jobs.length <= MAX_DETAIL_ROWS_PER_PHASE
-        return active_jobs.map { |job| "  #{BOLD}#{job[:name]}#{RESET}" }
-      end
-
-      rows = active_jobs.first(MAX_DETAIL_ROWS_PER_PHASE - 1).map { |job| "  #{BOLD}#{job[:name]}#{RESET}" }
-      remaining = active_jobs.length - rows.length
-      rows << "#{DIM}  +#{remaining} more#{RESET}"
-      rows
+      []
     end
 
     def compile_tail_rows_for(name)
@@ -375,14 +380,21 @@ module Scint
       @active_jobs.values.select { |job| job[:type] == type }
     end
 
+    def any_active_stream_jobs?
+      STREAM_TYPES.keys.any? { |type| !active_stream_jobs_for(type).empty? }
+    end
+
+    def any_active_setup_jobs?
+      @active_jobs.values.any? { |job| SETUP_TYPES[job[:type]] == true }
+    end
+
     def clear_live_block_locked
       return unless @interactive
       return if @live_rows.zero?
 
       move_cursor_up(@live_rows - 1)
       @live_rows.times do |idx|
-        prev_width = @rendered_widths[idx] || 0
-        @output.print "\r#{' ' * prev_width}"
+        @output.print "\r\e[K"
         @output.print "\n" if idx < (@live_rows - 1)
       end
       move_cursor_up(@live_rows - 1)
@@ -395,7 +407,6 @@ module Scint
     def redraw_live_block_locked(lines)
       hide_cursor_locked
       previous_rows = @live_rows
-      previous_widths = @rendered_widths.dup
 
       move_cursor_up(previous_rows - 1) if previous_rows.positive?
 
@@ -404,12 +415,8 @@ module Scint
 
       max_rows.times do |idx|
         line = idx < lines.length ? fit_line(lines[idx], @render_width) : ""
-        prev_width = previous_widths[idx] || 0
         line_width = visible_width(line)
-        pad_len = prev_width > line_width ? (prev_width - line_width) : 0
-        pad = pad_len.positive? ? (" " * pad_len) : ""
-
-        @output.print "\r#{line}#{pad}"
+        @output.print "\r#{line}\e[K"
         @output.print "\n" if idx < (max_rows - 1)
         new_widths << line_width
       end
@@ -450,7 +457,8 @@ module Scint
           @mutex.synchronize do
             should_stop = @render_stop
             unless should_stop
-              render_live_locked
+              flush_pending_logs_locked
+              render_live_locked if any_active_stream_jobs?
               should_stop = render_done_locked?
             end
           end
@@ -547,7 +555,9 @@ module Scint
     end
 
     def render_done_locked?
-      any_stream_activity? && !stream_active_or_pending?
+      !any_active_stream_jobs? && !any_active_setup_jobs? &&
+        @pending_log_lines.empty? &&
+        (!any_stream_activity? || !stream_active_or_pending?)
     end
 
     def format_phase_elapsed(seconds)

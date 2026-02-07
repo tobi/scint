@@ -37,6 +37,24 @@ class ProgressTest < Minitest::Test
     refute_includes out.string, "[1/1]"
   end
 
+  def test_interactive_mode_shows_processing_spinner_for_setup_only_work
+    out = FakeTTY.new
+    progress = Scint::Progress.new(output: out)
+
+    progress.on_enqueue(1, :fetch_index, "https://rubygems.org")
+    progress.on_start(1, :fetch_index, "https://rubygems.org")
+    progress.instance_variable_get(:@mutex).synchronize do
+      progress.send(:render_live_locked)
+    end
+    progress.on_complete(1, :fetch_index, "https://rubygems.org")
+    progress.stop
+
+    text = out.string
+    assert_includes text, "Fetching index https://rubygems.org"
+    assert_includes text, "Processing..."
+    refute_includes text, "Fetched index https://rubygems.org"
+  end
+
   def test_prints_blank_line_after_setup_before_install_work
     out = StringIO.new
     progress = Scint::Progress.new(output: out)
@@ -103,9 +121,9 @@ class ProgressTest < Minitest::Test
 
     text = out.string
     assert_includes text, "Compiling... (0/1)"
-    assert_includes text, "Compiling... (1/1)"
     assert_includes text, "· rack"
     assert_includes text, "    done"
+    assert_includes text, "• Compiled rack"
     refute_includes text, "Installing gems..."
     refute_includes text, "[1/1] Linking rack"
   end
@@ -146,6 +164,25 @@ class ProgressTest < Minitest::Test
     assert_includes text, "· gem0"
   end
 
+  def test_interactive_mode_renders_compile_after_install_when_both_active
+    out = FakeTTY.new
+    progress = Scint::Progress.new(output: out)
+
+    progress.on_enqueue(1, :link, "rack")
+    progress.on_start(1, :link, "rack")
+    progress.on_enqueue(2, :build_ext, "nokogiri")
+    progress.on_start(2, :build_ext, "nokogiri")
+    sleep 0.3
+    progress.stop
+
+    text = out.string
+    install_idx = text.index("Installing... (0/1)")
+    compile_idx = text.index("Compiling... (0/1)")
+    refute_nil install_idx
+    refute_nil compile_idx
+    assert_operator install_idx, :<, compile_idx
+  end
+
   def test_interactive_mode_renders_all_phase_rows_with_dim_idle_marker
     out = FakeTTY.new
     progress = Scint::Progress.new(output: out)
@@ -157,10 +194,9 @@ class ProgressTest < Minitest::Test
 
     text = out.string
     assert_includes text, "Downloads... (0/1)"
-    assert_includes text, "Extraction... (0/0)"
-    assert_includes text, "Compiling... (0/0)"
-    assert_includes text, "Installing... (0/0)"
-    assert_includes text, "○"
+    refute_includes text, "Extraction... (0/0)"
+    refute_includes text, "Compiling... (0/0)"
+    refute_includes text, "Installing... (0/0)"
   end
 
   def test_interactive_mode_hides_and_restores_cursor
@@ -188,7 +224,7 @@ class ProgressTest < Minitest::Test
     progress.stop
 
     text = out.string
-    assert_includes text, "Installing central_icons"
+    assert_includes text, "Installed central_icons"
     assert_match(/\d+\.\d{2}s/, text)
   end
 
@@ -204,8 +240,8 @@ class ProgressTest < Minitest::Test
     out.print "SUMMARY\n"
 
     text = out.string
-    assert_includes text, "Installing... (1/1)"
-    assert_match(/\e\[\d+B\r\n\e\[\?25hSUMMARY/, text)
+    assert_includes text, "• Installed rack"
+    assert_match(/\e\[\?25hSUMMARY/, text)
   end
 
   def test_prints_phase_completion_line_with_timing

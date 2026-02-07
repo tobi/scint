@@ -5,7 +5,7 @@ require_relative "lib/scint/version"
 Gem::Specification.new do |spec|
   spec.name = "scint"
   spec.version = Scint::VERSION
-  spec.authors = ["Scint Contributors"]
+  spec.authors = ["Tobi Lutke"]
   spec.email = ["maintainers@example.com"]
 
   spec.summary = "Fast Bundler-compatible installer with phased parallel execution"
@@ -15,7 +15,7 @@ Gem::Specification.new do |spec|
   spec.required_ruby_version = ">= 3.1"
 
   spec.files = Dir.glob("lib/**/*").select { |path| File.file?(path) }
-  spec.files += %w[bin/scint README.md FEATURES.md]
+  spec.files += %w[bin/scint README.md FEATURES.md VERSION]
   spec.files.uniq!
 
   spec.bindir = "bin"

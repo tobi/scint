@@ -375,6 +375,38 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
+  def test_enqueue_install_dag_skips_build_for_platform_gems_with_prebuilt_bundle
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      scheduler = FakeScheduler.new
+      bundle_path = File.join(dir, ".bundle")
+
+      nokogiri = fake_spec(name: "nokogiri", version: "1.18.10", platform: "arm64-darwin", has_extensions: true)
+      plan = [Scint::PlanEntry.new(spec: nokogiri, action: :download, cached_path: nil, gem_path: nil)]
+
+      extracted = cache.extracted_path(nokogiri)
+      ext_dir = File.join(extracted, "ext", "nokogiri")
+      FileUtils.mkdir_p(ext_dir)
+      File.write(File.join(ext_dir, "extconf.rb"), "")
+      ruby_minor = RUBY_VERSION[/\d+\.\d+/]
+      prebuilt_dir = File.join(extracted, "lib", "nokogiri", ruby_minor)
+      FileUtils.mkdir_p(prebuilt_dir)
+      File.write(File.join(prebuilt_dir, "nokogiri.bundle"), "")
+
+      install.send(:enqueue_install_dag, scheduler, plan, cache, bundle_path)
+
+      extract_job = scheduler.enqueued.find { |entry| entry[:type] == :extract && entry[:name] == "nokogiri" }
+      refute_nil extract_job
+      refute_nil extract_job[:follow_up]
+
+      extract_job[:follow_up].call(nil)
+
+      build_jobs = scheduler.enqueued.select { |entry| entry[:type] == :build_ext && entry[:name] == "nokogiri" }
+      assert_equal [], build_jobs, "platform gems with prebuilt bundles should skip native build"
+    end
+  end
+
   def test_lockfile_to_resolved_upgrades_ruby_variant_using_provider_preference
     install = Scint::CLI::Install.new([])
     source = Scint::Source::Rubygems.new(remotes: ["https://rubygems.org/"])

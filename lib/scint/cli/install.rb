@@ -52,10 +52,13 @@ module Scint
 
         cache = Scint::Cache::Layout.new
         bundle_path = @path || ENV["BUNDLER_PATH"] || ".bundle"
+        bundle_display = display_bundle_path(bundle_path)
         bundle_path = File.expand_path(bundle_path)
         worker_count = @jobs || [Platform.cpu_count * 2, 50].min
         compile_slots = compile_slots_for(worker_count)
         per_type_limits = install_task_limits(worker_count, compile_slots)
+        $stdout.puts "#{GREEN}💎#{RESET} Scintellating Gemfile into #{BOLD}#{bundle_display}#{RESET} #{DIM}(scint #{VERSION}, ruby #{RUBY_VERSION})#{RESET}"
+        $stdout.puts
 
         # 0. Build credential store from config files (~/.bundle/config, XDG scint/credentials)
         @credentials = Credentials.new
@@ -654,6 +657,12 @@ module Scint
           build_ext: compile_slots,
           binstub: 1,
         }
+      end
+
+      def display_bundle_path(path)
+        return path if path.start_with?("/", "./", "../")
+
+        "./#{path}"
       end
 
       # Enqueue dependency-aware install tasks so compile/binstub can run

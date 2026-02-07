@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    scint (0.5.0)
+    scint (0.6.0)
 
 GEM
   remote: https://rubygems.org/
