@@ -182,6 +182,44 @@ class CredentialsTest < Minitest::Test
     end
   end
 
+  def test_for_uri_loads_from_bundler_local_config_file
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        bundle_dir = File.join(dir, ".bundle")
+        FileUtils.mkdir_p(bundle_dir)
+        File.write(File.join(bundle_dir, "config"),
+                   "BUNDLE_LOCAL___HOST__COM: \"local_user:local_pass\"\n")
+
+        creds = Scint::Credentials.new
+        result = creds.for_uri("https://local-host.com/gems")
+        assert_equal ["local_user", "local_pass"], result
+      end
+    end
+  end
+
+  def test_for_uri_prefers_source_uri_key_for_path_scoped_credentials
+    with_tmpdir do |dir|
+      bundle_dir = File.join(dir, ".bundle")
+      FileUtils.mkdir_p(bundle_dir)
+      source_key = Scint::Credentials.key_for_source_uri("https://pkgs.shopify.io/basic/gems/ruby/")
+      host_key = Scint::Credentials.key_for_host("pkgs.shopify.io")
+      File.write(
+        File.join(bundle_dir, "config"),
+        "#{host_key}: \"host_user:host_pass\"\n#{source_key}: \"source_user:source_pass\"\n",
+      )
+
+      with_env("XDG_CONFIG_HOME", dir) do
+        Dir.stub(:home, dir) do
+          with_env("BUNDLE_APP_CONFIG", bundle_dir) do
+            creds = Scint::Credentials.new
+            result = creds.for_uri("https://pkgs.shopify.io/basic/gems/ruby/versions")
+            assert_equal ["source_user", "source_pass"], result
+          end
+        end
+      end
+    end
+  end
+
   def test_scint_config_overrides_bundler_config
     with_tmpdir do |dir|
       bundle_dir = File.join(dir, ".bundle")

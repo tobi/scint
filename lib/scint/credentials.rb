@@ -13,9 +13,10 @@ module Scint
   # Lookup order (first match wins):
   #   1. Inline credentials in the request URI itself (user:pass@host)
   #   2. Credentials registered at runtime (from Gemfile source: URIs)
-  #   3. Scint config:   $XDG_CONFIG_HOME/scint/credentials
-  #   4. Bundler config:  ~/.bundle/config
-  #   5. Environment variables (BUNDLE_HOST__NAME format)
+  #   3. Bundler local config: $BUNDLE_APP_CONFIG/config or ./.bundle/config
+  #   4. Scint config:   $XDG_CONFIG_HOME/scint/credentials
+  #   5. Bundler global config: ~/.bundle/config
+  #   6. Environment variables (BUNDLE_HOST__NAME / BUNDLE_HTTPS://... format)
   #
   # All config files use Bundler's key format:
   #   BUNDLE_PKGS__SHOPIFY__IO: "token:secret"
@@ -80,7 +81,7 @@ module Scint
       end
 
       # 2–5. Registered + config files + env
-      auth = lookup_host(uri.host)
+      auth = lookup_uri(uri)
       return nil unless auth
 
       user, password = auth.split(":", 2)
@@ -99,27 +100,35 @@ module Scint
 
     private
 
-    def lookup_host(host)
-      return nil unless host
+    def lookup_uri(uri)
+      return nil unless uri&.host
 
       # 2. Runtime-registered (from Gemfile inline URIs)
-      registered = @mutex.synchronize { @registered[host] }
+      registered = @mutex.synchronize { @registered[uri.host] }
       return registered if registered
 
-      # 3–4. Config files (scint, then bundler)
-      key = self.class.key_for_host(host)
-      val = @file_config[key]
-      return val if val
+      # 3–5. Config files (bundler local, scint, bundler global)
+      keys = self.class.keys_for_uri_lookup(uri)
+      keys.each do |key|
+        val = @file_config[key]
+        return val if val
+      end
 
-      # 5. Environment variable
-      ENV[key]
+      # 6. Environment variable
+      keys.each do |key|
+        val = ENV[key]
+        return val if val
+      end
+
+      nil
     end
 
     def load_config_files
       config = {}
       # Load in reverse priority (later overrides earlier)
-      load_yaml_into(config, bundler_config_path)
+      load_yaml_into(config, bundler_global_config_path)
       load_yaml_into(config, scint_credentials_path)
+      load_yaml_into(config, bundler_local_config_path)
       config
     end
 
@@ -137,7 +146,17 @@ module Scint
       File.join(xdg, "scint", "credentials")
     end
 
-    def bundler_config_path
+    def bundler_local_config_path
+      app_config = ENV["BUNDLE_APP_CONFIG"]
+      dir = if app_config && !app_config.empty?
+        app_config
+      else
+        File.join(Dir.pwd, ".bundle")
+      end
+      File.join(dir, "config")
+    end
+
+    def bundler_global_config_path
       File.join(Dir.home, ".bundle", "config")
     end
 
@@ -148,6 +167,50 @@ module Scint
       key.gsub!("-", "___")
       key.upcase!
       "BUNDLE_#{key}"
+    end
+
+    def self.key_for_uri_string(uri_string)
+      key = uri_string.to_s.dup
+      key.gsub!(".", "__")
+      key.gsub!("-", "___")
+      key.upcase!
+      "BUNDLE_#{key}"
+    end
+
+    def self.key_for_source_uri(uri)
+      uri = URI.parse(uri.to_s) unless uri.is_a?(URI)
+      keys_for_uri_lookup(uri).find { |key| key != key_for_host(uri.host) }
+    rescue StandardError
+      nil
+    end
+
+    def self.keys_for_uri_lookup(uri)
+      uri = URI.parse(uri.to_s) unless uri.is_a?(URI)
+      keys = []
+
+      normalized = "#{uri.scheme || 'https'}://#{uri.host}"
+      default_port = (uri.scheme == "http" ? 80 : 443)
+      normalized += ":#{uri.port}" if uri.port && uri.port != default_port
+
+      path = uri.path.to_s
+      path = "/" if path.empty?
+      path = "/#{path}" unless path.start_with?("/")
+      path += "/" unless path.end_with?("/")
+
+      segments = path.split("/").reject(&:empty?)
+      candidate_paths = ["/"]
+      unless segments.empty?
+        1.upto(segments.length) do |i|
+          candidate_paths << "/#{segments.first(i).join('/')}/"
+        end
+      end
+
+      candidate_paths.reverse_each do |candidate_path|
+        keys << key_for_uri_string("#{normalized}#{candidate_path}")
+      end
+
+      keys << key_for_host(uri.host) if uri.host
+      keys.compact.uniq
     end
   end
 end
