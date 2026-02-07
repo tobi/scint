@@ -4,41 +4,49 @@ require_relative "fetcher"
 require_relative "../worker_pool"
 require_relative "../platform"
 require_relative "../errors"
+require "uri"
 
 module Scint
   module Downloader
     class Pool
       MAX_RETRIES = 3
       BACKOFF_BASE = 0.5 # seconds
+      DEFAULT_PER_HOST_LIMIT = 4
 
       attr_reader :size
 
-      def initialize(size: nil, on_progress: nil, credentials: nil)
+      def initialize(size: nil, on_progress: nil, credentials: nil, per_host_limit: DEFAULT_PER_HOST_LIMIT)
         @size = size || [Platform.cpu_count * 2, 50].min
         @on_progress = on_progress
         @credentials = credentials
+        @per_host_limit = [per_host_limit.to_i, 1].max
         @fetchers = {} # thread_id => Fetcher
         @fetcher_mutex = Thread::Mutex.new
+        @host_slots = Hash.new(0)
+        @host_waiters = {}
+        @host_mutex = Thread::Mutex.new
       end
 
       # Download a single URI to dest_path with retry logic.
       # Returns { path:, size: }
       def download(uri, dest_path, checksum: nil)
-        retries = 0
-        begin
-          fetcher = thread_fetcher
-          fetcher.fetch(uri, dest_path, checksum: checksum)
-        rescue NetworkError, Errno::ECONNRESET, Errno::ECONNREFUSED,
-               Errno::ETIMEDOUT, Net::ReadTimeout, Net::OpenTimeout,
-               SocketError, IOError => e
-          retries += 1
-          if retries <= MAX_RETRIES
-            sleep(BACKOFF_BASE * (2**(retries - 1)))
-            # Reset connection on retry
-            reset_thread_fetcher
-            retry
+        with_host_slot(uri) do
+          retries = 0
+          begin
+            fetcher = thread_fetcher
+            fetcher.fetch(uri, dest_path, checksum: checksum)
+          rescue NetworkError, Errno::ECONNRESET, Errno::ECONNREFUSED,
+                 Errno::ETIMEDOUT, Net::ReadTimeout, Net::OpenTimeout,
+                 SocketError, IOError => e
+            retries += 1
+            if retries <= MAX_RETRIES
+              sleep(BACKOFF_BASE * (2**(retries - 1)))
+              # Reset connection on retry
+              reset_thread_fetcher
+              retry
+            end
+            raise NetworkError, "Failed to download #{uri} after #{MAX_RETRIES} retries: #{e.message}"
           end
-          raise NetworkError, "Failed to download #{uri} after #{MAX_RETRIES} retries: #{e.message}"
         end
       end
 
@@ -106,6 +114,40 @@ module Scint
           old = @fetchers.delete(tid)
           old&.close
         end
+      end
+
+      def with_host_slot(uri)
+        key = host_slot_key(uri)
+        return yield unless key
+
+        waiter = nil
+        @host_mutex.synchronize do
+          waiter = (@host_waiters[key] ||= Thread::ConditionVariable.new)
+          while @host_slots[key] >= @per_host_limit
+            waiter.wait(@host_mutex)
+          end
+          @host_slots[key] += 1
+        end
+
+        begin
+          yield
+        ensure
+          @host_mutex.synchronize do
+            @host_slots[key] -= 1 if @host_slots[key] > 0
+            waiter.broadcast
+          end
+        end
+      end
+
+      def host_slot_key(uri)
+        parsed = uri.is_a?(URI) ? uri : URI.parse(uri.to_s)
+        return nil unless parsed.host
+
+        scheme = parsed.scheme || "https"
+        port = parsed.port || (scheme == "https" ? 443 : 80)
+        "#{scheme}://#{parsed.host}:#{port}"
+      rescue URI::InvalidURIError
+        nil
       end
     end
   end

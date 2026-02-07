@@ -44,6 +44,8 @@ module Scint
         @path = nil
         @verbose = false
         @force = false
+        @download_pool = nil
+        @download_pool_lock = Thread::Mutex.new
         parse_options
       end
 
@@ -175,7 +177,11 @@ module Scint
             0
           end
         ensure
-          scheduler.shutdown
+          begin
+            scheduler.shutdown
+          ensure
+            close_download_pool
+          end
         end
       end
 
@@ -513,9 +519,20 @@ module Scint
         FS.mkdir_p(File.dirname(dest_path))
 
         unless File.exist?(dest_path)
-          pool = Downloader::Pool.new(size: 1, credentials: @credentials)
-          pool.download(download_uri, dest_path)
-          pool.close
+          downloader_pool.download(download_uri, dest_path)
+        end
+      end
+
+      def downloader_pool
+        @download_pool_lock.synchronize do
+          @download_pool ||= Downloader::Pool.new(credentials: @credentials)
+        end
+      end
+
+      def close_download_pool
+        @download_pool_lock.synchronize do
+          @download_pool&.close
+          @download_pool = nil
         end
       end
 

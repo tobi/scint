@@ -87,6 +87,41 @@ class DownloaderPoolTest < Minitest::Test
     end
   end
 
+  def test_download_enforces_per_host_limit
+    pool = Scint::Downloader::Pool.new(size: 16, per_host_limit: 4)
+
+    active = 0
+    max_active = 0
+    lock = Thread::Mutex.new
+    fetcher = Object.new
+    fetcher.define_singleton_method(:fetch) do |_uri, dest, checksum: nil|
+      lock.synchronize do
+        active += 1
+        max_active = [max_active, active].max
+      end
+      sleep 0.05
+      FileUtils.mkdir_p(File.dirname(dest))
+      File.binwrite(dest, "gem")
+      { path: dest, size: 3 }
+    ensure
+      lock.synchronize { active -= 1 }
+    end
+
+    pool.define_singleton_method(:thread_fetcher) { fetcher }
+    pool.define_singleton_method(:reset_thread_fetcher) { nil }
+
+    with_tmpdir do |dir|
+      threads = 12.times.map do |i|
+        Thread.new do
+          pool.download("https://example.test/gems/g#{i}.gem", File.join(dir, "g#{i}.gem"))
+        end
+      end
+      threads.each(&:join)
+    end
+
+    assert_operator max_active, :<=, 4
+  end
+
   def test_close_closes_all_fetchers
     pool = Scint::Downloader::Pool.new(size: 1)
     closed = []

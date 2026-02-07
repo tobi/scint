@@ -1921,6 +1921,35 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
+  def test_download_gem_reuses_shared_pool_for_multiple_downloads
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      install.instance_variable_set(:@credentials, Scint::Credentials.new)
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+
+      spec_a = fake_spec(name: "rack", version: "2.2.8", source: "https://rubygems.org")
+      spec_b = fake_spec(name: "rake", version: "13.3.1", source: "https://rubygems.org")
+      entry_a = Scint::PlanEntry.new(spec: spec_a, action: :download, cached_path: nil, gem_path: nil)
+      entry_b = Scint::PlanEntry.new(spec: spec_b, action: :download, cached_path: nil, gem_path: nil)
+
+      created = 0
+      downloaded = []
+      fake_pool = Object.new
+      fake_pool.define_singleton_method(:download) do |uri, dest|
+        downloaded << [uri, dest]
+      end
+      fake_pool.define_singleton_method(:close) { }
+
+      Scint::Downloader::Pool.stub(:new, ->(**_kw) { created += 1; fake_pool }) do
+        install.send(:download_gem, entry_a, cache)
+        install.send(:download_gem, entry_b, cache)
+      end
+
+      assert_equal 1, created
+      assert_equal 2, downloaded.length
+    end
+  end
+
   # --- build_extensions / write_binstubs ---
 
   def test_build_extensions_delegates_to_extension_builder
