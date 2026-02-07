@@ -99,13 +99,14 @@ module Scint
           scheduler.wait_for(:git_clone)
 
           resolved = resolve(gemfile, lockfile, cache)
-          resolved = adjust_meta_gems(resolved)
+          resolved = dedupe_resolved_specs(adjust_meta_gems(resolved))
           force_purge_artifacts(resolved, bundle_path, cache) if @force
 
           # 7. Plan: diff resolved vs installed
           plan = Installer::Planner.plan(resolved, bundle_path, cache)
-
-          skipped = plan.count { |e| e.action == :skip }
+          total_gems = resolved.size
+          updated_gems = plan.count { |e| e.action != :skip }
+          cached_gems = total_gems - updated_gems
           to_install = plan.reject { |e| e.action == :skip }
 
           # Scale up for download/install phase based on actual work count
@@ -114,7 +115,7 @@ module Scint
           if to_install.empty?
             elapsed_ms = elapsed_ms_since(start_time)
             warn_missing_bundle_gitignore_entry
-            $stdout.puts "\n#{GREEN}Bundle complete!#{RESET} #{skipped} gems already installed. #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
+            $stdout.puts "\n#{GREEN}Bundle complete!#{RESET} #{GREEN}#{total_gems}#{RESET} gems installed total (#{cached_gems} cached, #{updated_gems} updated, 0 compiled). #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
             return 0
           end
 
@@ -145,8 +146,9 @@ module Scint
           # extconf scripts can activate dependency gems from local bundle dir.
           scheduler.wait_for(:download)
           scheduler.wait_for(:link)
+          compiled_gems = 0
           unless scheduler.failed? || scheduler.aborted?
-            enqueue_builds(scheduler, build_candidates, cache, bundle_path)
+            compiled_gems = enqueue_builds(scheduler, build_candidates, cache, bundle_path)
           end
 
           # 10. Wait for everything
@@ -164,21 +166,22 @@ module Scint
           end
 
           elapsed_ms = elapsed_ms_since(start_time)
-          failed = errors.map { |e| e[:name] }.uniq
-          requested = to_install.map { |e| e.spec.name }.uniq
-          installed = requested - failed
+          failed = errors.filter_map { |e| e[:name] }.uniq
+          failed_count = failed.size
+          failed_count = 1 if failed_count.zero? && stats[:failed] > 0
+          installed_total = [total_gems - failed_count, 0].max
           has_failures = errors.any? || stats[:failed] > 0
 
           if has_failures
             warn_missing_bundle_gitignore_entry
-            $stdout.puts "\n#{RED}Bundle failed!#{RESET} #{installed.size} gems installed, #{RED}#{failed.size} failed#{RESET}, #{skipped} already up to date. #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
+            $stdout.puts "\n#{RED}Bundle failed!#{RESET} #{installed_total}/#{total_gems} gems installed total (#{cached_gems} cached, #{updated_gems} updated, #{compiled_gems} compiled, #{RED}#{failed_count} failed#{RESET}). #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
             1
           else
             # 10. Write lockfile + runtime config only for successful installs
             write_lockfile(resolved, gemfile)
             write_runtime_config(resolved, bundle_path)
             warn_missing_bundle_gitignore_entry
-            $stdout.puts "\n#{GREEN}Bundle complete!#{RESET} #{GREEN}#{installed.size}#{RESET} gems installed, #{skipped} already up to date. #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
+            $stdout.puts "\n#{GREEN}Bundle complete!#{RESET} #{GREEN}#{total_gems}#{RESET} gems installed total (#{cached_gems} cached, #{updated_gems} updated, #{compiled_gems} compiled). #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
             0
           end
         ensure
@@ -209,6 +212,15 @@ module Scint
         resolved << scint_spec
 
         resolved
+      end
+
+      def dedupe_resolved_specs(resolved)
+        seen = {}
+        resolved.each do |spec|
+          key = "#{spec.name}-#{spec.version}-#{spec.platform}"
+          seen[key] ||= spec
+        end
+        seen.values
       end
 
       # Install scint (or other built-in gems) by symlinking to our own lib
@@ -507,13 +519,16 @@ module Scint
       end
 
       def enqueue_builds(scheduler, entries, cache, bundle_path)
+        enqueued = 0
         entries.each do |entry|
           extracted = extracted_path_for_entry(entry, cache)
           next unless Installer::ExtensionBuilder.buildable_source_dir?(extracted)
 
           scheduler.enqueue(:build_ext, entry.spec.name,
                             -> { build_and_link(entry, cache, bundle_path) })
+          enqueued += 1
         end
+        enqueued
       end
 
       def extracted_path_for_entry(entry, cache)

@@ -271,6 +271,21 @@ class CLIInstallTest < Minitest::Test
     assert_equal true, install.instance_variable_get(:@force)
   end
 
+  def test_adjust_meta_gems_adds_scint_once_and_removes_bundler
+    install = Scint::CLI::Install.new([])
+    resolved = [
+      fake_spec(name: "rack", version: "2.2.8"),
+      fake_spec(name: "bundler", version: "2.5.0"),
+      fake_spec(name: "scint", version: Scint::VERSION, source: "scint (built-in)"),
+    ]
+
+    adjusted = install.send(:adjust_meta_gems, resolved)
+    deduped = install.send(:dedupe_resolved_specs, adjusted)
+
+    assert_equal 0, deduped.count { |s| s.name == "bundler" }
+    assert_equal 1, deduped.count { |s| s.name == "scint" }
+  end
+
   def test_force_purge_artifacts_removes_cache_and_local_bundle_entries
     with_tmpdir do |dir|
       cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))

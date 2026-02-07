@@ -199,4 +199,45 @@ class PlannerTest < Minitest::Test
       end
     end
   end
+
+  def test_plan_one_marks_builtin_when_scint_not_installed
+    with_tmpdir do |dir|
+      bundle_path = File.join(dir, ".bundle")
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      spec = Spec.new(
+        name: "scint",
+        version: Scint::VERSION,
+        platform: "ruby",
+        has_extensions: false,
+        source: "scint (built-in)",
+      )
+
+      entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
+      assert_equal :builtin, entry.action
+    end
+  end
+
+  def test_plan_one_marks_skip_for_installed_builtin_scint
+    with_tmpdir do |dir|
+      bundle_path = File.join(dir, ".bundle")
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      spec = Spec.new(
+        name: "scint",
+        version: Scint::VERSION,
+        platform: "ruby",
+        has_extensions: false,
+        source: "scint (built-in)",
+      )
+
+      ruby_dir = File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
+      gem_dir = File.join(ruby_dir, "gems", "scint-#{Scint::VERSION}")
+      spec_dir = File.join(ruby_dir, "specifications")
+      FileUtils.mkdir_p(gem_dir)
+      FileUtils.mkdir_p(spec_dir)
+      File.write(File.join(spec_dir, "scint-#{Scint::VERSION}.gemspec"), "Gem::Specification.new do |s| end\n")
+
+      entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
+      assert_equal :skip, entry.action
+    end
+  end
 end

@@ -35,8 +35,13 @@ module Scint
         gem_path = File.join(ruby_dir, "gems", full)
         spec_path = File.join(ruby_dir, "specifications", "#{full}.gemspec")
 
-        # Built-in gems (scint itself) — just need a gemspec + symlink
+        # Built-in gems (scint itself): if already materialized, treat as cached.
+        # Otherwise install via built-in path (symlink + gemspec).
         if spec.source.to_s == "scint (built-in)"
+          if Dir.exist?(gem_path) && File.exist?(spec_path)
+            return PlanEntry.new(spec: spec, action: :skip, cached_path: nil, gem_path: gem_path)
+          end
+
           return PlanEntry.new(spec: spec, action: :builtin, cached_path: nil, gem_path: gem_path)
         end
 
