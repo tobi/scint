@@ -181,7 +181,7 @@ class CLIInstallTest < Minitest::Test
       ]
 
       compiled = install.send(:enqueue_install_dag, scheduler, plan, cache, bundle_path)
-      assert_equal 1, compiled
+      assert_equal 1, compiled.call
 
       dep_link = scheduler.enqueued.find { |e| e[:type] == :link && e[:name] == "dep" }
       main_link = scheduler.enqueued.find { |e| e[:type] == :link && e[:name] == "main" }
@@ -204,9 +204,43 @@ class CLIInstallTest < Minitest::Test
     install = Scint::CLI::Install.new([])
     limits = install.send(:install_task_limits, 8)
     assert_equal 6, limits[:download]
+    assert_equal 6, limits[:extract]
     assert_equal 6, limits[:link]
     assert_equal 1, limits[:build_ext]
     assert_equal 1, limits[:binstub]
+  end
+
+  def test_enqueue_install_dag_download_entry_schedules_build_after_extract
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      scheduler = FakeScheduler.new
+      bundle_path = File.join(dir, ".bundle")
+
+      spec = fake_spec(name: "ffi", version: "1.17.0", has_extensions: false)
+      plan = [Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)]
+
+      compiled = install.send(:enqueue_install_dag, scheduler, plan, cache, bundle_path)
+
+      extract_job = scheduler.enqueued.find { |e| e[:type] == :extract && e[:name] == "ffi" }
+      refute_nil extract_job
+      refute_nil extract_job[:follow_up]
+
+      ext_dir = File.join(cache.extracted_path(spec), "ext", "ffi_c")
+      FileUtils.mkdir_p(ext_dir)
+      File.write(File.join(ext_dir, "extconf.rb"), "")
+
+      extract_job[:follow_up].call(nil)
+
+      build_job = scheduler.enqueued.find { |e| e[:type] == :build_ext && e[:name] == "ffi" }
+      binstub_job = scheduler.enqueued.reverse.find { |e| e[:type] == :binstub && e[:name] == "ffi" }
+      refute_nil build_job
+      refute_nil binstub_job
+
+      build_id = scheduler.enqueued.index(build_job) + 1
+      assert_includes binstub_job[:depends_on], build_id
+      assert_equal 1, compiled.call
+    end
   end
 
   def test_format_elapsed_uses_ms_for_short_durations
@@ -396,6 +430,47 @@ class CLIInstallTest < Minitest::Test
       refute Dir.exist?(bundle_bin)
       refute Dir.exist?(ruby_bin)
       refute File.exist?(runtime_lock)
+    end
+  end
+
+  def test_link_gem_files_materializes_cached_extensions
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      bundle_path = File.join(dir, ".bundle")
+      ruby_dir = ruby_bundle_dir(bundle_path)
+
+      spec = fake_spec(name: "ffi", version: "1.17.0")
+      extracted = cache.extracted_path(spec)
+      FileUtils.mkdir_p(File.join(extracted, "lib"))
+      File.write(File.join(extracted, "lib", "ffi.rb"), "module FFI; end\n")
+
+      gemspec = Gem::Specification.new do |s|
+        s.name = "ffi"
+        s.version = Gem::Version.new("1.17.0")
+        s.summary = "ffi"
+        s.authors = ["test"]
+        s.require_paths = ["lib"]
+      end
+      FileUtils.mkdir_p(File.dirname(cache.spec_cache_path(spec)))
+      File.binwrite(cache.spec_cache_path(spec), Marshal.dump(gemspec))
+
+      global_ext = cache.ext_path(spec)
+      FileUtils.mkdir_p(global_ext)
+      File.write(File.join(global_ext, "ffi_ext.so"), "bin")
+      File.write(File.join(global_ext, "gem.build_complete"), "")
+
+      entry = Scint::PlanEntry.new(spec: spec, action: :link, cached_path: extracted, gem_path: nil)
+      install.send(:link_gem_files, entry, cache, bundle_path)
+
+      local_ext = File.join(
+        ruby_dir,
+        "extensions",
+        Scint::Platform.gem_arch,
+        Scint::Platform.extension_api_version,
+        cache.full_name(spec),
+      )
+      assert File.exist?(File.join(local_ext, "ffi_ext.so"))
     end
   end
 end

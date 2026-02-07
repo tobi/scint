@@ -35,9 +35,8 @@ module Scint
         gem_path = File.join(ruby_dir, "gems", full)
         spec_path = File.join(ruby_dir, "specifications", "#{full}.gemspec")
 
-        # Built-in gems (scint itself): if already materialized, treat as cached.
-        # Otherwise install via built-in path (symlink + gemspec).
-        if spec.source.to_s == "scint (built-in)"
+        # Built-in gems (scint itself): copy from our own lib tree.
+        if spec.name == "scint" && spec.source.to_s.include?("built-in")
           if Dir.exist?(gem_path) && File.exist?(spec_path)
             return PlanEntry.new(spec: spec, action: :skip, cached_path: nil, gem_path: gem_path)
           end
@@ -49,7 +48,8 @@ module Scint
         if Dir.exist?(gem_path) && File.exist?(spec_path)
           if extension_link_missing?(spec, ruby_dir, cache_layout)
             extracted = cache_layout.extracted_path(spec)
-            return PlanEntry.new(spec: spec, action: :build_ext, cached_path: extracted, gem_path: gem_path)
+            action = ExtensionBuilder.cached_build_available?(spec, cache_layout) ? :link : :build_ext
+            return PlanEntry.new(spec: spec, action: action, cached_path: extracted, gem_path: gem_path)
           end
 
           return PlanEntry.new(spec: spec, action: :skip, cached_path: nil, gem_path: gem_path)
@@ -75,7 +75,9 @@ module Scint
 
       def needs_ext_build?(spec, cache_layout)
         extracted = cache_layout.extracted_path(spec)
-        ExtensionBuilder.buildable_source_dir?(extracted)
+        return false unless ExtensionBuilder.buildable_source_dir?(extracted)
+
+        !ExtensionBuilder.cached_build_available?(spec, cache_layout)
       end
 
       def extension_link_missing?(spec, ruby_dir, cache_layout)

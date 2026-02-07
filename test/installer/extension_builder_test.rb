@@ -38,6 +38,49 @@ class ExtensionBuilderTest < Minitest::Test
     end
   end
 
+  def test_cached_build_available_checks_marker
+    with_tmpdir do |dir|
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      spec = fake_spec(name: "ffi", version: "1.17.0")
+      abi_key = "ruby-test-arch"
+      cached_ext = layout.ext_path(spec, abi_key)
+      FileUtils.mkdir_p(cached_ext)
+
+      assert_equal false, Scint::Installer::ExtensionBuilder.cached_build_available?(spec, layout, abi_key: abi_key)
+
+      File.write(File.join(cached_ext, "gem.build_complete"), "")
+      assert_equal true, Scint::Installer::ExtensionBuilder.cached_build_available?(spec, layout, abi_key: abi_key)
+    end
+  end
+
+  def test_link_cached_build_links_without_compiling
+    with_tmpdir do |dir|
+      bundle_path = File.join(dir, ".bundle")
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      spec = fake_spec(name: "ffi", version: "1.17.0")
+      prepared = Prepared.new(spec: spec, extracted_path: File.join(dir, "src"), gemspec: nil, from_cache: true)
+      abi_key = "ruby-test-arch"
+
+      cached_ext = layout.ext_path(spec, abi_key)
+      FileUtils.mkdir_p(cached_ext)
+      File.write(File.join(cached_ext, "ffi_ext.so"), "bin")
+      File.write(File.join(cached_ext, "gem.build_complete"), "")
+
+      assert_equal true, Scint::Installer::ExtensionBuilder.link_cached_build(prepared, bundle_path, layout, abi_key: abi_key)
+
+      linked = File.join(
+        ruby_bundle_dir(bundle_path),
+        "extensions",
+        Scint::Platform.gem_arch,
+        Scint::Platform.extension_api_version,
+        "ffi-1.17.0",
+        "ffi_ext.so",
+      )
+      assert File.exist?(linked)
+      assert_hardlinked(File.join(cached_ext, "ffi_ext.so"), linked)
+    end
+  end
+
   def test_build_raises_when_no_extension_directories_exist
     with_tmpdir do |dir|
       bundle_path = File.join(dir, ".bundle")

@@ -122,10 +122,14 @@ module Scint
 
           # 8. Build a dependency-aware task graph:
           # download -> link_files -> build_ext -> binstub (where applicable).
-          compiled_gems = enqueue_install_dag(scheduler, plan, cache, bundle_path, scheduler.progress)
+          compiled_count = enqueue_install_dag(scheduler, plan, cache, bundle_path, scheduler.progress)
 
           # 9. Wait for everything
           scheduler.wait_all
+          compiled_gems = compiled_count.respond_to?(:call) ? compiled_count.call : compiled_count
+          # Stop live progress before printing final summaries/errors so
+          # cursor movement does not erase trailing output.
+          scheduler.progress.stop if scheduler.respond_to?(:progress)
 
           errors = scheduler.errors.dup
           stats = scheduler.stats
@@ -170,7 +174,7 @@ module Scint
       # This ensures `require "bundler/setup"` loads our shim, and scint
       # appears in the gem list just like bundler does for stock bundler.
       def adjust_meta_gems(resolved)
-        resolved = resolved.reject { |s| s.name == "bundler" }
+        resolved = resolved.reject { |s| s.name == "bundler" || s.name == "scint" }
 
         scint_spec = ResolvedSpec.new(
           name: "scint",
@@ -196,19 +200,20 @@ module Scint
         seen.values
       end
 
-      # Install scint (or other built-in gems) by symlinking to our own lib
-      # and writing a minimal gemspec. No download or extraction needed.
+      # Install scint into the bundle by copying our own lib tree.
+      # No download needed — we know exactly where we are.
       def install_builtin_gem(entry, bundle_path)
         spec = entry.spec
         ruby_dir = File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
         full_name = spec_full_name(spec)
-
-        # Symlink gem dir → scint's lib parent
-        gem_dest = File.join(ruby_dir, "gems", full_name)
         scint_root = File.expand_path("../../..", __FILE__)
-        unless File.exist?(gem_dest)
-          FS.mkdir_p(File.dirname(gem_dest))
-          File.symlink(scint_root, gem_dest)
+
+        # Copy gem files into gems/scint-x.y.z/lib/
+        gem_dest = File.join(ruby_dir, "gems", full_name)
+        lib_dest = File.join(gem_dest, "lib")
+        unless Dir.exist?(lib_dest)
+          FS.mkdir_p(lib_dest)
+          FS.hardlink_tree(scint_root, lib_dest)
         end
 
         # Write gemspec
@@ -410,15 +415,26 @@ module Scint
           pool.download(download_uri, dest_path)
           pool.close
         end
+      end
 
-        # Extract
+      def extract_gem(entry, cache)
+        spec = entry.spec
+        source_uri = spec.source.to_s
+
+        # Git/path gems are already materialized by checkout or local path.
+        return if git_source?(spec.source)
+        return if source_uri.start_with?("/") || !source_uri.start_with?("http")
+
         extracted = cache.extracted_path(spec)
-        unless Dir.exist?(extracted)
-          FS.mkdir_p(extracted)
-          pkg = GemPkg::Package.new
-          result = pkg.extract(dest_path, extracted)
-          cache_gemspec(spec, result[:gemspec], cache)
-        end
+        return if Dir.exist?(extracted)
+
+        dest_path = cache.inbound_path(spec)
+        raise InstallError, "Missing cached gem file for #{spec.name}: #{dest_path}" unless File.exist?(dest_path)
+
+        FS.mkdir_p(extracted)
+        pkg = GemPkg::Package.new
+        result = pkg.extract(dest_path, extracted)
+        cache_gemspec(spec, result[:gemspec], cache)
       end
 
       def git_source?(source)
@@ -492,6 +508,7 @@ module Scint
         io_cpu_limit = [worker_count - 2, 1].max
         {
           download: io_cpu_limit,
+          extract: io_cpu_limit,
           link: io_cpu_limit,
           build_ext: 1,
           binstub: 1,
@@ -504,6 +521,8 @@ module Scint
         link_job_by_key = {}
         link_job_by_name = {}
         build_job_by_key = {}
+        build_count = 0
+        build_count_lock = Thread::Mutex.new
 
         plan.each do |entry|
           case entry.action
@@ -513,11 +532,37 @@ module Scint
             install_builtin_gem(entry, bundle_path)
             next
           when :download
+            key = spec_key(entry.spec)
             download_id = scheduler.enqueue(:download, entry.spec.name,
                                             -> { download_gem(entry, cache) })
+            extract_id = scheduler.enqueue(:extract, entry.spec.name,
+                                           -> { extract_gem(entry, cache) },
+                                           depends_on: [download_id],
+                                           follow_up: lambda { |_job|
+                                             own_link = link_job_by_key[key]
+                                             next unless own_link
+
+                                             depends_on = [own_link]
+                                             dep_links = dependency_link_job_ids(entry.spec, link_job_by_name)
+                                             build_depends = (depends_on + dep_links).uniq
+
+                                             extracted = extracted_path_for_entry(entry, cache)
+                                             if Installer::ExtensionBuilder.buildable_source_dir?(extracted)
+                                               build_id = scheduler.enqueue(:build_ext, entry.spec.name,
+                                                                            -> { build_extensions(entry, cache, bundle_path, progress) },
+                                                                            depends_on: build_depends)
+                                               build_job_by_key[key] = build_id
+                                               depends_on << build_id
+                                               build_count_lock.synchronize { build_count += 1 }
+                                             end
+
+                                             scheduler.enqueue(:binstub, entry.spec.name,
+                                                               -> { write_binstubs(entry, cache, bundle_path) },
+                                                               depends_on: depends_on)
+                                           })
             link_id = scheduler.enqueue(:link, entry.spec.name,
                                         -> { link_gem_files(entry, cache, bundle_path) },
-                                        depends_on: [download_id])
+                                        depends_on: [extract_id])
           when :link, :build_ext
             link_id = scheduler.enqueue(:link, entry.spec.name,
                                         -> { link_gem_files(entry, cache, bundle_path) })
@@ -543,10 +588,11 @@ module Scint
                                        -> { build_extensions(entry, cache, bundle_path, progress) },
                                        depends_on: depends_on)
           build_job_by_key[key] = build_id
+          build_count_lock.synchronize { build_count += 1 }
         end
 
         plan.each do |entry|
-          next if entry.action == :skip || entry.action == :builtin
+          next if entry.action == :skip || entry.action == :builtin || entry.action == :download
 
           key = spec_key(entry.spec)
           own_link = link_job_by_key[key]
@@ -560,7 +606,7 @@ module Scint
                             depends_on: depends_on)
         end
 
-        build_job_by_key.size
+        -> { build_count_lock.synchronize { build_count } }
       end
 
       def spec_key(spec)
@@ -618,6 +664,9 @@ module Scint
           from_cache: true,
         )
         Installer::Linker.link_files(prepared, bundle_path)
+        # If this gem has a cached native build, materialize it during link.
+        # This lets reinstalling into a fresh .bundle skip build_ext entirely.
+        Installer::ExtensionBuilder.link_cached_build(prepared, bundle_path, cache)
       end
 
       def build_extensions(entry, cache, bundle_path, progress = nil)

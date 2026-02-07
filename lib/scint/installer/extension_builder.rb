@@ -52,6 +52,24 @@ module Scint
         true
       end
 
+      # True when a completed global extension build exists for this spec + ABI.
+      def cached_build_available?(spec, cache_layout, abi_key: Platform.abi_key)
+        cached_ext = cache_layout.ext_path(spec, abi_key)
+        Dir.exist?(cached_ext) && File.exist?(File.join(cached_ext, "gem.build_complete"))
+      end
+
+      # Link already-compiled extensions from global cache into bundle_path.
+      # Returns true when cache was present and linked, false otherwise.
+      def link_cached_build(prepared_gem, bundle_path, cache_layout, abi_key: Platform.abi_key)
+        spec = prepared_gem.spec
+        return false unless cached_build_available?(spec, cache_layout, abi_key: abi_key)
+
+        ruby_dir = ruby_install_dir(bundle_path)
+        cached_ext = cache_layout.ext_path(spec, abi_key)
+        link_extensions(cached_ext, ruby_dir, spec, abi_key)
+        true
+      end
+
       # --- private ---
 
       def buildable_source_dir?(gem_dir)
@@ -183,20 +201,35 @@ module Scint
           return
         end
 
-        out, err, status = Open3.capture3(env, *cmd, **opts)
-        tail = ([out, err].join.lines.map(&:rstrip).reject(&:empty?)).last(5)
-        if output_tail
-          cmd_line = "$ #{cmd.join(" ")}"
-          output_tail.call([cmd_line, *tail])
-        end
+        # Stream output line-by-line so the UX gets live compile progress
+        # instead of waiting for the entire subprocess to finish.
+        all_output = +""
+        tail_lines = []
+        cmd_label = "$ #{cmd.join(" ")}"
 
-        unless status.success?
-          details = [out, err].join
-          details = details.strip
-          message = "Command failed (exit #{status.exitstatus}): #{cmd.join(" ")}"
-          message = "#{message}\n#{details}" unless details.empty?
-          raise ExtensionBuildError,
-                message
+        Open3.popen2e(env, *cmd, **opts) do |stdin, out_err, wait_thr|
+          stdin.close
+
+          out_err.each_line do |line|
+            stripped = line.rstrip
+            all_output << line
+            next if stripped.empty?
+
+            tail_lines << stripped
+            tail_lines.shift if tail_lines.length > 5
+
+            if output_tail
+              output_tail.call([cmd_label, *tail_lines])
+            end
+          end
+
+          status = wait_thr.value
+          unless status.success?
+            details = all_output.strip
+            message = "Command failed (exit #{status.exitstatus}): #{cmd.join(" ")}"
+            message = "#{message}\n#{details}" unless details.empty?
+            raise ExtensionBuildError, message
+          end
         end
       end
 

@@ -47,6 +47,32 @@ class PlannerTest < Minitest::Test
     end
   end
 
+  def test_plan_one_marks_link_when_installed_extension_missing_but_global_ext_cached
+    with_tmpdir do |dir|
+      bundle_path = File.join(dir, ".bundle")
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      spec = Spec.new(name: "bootsnap", version: "1.22.0", platform: "ruby", has_extensions: false)
+
+      ruby_dir = File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
+      gem_dir = File.join(ruby_dir, "gems", "bootsnap-1.22.0")
+      spec_dir = File.join(ruby_dir, "specifications")
+      FileUtils.mkdir_p(gem_dir)
+      FileUtils.mkdir_p(spec_dir)
+      File.write(File.join(spec_dir, "bootsnap-1.22.0.gemspec"), "Gem::Specification.new do |s| end\n")
+
+      ext_src = File.join(layout.extracted_path(spec), "ext", "bootsnap")
+      FileUtils.mkdir_p(ext_src)
+      File.write(File.join(ext_src, "extconf.rb"), "")
+
+      cached_ext = layout.ext_path(spec)
+      FileUtils.mkdir_p(cached_ext)
+      File.write(File.join(cached_ext, "gem.build_complete"), "")
+
+      entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
+      assert_equal :link, entry.action
+    end
+  end
+
   def test_plan_one_does_not_skip_when_gemspec_missing
     with_tmpdir do |dir|
       bundle_path = File.join(dir, ".bundle")
@@ -103,7 +129,7 @@ class PlannerTest < Minitest::Test
     end
   end
 
-  def test_plan_one_marks_build_ext_when_extensions_cached
+  def test_plan_one_marks_link_when_extensions_cached
     with_tmpdir do |dir|
       bundle_path = File.join(dir, ".bundle")
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
@@ -113,9 +139,10 @@ class PlannerTest < Minitest::Test
       FileUtils.mkdir_p(ext_dir)
       File.write(File.join(ext_dir, "extconf.rb"), "")
       FileUtils.mkdir_p(layout.ext_path(spec))
+      File.write(File.join(layout.ext_path(spec), "gem.build_complete"), "")
 
       entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
-      assert_equal :build_ext, entry.action
+      assert_equal :link, entry.action
     end
   end
 
