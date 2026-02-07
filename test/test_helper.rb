@@ -1,5 +1,15 @@
 # frozen_string_literal: true
 
+require "simplecov"
+SimpleCov.start do
+  add_filter "/test/"
+  add_filter "lib/scint/vendor/"
+  add_filter "lib/bundler.rb"
+  add_filter "lib/bundler/"
+  enable_coverage :branch
+  track_files "lib/**/*.rb"
+end
+
 require "minitest/autorun"
 require "tmpdir"
 require "fileutils"

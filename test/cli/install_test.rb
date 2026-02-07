@@ -707,6 +707,7 @@ class CLIInstallTest < Minitest::Test
       "git",
       "-c", "user.name=Scint Test",
       "-c", "user.email=scint@example.com",
+      "-c", "commit.gpgsign=false",
       *args,
     )
     assert status.success?, "git #{args.join(' ')} failed: #{err}"

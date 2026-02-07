@@ -30,9 +30,11 @@ class BundlerShimTest < Minitest::Test
         {
           "BUNDLE_GEMFILE" => gemfile_path,
           "SCINT_RUNTIME_LOCK" => lock_path,
+          "RUBYLIB" => lib_dir,
+          "RUBYOPT" => "",
+          "BUNDLER_SETUP" => nil,
         },
         RbConfig.ruby,
-        "-I#{lib_dir}",
         "-e",
         script,
       )
@@ -83,10 +85,11 @@ class BundlerShimTest < Minitest::Test
           "SCINT_RUNTIME_LOCK" => lock_path,
           "SCINT_ORIGINAL_ENV" => encoded,
           "PATH" => "/tmp/custom-path",
-          "RUBYOPT" => "-rbundler/setup",
+          "RUBYOPT" => "",
+          "RUBYLIB" => lib_dir,
+          "BUNDLER_SETUP" => nil,
         },
         RbConfig.ruby,
-        "-I#{lib_dir}",
         "-e",
         script,
       )

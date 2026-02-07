@@ -565,7 +565,7 @@ module Scint
           tmp = "#{extracted}.#{Process.pid}.#{Thread.current.object_id}.tmp"
           begin
             FileUtils.rm_rf(tmp)
-            FS.mkdir_p(tmp)
+            FileUtils.mkdir_p(tmp)
 
             cmd = ["git", "--git-dir", bare_repo, "--work-tree", tmp, "checkout", "-f", resolved_revision, "--", "."]
             _out, err, status = Open3.capture3(*cmd)

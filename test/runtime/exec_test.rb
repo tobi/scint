@@ -25,6 +25,7 @@ class RuntimeExecTest < Minitest::Test
       old_env = ENV.to_hash
       called = nil
 
+      with_env("RUBYOPT", nil) do
       with_env("RUBYLIB", "already") do
         Kernel.stub(:exec, lambda { |*args|
           called = args
@@ -54,6 +55,7 @@ class RuntimeExecTest < Minitest::Test
 
         original_env = Marshal.load(Base64.decode64(ENV["SCINT_ORIGINAL_ENV"]))
         assert_equal old_env["PATH"], original_env["PATH"]
+      end
       end
     ensure
       ENV.replace(old_env)
