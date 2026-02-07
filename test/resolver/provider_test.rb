@@ -88,6 +88,54 @@ class ProviderTest < Minitest::Test
     assert_equal "arm64-darwin", platform
   end
 
+  def test_preferred_platform_for_does_not_select_foreign_arch_binary
+    provider = provider_with({
+      "nokogiri" => [
+        ["nokogiri", "1.19.0", "ruby", {}, {}],
+        ["nokogiri", "1.19.0", "aarch64-linux-gnu", {}, {}],
+      ],
+    }, platforms: ["ruby", "x86_64-linux"])
+
+    platform = provider.preferred_platform_for("nokogiri", Gem::Version.new("1.19.0"))
+    assert_equal "ruby", platform
+  end
+
+  def test_versions_for_respects_required_ruby_version
+    provider = provider_with({
+      "demo" => [
+        ["demo", "1.0.0", "ruby", {}, { "ruby" => ">= 2.0" }],
+        ["demo", "2.0.0", "ruby", {}, { "ruby" => ">= 99.0" }],
+      ],
+    })
+
+    versions = provider.versions_for("demo")
+    assert_equal [Gem::Version.new("1.0.0")], versions
+  end
+
+  def test_versions_for_ignores_required_ruby_upper_bounds_by_default
+    provider = provider_with({
+      "demo" => [
+        ["demo", "1.0.0", "ruby", {}, { "ruby" => ">= 2.0, < 3.0" }],
+      ],
+    })
+
+    versions = provider.versions_for("demo")
+    assert_equal [Gem::Version.new("1.0.0")], versions
+  end
+
+  def test_versions_for_can_enforce_required_ruby_upper_bounds
+    with_env("SCINT_IGNORE_RUBY_UPPER_BOUNDS", "0") do
+      provider = provider_with({
+        "demo" => [
+          ["demo", "1.0.0", "ruby", {}, { "ruby" => ">= 2.0, < 3.0" }],
+        ],
+      })
+
+      versions = provider.versions_for("demo")
+      assert_equal [], versions
+    end
+  end
+
   def test_prefetch_populates_internal_info_cache
     client = FakeIndexClient.new("rack" => [["rack", "2.2.8", "ruby", {}, {}]])
     provider = Scint::Resolver::Provider.new(client)

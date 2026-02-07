@@ -14,9 +14,10 @@ module Scint
       # prepared_gem: PreparedGem struct
       # bundle_path:  .bundle/ root
       # abi_key:      e.g. "ruby-3.3.0-arm64-darwin24" (defaults to Platform.abi_key)
-      def build(prepared_gem, bundle_path, cache_layout, abi_key: Platform.abi_key, output_tail: nil)
+      def build(prepared_gem, bundle_path, cache_layout, abi_key: Platform.abi_key, compile_slots: 1, output_tail: nil)
         spec = prepared_gem.spec
         ruby_dir = ruby_install_dir(bundle_path)
+        build_ruby_dir = cache_layout.install_ruby_dir
 
         # Check global extension cache first
         cached_ext = cache_layout.ext_path(spec, abi_key)
@@ -37,7 +38,7 @@ module Scint
           FS.mkdir_p(install_dir)
 
           ext_dirs.each do |ext_dir|
-            compile_extension(ext_dir, build_dir, install_dir, src_dir, spec, ruby_dir, output_tail)
+            compile_extension(ext_dir, build_dir, install_dir, src_dir, spec, build_ruby_dir, compile_slots, output_tail)
           end
 
           # Write marker
@@ -70,6 +71,41 @@ module Scint
         true
       end
 
+      # True when a gem has native extension sources that need compiling.
+      # Platform-specific gems usually ship precompiled binaries and should
+      # not be compiled from ext/ unless they lack support for this Ruby.
+      def needs_build?(spec, gem_dir)
+        platform = spec.respond_to?(:platform) ? spec.platform : nil
+        if platform && !platform.to_s.empty? && platform.to_s != "ruby"
+          return prebuilt_missing_for_ruby?(gem_dir) && buildable_source_dir?(gem_dir)
+        end
+
+        buildable_source_dir?(gem_dir)
+      end
+
+      # Detect versioned prebuilt extension folders like:
+      #   lib/sqlite3/3.1, lib/sqlite3/3.2 ...
+      # If present, the current Ruby minor must exist or we need a build.
+      def prebuilt_missing_for_ruby?(gem_dir)
+        ruby_minor = RUBY_VERSION[/\d+\.\d+/]
+        lib_dir = File.join(gem_dir, "lib")
+        return false unless Dir.exist?(lib_dir)
+
+        Dir.children(lib_dir).each do |child|
+          child_path = File.join(lib_dir, child)
+          next unless File.directory?(child_path)
+
+          version_dirs = Dir.children(child_path).select do |entry|
+            File.directory?(File.join(child_path, entry)) && entry.match?(/\A\d+\.\d+\z/)
+          end
+          next if version_dirs.empty?
+
+          return true unless version_dirs.include?(ruby_minor)
+        end
+
+        false
+      end
+
       # --- private ---
 
       def buildable_source_dir?(gem_dir)
@@ -100,33 +136,34 @@ module Scint
         dirs.uniq
       end
 
-      def compile_extension(ext_dir, build_dir, install_dir, gem_dir, spec, ruby_dir, output_tail = nil)
-        env = build_env(gem_dir, ruby_dir)
+      def compile_extension(ext_dir, build_dir, install_dir, gem_dir, spec, build_ruby_dir, compile_slots, output_tail = nil)
+        make_jobs = adaptive_make_jobs(compile_slots)
+        env = build_env(gem_dir, build_ruby_dir, make_jobs)
 
         if File.exist?(File.join(ext_dir, "extconf.rb"))
-          compile_extconf(ext_dir, build_dir, install_dir, env, output_tail)
+          compile_extconf(ext_dir, build_dir, install_dir, env, make_jobs, output_tail)
         elsif File.exist?(File.join(ext_dir, "CMakeLists.txt"))
-          compile_cmake(ext_dir, build_dir, install_dir, env, output_tail)
+          compile_cmake(ext_dir, build_dir, install_dir, env, make_jobs, output_tail)
         elsif File.exist?(File.join(ext_dir, "Rakefile"))
-          compile_rake(ext_dir, build_dir, install_dir, ruby_dir, env, output_tail)
+          compile_rake(ext_dir, build_dir, install_dir, build_ruby_dir, env, output_tail)
         else
           raise ExtensionBuildError, "No known build system in #{ext_dir}"
         end
       end
 
-      def compile_extconf(ext_dir, build_dir, install_dir, env, output_tail = nil)
+      def compile_extconf(ext_dir, build_dir, install_dir, env, make_jobs, output_tail = nil)
         run_cmd(env, RbConfig.ruby, File.join(ext_dir, "extconf.rb"),
                 "--with-opt-dir=#{RbConfig::CONFIG["prefix"]}",
                 chdir: build_dir, output_tail: output_tail)
-        run_cmd(env, "make", "-j#{Platform.cpu_count}", "-C", build_dir, output_tail: output_tail)
+        run_cmd(env, "make", "-j#{make_jobs}", "-C", build_dir, output_tail: output_tail)
         run_cmd(env, "make", "install", "DESTDIR=", "sitearchdir=#{install_dir}", "sitelibdir=#{install_dir}",
                 chdir: build_dir, output_tail: output_tail)
       end
 
-      def compile_cmake(ext_dir, build_dir, install_dir, env, output_tail = nil)
+      def compile_cmake(ext_dir, build_dir, install_dir, env, make_jobs, output_tail = nil)
         run_cmd(env, "cmake", ext_dir, "-B", build_dir,
                 "-DCMAKE_INSTALL_PREFIX=#{install_dir}", output_tail: output_tail)
-        run_cmd(env, "cmake", "--build", build_dir, "--parallel", Platform.cpu_count.to_s, output_tail: output_tail)
+        run_cmd(env, "cmake", "--build", build_dir, "--parallel", make_jobs.to_s, output_tail: output_tail)
         run_cmd(env, "cmake", "--install", build_dir, output_tail: output_tail)
       end
 
@@ -176,16 +213,24 @@ module Scint
         FS.hardlink_tree(cached_ext, ext_install_dir)
       end
 
-      def build_env(gem_dir, ruby_dir)
-        ruby_bin = File.join(ruby_dir, "bin")
+      def build_env(gem_dir, build_ruby_dir, make_jobs)
+        ruby_bin = File.join(build_ruby_dir, "bin")
         path = [ruby_bin, ENV["PATH"]].compact.reject(&:empty?).join(File::PATH_SEPARATOR)
         {
-          "GEM_HOME" => ruby_dir,
-          "GEM_PATH" => ruby_dir,
-          "MAKEFLAGS" => "-j#{Platform.cpu_count}",
+          "GEM_HOME" => build_ruby_dir,
+          "GEM_PATH" => build_ruby_dir,
+          "BUNDLE_PATH" => build_ruby_dir,
+          "BUNDLE_GEMFILE" => "",
+          "MAKEFLAGS" => "-j#{make_jobs}",
           "PATH" => path,
           "CFLAGS" => "-I#{RbConfig::CONFIG["rubyhdrdir"]} -I#{RbConfig::CONFIG["rubyarchhdrdir"]}",
         }
+      end
+
+      def adaptive_make_jobs(compile_slots)
+        slots = [compile_slots.to_i, 1].max
+        jobs = Platform.cpu_count / slots
+        [jobs, 1].max
       end
 
       def run_cmd(env, *cmd, chdir: nil, output_tail: nil)
@@ -248,7 +293,7 @@ module Scint
       private_class_method :find_extension_dirs, :compile_extension,
                            :compile_extconf, :compile_cmake, :compile_rake,
                            :find_rake_executable, :link_extensions, :build_env, :run_cmd,
-                           :spec_full_name, :ruby_install_dir
+                           :spec_full_name, :ruby_install_dir, :prebuilt_missing_for_ruby?
     end
   end
 end

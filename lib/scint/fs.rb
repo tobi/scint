@@ -15,11 +15,10 @@ module Scint
       path = path.to_s
       return if @mkdir_cache[path]
 
-      @mkdir_mutex.synchronize do
-        return if @mkdir_cache[path]
-        FileUtils.mkdir_p(path)
-        @mkdir_cache[path] = true
-      end
+      # Do the filesystem call outside the cache mutex so unrelated directory
+      # creation can proceed in parallel across worker threads.
+      FileUtils.mkdir_p(path)
+      @mkdir_mutex.synchronize { @mkdir_cache[path] = true }
     end
 
     # APFS clonefile (CoW copy). Falls back to hardlink, then regular copy.
@@ -51,16 +50,23 @@ module Scint
       src_dir = src_dir.to_s
       dst_dir = dst_dir.to_s
       raise Errno::ENOENT, src_dir unless Dir.exist?(src_dir)
+      mkdir_p(dst_dir)
 
-      Dir.glob("**/*", File::FNM_DOTMATCH, base: src_dir).each do |rel|
-        next if rel == "." || rel == ".."
+      queue = [[src_dir, dst_dir]]
+      until queue.empty?
+        src_root, dst_root = queue.shift
 
-        src_path = File.join(src_dir, rel)
-        dst_path = File.join(dst_dir, rel)
+        Dir.each_child(src_root) do |entry|
+          src_path = File.join(src_root, entry)
+          dst_path = File.join(dst_root, entry)
+          stat = File.lstat(src_path)
 
-        if File.directory?(src_path)
-          mkdir_p(dst_path)
-        else
+          if stat.directory?
+            mkdir_p(dst_path)
+            queue << [src_path, dst_path]
+            next
+          end
+
           mkdir_p(File.dirname(dst_path))
           begin
             File.link(src_path, dst_path)

@@ -16,6 +16,13 @@ class PlatformTest < Minitest::Test
     assert_equal true, Scint::Platform.match_platform?(Scint::Platform.local_platform.to_s)
   end
 
+  def test_match_platform_rejects_foreign_arch
+    local = Gem::Platform.new("x86_64-linux")
+    Scint::Platform.stub(:local_platform, local) do
+      assert_equal false, Scint::Platform.match_platform?("aarch64-linux-gnu")
+    end
+  end
+
   def test_gem_arch_matches_rubygems_platform_string
     assert_equal Scint::Platform.local_platform.to_s, Scint::Platform.gem_arch
   end

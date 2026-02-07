@@ -23,11 +23,12 @@ module Scint
           plan_one(spec, ruby_dir, cache_layout)
         end
 
-        # Stable partition: downloads first (big→small), then everything else
-        downloads, rest = entries.partition { |e| e.action == :download }
+        # Keep built-ins first, then downloads (big->small), then the rest.
+        builtins, non_builtins = entries.partition { |e| e.action == :builtin }
+        downloads, rest = non_builtins.partition { |e| e.action == :download }
         downloads.sort_by! { |e| -(estimated_size(e.spec)) }
 
-        downloads + rest
+        builtins + downloads + rest
       end
 
       def plan_one(spec, ruby_dir, cache_layout)
@@ -58,7 +59,7 @@ module Scint
         # Local path sources are linked directly from their source tree.
         local_source = local_source_path(spec)
         if local_source
-          action = ExtensionBuilder.buildable_source_dir?(local_source) ? :build_ext : :link
+          action = ExtensionBuilder.needs_build?(spec, local_source) ? :build_ext : :link
           return PlanEntry.new(spec: spec, action: action, cached_path: local_source, gem_path: gem_path)
         end
 
@@ -75,7 +76,7 @@ module Scint
 
       def needs_ext_build?(spec, cache_layout)
         extracted = cache_layout.extracted_path(spec)
-        return false unless ExtensionBuilder.buildable_source_dir?(extracted)
+        return false unless ExtensionBuilder.needs_build?(spec, extracted)
 
         !ExtensionBuilder.cached_build_available?(spec, cache_layout)
       end
@@ -83,7 +84,7 @@ module Scint
       def extension_link_missing?(spec, ruby_dir, cache_layout)
         extracted = cache_layout.extracted_path(spec)
         return false unless Dir.exist?(extracted)
-        return false unless ExtensionBuilder.buildable_source_dir?(extracted)
+        return false unless ExtensionBuilder.needs_build?(spec, extracted)
 
         full = cache_layout.full_name(spec)
         ext_install_dir = File.join(

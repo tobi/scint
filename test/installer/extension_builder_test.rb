@@ -128,12 +128,23 @@ class ExtensionBuilderTest < Minitest::Test
   end
 
   def test_build_env_sets_expected_keys
-    env = Scint::Installer::ExtensionBuilder.send(:build_env, "/tmp/src", "/tmp/.bundle/ruby/3.4.0")
+    env = Scint::Installer::ExtensionBuilder.send(:build_env, "/tmp/src", "/tmp/cache/install-env/ruby/3.4.0", 3)
 
     assert env.key?("MAKEFLAGS")
     assert env.key?("CFLAGS")
-    assert_equal "/tmp/.bundle/ruby/3.4.0", env["GEM_HOME"]
-    assert_equal "/tmp/.bundle/ruby/3.4.0", env["GEM_PATH"]
+    assert_equal "/tmp/cache/install-env/ruby/3.4.0", env["GEM_HOME"]
+    assert_equal "/tmp/cache/install-env/ruby/3.4.0", env["GEM_PATH"]
+    assert_equal "/tmp/cache/install-env/ruby/3.4.0", env["BUNDLE_PATH"]
+    assert_equal "", env["BUNDLE_GEMFILE"]
+    assert_equal "-j3", env["MAKEFLAGS"]
+  end
+
+  def test_adaptive_make_jobs_scales_by_compile_slots
+    Scint::Platform.stub(:cpu_count, 12) do
+      assert_equal 12, Scint::Installer::ExtensionBuilder.send(:adaptive_make_jobs, 1)
+      assert_equal 6, Scint::Installer::ExtensionBuilder.send(:adaptive_make_jobs, 2)
+      assert_equal 4, Scint::Installer::ExtensionBuilder.send(:adaptive_make_jobs, 3)
+    end
   end
 
   def test_buildable_source_dir_false_for_non_native_ext_tree
@@ -143,6 +154,33 @@ class ExtensionBuilderTest < Minitest::Test
       File.write(File.join(gem_dir, "ext", "concurrent-ruby", "ConcurrentRubyService.java"), "")
 
       assert_equal false, Scint::Installer::ExtensionBuilder.buildable_source_dir?(gem_dir)
+    end
+  end
+
+  def test_needs_build_false_for_platform_gem_with_matching_prebuilt_dir
+    with_tmpdir do |dir|
+      ruby_minor = RUBY_VERSION[/\d+\.\d+/]
+      spec = fake_spec(name: "sqlite3", version: "2.0.0", platform: "x86_64-linux")
+      gem_dir = File.join(dir, "gem")
+      FileUtils.mkdir_p(File.join(gem_dir, "ext", "sqlite3"))
+      File.write(File.join(gem_dir, "ext", "sqlite3", "extconf.rb"), "")
+      FileUtils.mkdir_p(File.join(gem_dir, "lib", "sqlite3", ruby_minor))
+
+      assert_equal false, Scint::Installer::ExtensionBuilder.needs_build?(spec, gem_dir)
+    end
+  end
+
+  def test_needs_build_true_for_platform_gem_without_matching_prebuilt_dir
+    with_tmpdir do |dir|
+      ruby_minor = RUBY_VERSION[/\d+\.\d+/]
+      missing = ruby_minor == "3.4" ? "3.3" : "3.4"
+      spec = fake_spec(name: "sqlite3", version: "2.0.0", platform: "x86_64-linux")
+      gem_dir = File.join(dir, "gem")
+      FileUtils.mkdir_p(File.join(gem_dir, "ext", "sqlite3"))
+      File.write(File.join(gem_dir, "ext", "sqlite3", "extconf.rb"), "")
+      FileUtils.mkdir_p(File.join(gem_dir, "lib", "sqlite3", missing))
+
+      assert_equal true, Scint::Installer::ExtensionBuilder.needs_build?(spec, gem_dir)
     end
   end
 
@@ -187,6 +225,23 @@ class ExtensionBuilderTest < Minitest::Test
         )
       end
     end
+  end
+
+  def test_compile_extconf_uses_adaptive_make_jobs
+    calls = []
+    Scint::Installer::ExtensionBuilder.stub(:run_cmd, ->(env, *cmd, **opts) { calls << { env: env, cmd: cmd, opts: opts } }) do
+      Scint::Installer::ExtensionBuilder.send(
+        :compile_extconf,
+        "/tmp/ext",
+        "/tmp/build",
+        "/tmp/install",
+        { "MAKEFLAGS" => "-j5" },
+        5,
+      )
+    end
+
+    assert_equal 3, calls.size
+    assert_equal ["make", "-j5", "-C", "/tmp/build"], calls[1][:cmd]
   end
 
   def test_run_cmd_emits_tail_callback_with_command

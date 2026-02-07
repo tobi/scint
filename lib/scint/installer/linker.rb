@@ -21,6 +21,12 @@ module Scint
       # This allows binstubs to be scheduled as a separate DAG task.
       def link_files(prepared_gem, bundle_path)
         ruby_dir = ruby_install_dir(bundle_path)
+        link_files_to_ruby_dir(prepared_gem, ruby_dir)
+      end
+
+      # Link gem files + gemspec into an explicit ruby gem home directory.
+      # This is used for the install-time hermetic build environment.
+      def link_files_to_ruby_dir(prepared_gem, ruby_dir)
         spec = prepared_gem.spec
         full_name = spec_full_name(spec)
 

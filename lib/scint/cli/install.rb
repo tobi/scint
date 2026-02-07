@@ -54,7 +54,8 @@ module Scint
         bundle_path = @path || ENV["BUNDLER_PATH"] || ".bundle"
         bundle_path = File.expand_path(bundle_path)
         worker_count = @jobs || [Platform.cpu_count * 2, 50].min
-        per_type_limits = install_task_limits(worker_count)
+        compile_slots = compile_slots_for(worker_count)
+        per_type_limits = install_task_limits(worker_count, compile_slots)
 
         # 0. Build credential store from config files (~/.bundle/config, XDG scint/credentials)
         @credentials = Credentials.new
@@ -122,7 +123,14 @@ module Scint
 
           # 8. Build a dependency-aware task graph:
           # download -> link_files -> build_ext -> binstub (where applicable).
-          compiled_count = enqueue_install_dag(scheduler, plan, cache, bundle_path, scheduler.progress)
+          compiled_count = enqueue_install_dag(
+            scheduler,
+            plan,
+            cache,
+            bundle_path,
+            scheduler.progress,
+            compile_slots: compile_slots,
+          )
 
           # 9. Wait for everything
           scheduler.wait_all
@@ -186,7 +194,7 @@ module Scint
           remote_uri: nil,
           checksum: nil,
         )
-        resolved << scint_spec
+        resolved.unshift(scint_spec)
 
         resolved
       end
@@ -247,11 +255,12 @@ module Scint
       def clone_git_source(source, cache)
         return unless source.respond_to?(:uri)
         git_dir = cache.git_path(source.uri)
-        return if Dir.exist?(git_dir)
+        if Dir.exist?(git_dir)
+          fetch_git_repo(git_dir)
+          return
+        end
 
-        FS.mkdir_p(File.dirname(git_dir))
-        system("git", "clone", "--bare", source.uri.to_s, git_dir,
-               [:out, :err] => File::NULL)
+        clone_git_repo(source.uri, git_dir)
       end
 
       def resolve(gemfile, lockfile, cache)
@@ -368,8 +377,16 @@ module Scint
       end
 
       def lockfile_to_resolved(lockfile)
-        lockfile.specs.map do |ls|
-          source = ls[:source]
+        local_plat = Platform.local_platform
+
+        # Pick one best platform variant per gem+version from lockfile specs.
+        by_gem = Hash.new { |h, k| h[k] = [] }
+        lockfile.specs.each { |ls| by_gem[[ls[:name], ls[:version]]] << ls }
+
+        by_gem.map do |(_name, _version), specs|
+          best = pick_best_platform_spec(specs, local_plat)
+
+          source = best[:source]
           source_value =
             if source.is_a?(Source::Rubygems)
               source.uri.to_s
@@ -378,16 +395,45 @@ module Scint
             end
 
           ResolvedSpec.new(
-            name: ls[:name],
-            version: ls[:version],
-            platform: ls[:platform],
-            dependencies: ls[:dependencies],
+            name: best[:name],
+            version: best[:version],
+            platform: best[:platform],
+            dependencies: best[:dependencies],
             source: source_value,
             has_extensions: false,
             remote_uri: nil,
-            checksum: ls[:checksum],
+            checksum: best[:checksum],
           )
         end
+      end
+
+      # Preference: exact platform match > compatible match > ruby > first.
+      def pick_best_platform_spec(specs, local_plat)
+        return specs.first if specs.size == 1
+
+        best = nil
+        best_score = -2
+
+        specs.each do |ls|
+          platform = ls[:platform] || "ruby"
+          if platform == "ruby"
+            score = 0
+          else
+            spec_plat = Gem::Platform.new(platform)
+            if spec_plat === local_plat
+              score = spec_plat.to_s == local_plat.to_s ? 2 : 1
+            else
+              score = -1
+            end
+          end
+
+          if score > best_score
+            best = ls
+            best_score = score
+          end
+        end
+
+        best
       end
 
       def download_gem(entry, cache)
@@ -455,22 +501,30 @@ module Scint
         # and can't handle concurrent checkouts from the same repo.
         git_mutex_for(bare_repo).synchronize do
           clone_git_repo(uri, bare_repo) unless Dir.exist?(bare_repo)
+          fetch_git_repo(bare_repo)
+
+          resolved_revision = resolve_git_revision(bare_repo, revision)
 
           extracted = cache.extracted_path(spec)
-          return if Dir.exist?(extracted)
+          marker = git_checkout_marker_path(extracted)
+          if Dir.exist?(extracted) && File.exist?(marker)
+            return if File.read(marker).strip == resolved_revision
+          end
 
           tmp = "#{extracted}.#{Process.pid}.#{Thread.current.object_id}.tmp"
           begin
             FileUtils.rm_rf(tmp)
             FS.mkdir_p(tmp)
 
-            cmd = ["git", "--git-dir", bare_repo, "--work-tree", tmp, "checkout", "-f", revision, "--", "."]
+            cmd = ["git", "--git-dir", bare_repo, "--work-tree", tmp, "checkout", "-f", resolved_revision, "--", "."]
             _out, err, status = Open3.capture3(*cmd)
             unless status.success?
-              raise InstallError, "Git checkout failed for #{spec.name} (#{uri}@#{revision}): #{err.to_s.strip}"
+              raise InstallError, "Git checkout failed for #{spec.name} (#{uri}@#{resolved_revision}): #{err.to_s.strip}"
             end
 
+            FileUtils.rm_rf(extracted)
             FS.atomic_move(tmp, extracted)
+            FS.atomic_write(marker, "#{resolved_revision}\n")
           ensure
             FileUtils.rm_rf(tmp) if tmp && File.exist?(tmp)
           end
@@ -502,22 +556,57 @@ module Scint
         end
       end
 
-      def install_task_limits(worker_count)
-        # Leave headroom for build_ext and binstub lanes so link/download
+      def fetch_git_repo(bare_repo)
+        _out, err, status = Open3.capture3(
+          "git",
+          "--git-dir", bare_repo,
+          "fetch",
+          "--prune",
+          "origin",
+          "+refs/heads/*:refs/heads/*",
+          "+refs/tags/*:refs/tags/*",
+        )
+        unless status.success?
+          raise InstallError, "Git fetch failed for #{bare_repo}: #{err.to_s.strip}"
+        end
+      end
+
+      def resolve_git_revision(bare_repo, revision)
+        out, err, status = Open3.capture3("git", "--git-dir", bare_repo, "rev-parse", "#{revision}^{commit}")
+        unless status.success?
+          raise InstallError, "Unable to resolve git revision #{revision.inspect} in #{bare_repo}: #{err.to_s.strip}"
+        end
+        out.strip
+      end
+
+      def git_checkout_marker_path(dir)
+        "#{dir}.scint_git_revision"
+      end
+
+      def compile_slots_for(worker_count)
+        # Keep one worker lane available for non-compile tasks and cap native
+        # compiles at two concurrent jobs.
+        max_compile = [2, Platform.cpu_count].min
+        available = [worker_count - 1, 1].max
+        [max_compile, available].min
+      end
+
+      def install_task_limits(worker_count, compile_slots)
+        # Leave headroom for compile and binstub lanes so link/download
         # throughput cannot fully starve them.
-        io_cpu_limit = [worker_count - 2, 1].max
+        io_cpu_limit = [worker_count - compile_slots - 1, 1].max
         {
           download: io_cpu_limit,
           extract: io_cpu_limit,
           link: io_cpu_limit,
-          build_ext: 1,
+          build_ext: compile_slots,
           binstub: 1,
         }
       end
 
       # Enqueue dependency-aware install tasks so compile/binstub can run
       # concurrently with link/download once prerequisites are satisfied.
-      def enqueue_install_dag(scheduler, plan, cache, bundle_path, progress = nil)
+      def enqueue_install_dag(scheduler, plan, cache, bundle_path, progress = nil, compile_slots: 1)
         link_job_by_key = {}
         link_job_by_name = {}
         build_job_by_key = {}
@@ -529,8 +618,8 @@ module Scint
           when :skip
             next
           when :builtin
-            install_builtin_gem(entry, bundle_path)
-            next
+            link_id = scheduler.enqueue(:link, entry.spec.name,
+                                        -> { install_builtin_gem(entry, bundle_path) })
           when :download
             key = spec_key(entry.spec)
             download_id = scheduler.enqueue(:download, entry.spec.name,
@@ -547,9 +636,9 @@ module Scint
                                              build_depends = (depends_on + dep_links).uniq
 
                                              extracted = extracted_path_for_entry(entry, cache)
-                                             if Installer::ExtensionBuilder.buildable_source_dir?(extracted)
+                                             if Installer::ExtensionBuilder.needs_build?(entry.spec, extracted)
                                                build_id = scheduler.enqueue(:build_ext, entry.spec.name,
-                                                                            -> { build_extensions(entry, cache, bundle_path, progress) },
+                                                                            -> { build_extensions(entry, cache, bundle_path, progress, compile_slots: compile_slots) },
                                                                             depends_on: build_depends)
                                                build_job_by_key[key] = build_id
                                                depends_on << build_id
@@ -585,7 +674,7 @@ module Scint
           dep_links = dependency_link_job_ids(entry.spec, link_job_by_name)
           depends_on = ([own_link] + dep_links).uniq
           build_id = scheduler.enqueue(:build_ext, entry.spec.name,
-                                       -> { build_extensions(entry, cache, bundle_path, progress) },
+                                       -> { build_extensions(entry, cache, bundle_path, progress, compile_slots: compile_slots) },
                                        depends_on: depends_on)
           build_job_by_key[key] = build_id
           build_count_lock.synchronize { build_count += 1 }
@@ -629,14 +718,14 @@ module Scint
                           -> { link_gem_files(entry, cache, bundle_path) })
       end
 
-      def enqueue_builds(scheduler, entries, cache, bundle_path)
+      def enqueue_builds(scheduler, entries, cache, bundle_path, compile_slots: 1)
         enqueued = 0
         entries.each do |entry|
           extracted = extracted_path_for_entry(entry, cache)
-          next unless Installer::ExtensionBuilder.buildable_source_dir?(extracted)
+          next unless Installer::ExtensionBuilder.needs_build?(entry.spec, extracted)
 
           scheduler.enqueue(:build_ext, entry.spec.name,
-                            -> { build_extensions(entry, cache, bundle_path) })
+                            -> { build_extensions(entry, cache, bundle_path, nil, compile_slots: compile_slots) })
           enqueued += 1
         end
         enqueued
@@ -647,8 +736,27 @@ module Scint
         if source_str.start_with?("/") && Dir.exist?(source_str)
           source_str
         else
-          entry.cached_path || cache.extracted_path(entry.spec)
+          base = entry.cached_path || cache.extracted_path(entry.spec)
+          if git_source?(entry.spec.source) && Dir.exist?(base)
+            resolve_git_gem_subdir(base, entry.spec)
+          else
+            base
+          end
         end
+      end
+
+      # For git monorepo sources, map gem name to its gemspec subdirectory.
+      def resolve_git_gem_subdir(repo_root, spec)
+        name = spec.name
+        return repo_root if File.exist?(File.join(repo_root, "#{name}.gemspec"))
+
+        source = spec.source
+        glob = source.respond_to?(:glob) ? source.glob : Source::Git::DEFAULT_GLOB
+        Dir.glob(File.join(repo_root, glob)).each do |path|
+          return File.dirname(path) if File.basename(path, ".gemspec") == name
+        end
+
+        repo_root
       end
 
       def link_gem_files(entry, cache, bundle_path)
@@ -664,14 +772,17 @@ module Scint
           from_cache: true,
         )
         Installer::Linker.link_files(prepared, bundle_path)
+        Installer::Linker.link_files_to_ruby_dir(prepared, cache.install_ruby_dir)
         # If this gem has a cached native build, materialize it during link.
         # This lets reinstalling into a fresh .bundle skip build_ext entirely.
         Installer::ExtensionBuilder.link_cached_build(prepared, bundle_path, cache)
       end
 
-      def build_extensions(entry, cache, bundle_path, progress = nil)
-        extracted = entry.cached_path || cache.extracted_path(entry.spec)
+      def build_extensions(entry, cache, bundle_path, progress = nil, compile_slots: 1)
+        extracted = extracted_path_for_entry(entry, cache)
         gemspec = load_gemspec(extracted, entry.spec, cache)
+
+        sync_build_env_dependencies(entry.spec, bundle_path, cache)
 
         prepared = PreparedGem.new(
           spec: entry.spec,
@@ -684,8 +795,46 @@ module Scint
           prepared,
           bundle_path,
           cache,
+          compile_slots: compile_slots,
           output_tail: ->(lines) { progress&.on_build_tail(entry.spec.name, lines) },
         )
+      end
+
+      def sync_build_env_dependencies(spec, bundle_path, cache)
+        dep_names = Array(spec.dependencies).filter_map do |dep|
+          if dep.is_a?(Hash)
+            dep[:name] || dep["name"]
+          elsif dep.respond_to?(:name)
+            dep.name
+          end
+        end
+        return if dep_names.empty?
+
+        source_ruby_dir = File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
+        target_ruby_dir = cache.install_ruby_dir
+
+        dep_names.each do |name|
+          sync_named_gem_to_build_env(name, source_ruby_dir, target_ruby_dir)
+        end
+      end
+
+      def sync_named_gem_to_build_env(name, source_ruby_dir, target_ruby_dir)
+        pattern = File.join(source_ruby_dir, "specifications", "#{name}-*.gemspec")
+        Dir.glob(pattern).each do |spec_path|
+          full_name = File.basename(spec_path, ".gemspec")
+          source_gem_dir = File.join(source_ruby_dir, "gems", full_name)
+          next unless Dir.exist?(source_gem_dir)
+
+          target_gem_dir = File.join(target_ruby_dir, "gems", full_name)
+          FS.hardlink_tree(source_gem_dir, target_gem_dir) unless Dir.exist?(target_gem_dir)
+
+          target_spec_dir = File.join(target_ruby_dir, "specifications")
+          target_spec_path = File.join(target_spec_dir, "#{full_name}.gemspec")
+          next if File.exist?(target_spec_path)
+
+          FS.mkdir_p(target_spec_dir)
+          FS.clonefile(spec_path, target_spec_path)
+        end
       end
 
       def write_binstubs(entry, cache, bundle_path)

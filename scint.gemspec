@@ -14,8 +14,8 @@ Gem::Specification.new do |spec|
   spec.license = "MIT"
   spec.required_ruby_version = ">= 3.1"
 
-  spec.files = Dir.glob("{bin,lib}/**/*").select { |path| File.file?(path) }
-  spec.files += %w[README.md FEATURES.md]
+  spec.files = Dir.glob("lib/**/*").select { |path| File.file?(path) }
+  spec.files += %w[bin/scint README.md FEATURES.md]
   spec.files.uniq!
 
   spec.bindir = "bin"

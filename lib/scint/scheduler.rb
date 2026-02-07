@@ -122,7 +122,7 @@ module Scint
           running_of_type = @running.values.any? { |j| j.type == type }
           break if @aborted
           break unless pending_of_type || running_of_type
-          @cv.wait(@mutex, 0.1)
+          @cv.wait(@mutex)
         end
       end
     end
@@ -133,7 +133,7 @@ module Scint
         loop do
           job = @jobs[job_id]
           return job if job.nil? || job.state == :completed || job.state == :failed
-          @cv.wait(@mutex, 0.1)
+          @cv.wait(@mutex)
         end
       end
     end
@@ -143,7 +143,7 @@ module Scint
       @mutex.synchronize do
         loop do
           break if @running.empty? && @in_flight_follow_ups == 0 && (@pending.empty? || @aborted)
-          @cv.wait(@mutex, 0.1)
+          @cv.wait(@mutex)
         end
       end
     end
@@ -237,14 +237,14 @@ module Scint
             break if @shutting_down
             break if @aborted && @running.empty?
             if @aborted
-              @cv.wait(@mutex, 0.05)
+              @cv.wait(@mutex)
               next
             end
 
             # Backpressure: keep at most @current_workers in-flight so a
             # fail-fast error can still halt most pending work.
             if @running.size >= @current_workers
-              @cv.wait(@mutex, 0.05)
+              @cv.wait(@mutex)
               next
             end
 
@@ -252,7 +252,7 @@ module Scint
             break if job
 
             # Nothing ready yet — wait for state change
-            @cv.wait(@mutex, 0.05)
+            @cv.wait(@mutex)
           end
 
           if job

@@ -61,6 +61,22 @@ class ProgressTest < Minitest::Test
     assert_equal "", out.string
   end
 
+  def test_counts_builtin_scint_link_like_normal_install_task
+    out = StringIO.new
+    progress = Scint::Progress.new(output: out)
+
+    progress.on_enqueue(1, :link, "scint")
+    progress.on_start(1, :link, "scint")
+    progress.on_complete(1, :link, "scint")
+    progress.on_enqueue(2, :link, "rack")
+    progress.on_start(2, :link, "rack")
+    progress.on_complete(2, :link, "rack")
+
+    assert_equal "2 gems processed", progress.summary
+    assert_includes out.string, "Installing scint"
+    assert_includes out.string, "Installing rack"
+  end
+
   def test_prints_dim_build_tail_lines
     out = StringIO.new
     progress = Scint::Progress.new(output: out)

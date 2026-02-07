@@ -202,12 +202,23 @@ class CLIInstallTest < Minitest::Test
 
   def test_install_task_limits_reserves_lanes_for_compile_and_binstub
     install = Scint::CLI::Install.new([])
-    limits = install.send(:install_task_limits, 8)
-    assert_equal 6, limits[:download]
-    assert_equal 6, limits[:extract]
-    assert_equal 6, limits[:link]
-    assert_equal 1, limits[:build_ext]
+    compile_slots = install.send(:compile_slots_for, 8)
+    limits = install.send(:install_task_limits, 8, compile_slots)
+    assert_equal 2, compile_slots
+    assert_equal 5, limits[:download]
+    assert_equal 5, limits[:extract]
+    assert_equal 5, limits[:link]
+    assert_equal 2, limits[:build_ext]
     assert_equal 1, limits[:binstub]
+  end
+
+  def test_compile_slots_for_caps_parallel_compiles_to_two
+    install = Scint::CLI::Install.new([])
+
+    assert_equal 1, install.send(:compile_slots_for, 1)
+    assert_equal 1, install.send(:compile_slots_for, 2)
+    assert_equal 2, install.send(:compile_slots_for, 3)
+    assert_equal 2, install.send(:compile_slots_for, 20)
   end
 
   def test_enqueue_install_dag_download_entry_schedules_build_after_extract
@@ -327,6 +338,46 @@ class CLIInstallTest < Minitest::Test
     assert_equal "abc123", resolved.first.source.revision
   end
 
+  def test_lockfile_to_resolved_prefers_best_local_platform_variant
+    install = Scint::CLI::Install.new([])
+    source = Scint::Source::Rubygems.new(remotes: ["https://rubygems.org/"])
+    lockfile = Scint::Lockfile::LockfileData.new(
+      specs: [
+        { name: "nokogiri", version: "1.19.0", platform: "aarch64-linux-gnu", dependencies: [], source: source, checksum: nil },
+        { name: "nokogiri", version: "1.19.0", platform: "x86_64-linux", dependencies: [], source: source, checksum: nil },
+        { name: "nokogiri", version: "1.19.0", platform: "ruby", dependencies: [], source: source, checksum: nil },
+      ],
+      dependencies: {},
+      platforms: [],
+      sources: [source],
+      bundler_version: nil,
+      ruby_version: nil,
+      checksums: nil,
+    )
+
+    local = Gem::Platform.new("x86_64-linux")
+    Scint::Platform.stub(:local_platform, local) do
+      resolved = install.send(:lockfile_to_resolved, lockfile)
+      assert_equal 1, resolved.size
+      assert_equal "x86_64-linux", resolved.first.platform
+    end
+  end
+
+  def test_resolve_git_gem_subdir_finds_named_gemspec_by_glob
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      repo = File.join(dir, "repo")
+      gem_dir = File.join(repo, "actionpack")
+      FileUtils.mkdir_p(gem_dir)
+      File.write(File.join(gem_dir, "actionpack.gemspec"), "")
+      source = Scint::Source::Git.new(uri: "https://github.com/rails/rails.git", glob: "{,*/}*.gemspec")
+      spec = fake_spec(name: "actionpack", version: "7.2.0", source: source)
+
+      resolved = install.send(:resolve_git_gem_subdir, repo, spec)
+      assert_equal gem_dir, resolved
+    end
+  end
+
   def test_warn_missing_bundle_gitignore_entry_warns_when_missing
     with_tmpdir do |dir|
       with_cwd(dir) do
@@ -373,6 +424,26 @@ class CLIInstallTest < Minitest::Test
 
     assert_equal 0, deduped.count { |s| s.name == "bundler" }
     assert_equal 1, deduped.count { |s| s.name == "scint" }
+    assert_equal "scint", deduped.first.name
+  end
+
+  def test_enqueue_install_dag_enqueues_builtin_as_link_task
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      scheduler = FakeScheduler.new
+      bundle_path = File.join(dir, ".bundle")
+
+      spec = fake_spec(name: "scint", version: Scint::VERSION, source: "scint (built-in)")
+      plan = [Scint::PlanEntry.new(spec: spec, action: :builtin, cached_path: nil, gem_path: nil)]
+
+      compiled = install.send(:enqueue_install_dag, scheduler, plan, cache, bundle_path)
+
+      assert_equal 0, compiled.call
+      assert_equal 1, scheduler.enqueued.length
+      assert_equal :link, scheduler.enqueued.first[:type]
+      assert_equal "scint", scheduler.enqueued.first[:name]
+    end
   end
 
   def test_force_purge_artifacts_removes_cache_and_local_bundle_entries
@@ -439,6 +510,7 @@ class CLIInstallTest < Minitest::Test
       install = Scint::CLI::Install.new([])
       bundle_path = File.join(dir, ".bundle")
       ruby_dir = ruby_bundle_dir(bundle_path)
+      build_ruby_dir = cache.install_ruby_dir
 
       spec = fake_spec(name: "ffi", version: "1.17.0")
       extracted = cache.extracted_path(spec)
@@ -471,6 +543,112 @@ class CLIInstallTest < Minitest::Test
         cache.full_name(spec),
       )
       assert File.exist?(File.join(local_ext, "ffi_ext.so"))
+
+      assert Dir.exist?(File.join(build_ruby_dir, "gems", cache.full_name(spec)))
+      assert File.exist?(File.join(build_ruby_dir, "specifications", "#{cache.full_name(spec)}.gemspec"))
     end
+  end
+
+  def test_prepare_git_source_refreshes_extracted_checkout_when_revision_changes
+    with_tmpdir do |dir|
+      repo = init_git_repo(dir, "demo.gemspec" => "Gem::Specification.new\n", "REVISION" => "one\n")
+      first = git_commit_hash(repo)
+      commit_file(repo, "REVISION", "two\n", "update")
+      second = git_commit_hash(repo)
+
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      spec = fake_spec(name: "demo", version: "1.0.0", source: Scint::Source::Git.new(uri: repo, revision: first))
+      entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
+
+      install.send(:prepare_git_source, entry, cache)
+      extracted = cache.extracted_path(spec)
+      assert_equal "one\n", File.read(File.join(extracted, "REVISION"))
+
+      newer_spec = fake_spec(name: "demo", version: "1.0.0", source: Scint::Source::Git.new(uri: repo, revision: second))
+      newer_entry = Scint::PlanEntry.new(spec: newer_spec, action: :download, cached_path: nil, gem_path: nil)
+      install.send(:prepare_git_source, newer_entry, cache)
+      assert_equal "two\n", File.read(File.join(extracted, "REVISION"))
+    end
+  end
+
+  def test_prepare_git_source_fetches_latest_branch_tip_when_repo_is_cached
+    with_tmpdir do |dir|
+      repo = init_git_repo(dir, "demo.gemspec" => "Gem::Specification.new\n", "REVISION" => "one\n")
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      spec = fake_spec(name: "demo", version: "1.0.0", source: Scint::Source::Git.new(uri: repo, branch: "main"))
+      entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
+
+      install.send(:prepare_git_source, entry, cache)
+      extracted = cache.extracted_path(spec)
+      assert_equal "one\n", File.read(File.join(extracted, "REVISION"))
+
+      commit_file(repo, "REVISION", "two\n", "update")
+      install.send(:prepare_git_source, entry, cache)
+      assert_equal "two\n", File.read(File.join(extracted, "REVISION"))
+    end
+  end
+
+  def test_clone_git_source_fetches_existing_bare_repo
+    with_tmpdir do |dir|
+      repo = init_git_repo(dir, "demo.gemspec" => "Gem::Specification.new\n", "REVISION" => "one\n")
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      source = Scint::Source::Git.new(uri: repo, branch: "main")
+
+      install.send(:clone_git_source, source, cache)
+      bare = cache.git_path(source.uri)
+      before = bare_rev_parse(bare, "main^{commit}")
+
+      commit_file(repo, "REVISION", "two\n", "update")
+      install.send(:clone_git_source, source, cache)
+      after = bare_rev_parse(bare, "main^{commit}")
+
+      refute_equal before, after
+    end
+  end
+
+  private
+
+  def init_git_repo(root_dir, files)
+    repo = File.join(root_dir, "repo")
+    FileUtils.mkdir_p(repo)
+    with_cwd(repo) do
+      run_git("init", "-b", "main")
+      files.each { |path, content| File.write(path, content) }
+      run_git("add", ".")
+      run_git("commit", "-m", "initial")
+    end
+    repo
+  end
+
+  def commit_file(repo, path, content, message)
+    with_cwd(repo) do
+      File.write(path, content)
+      run_git("add", path)
+      run_git("commit", "-m", message)
+    end
+  end
+
+  def git_commit_hash(repo)
+    with_cwd(repo) { run_git("rev-parse", "HEAD").strip }
+  end
+
+  def bare_rev_parse(bare_repo, rev)
+    out, err, status = Open3.capture3("git", "--git-dir", bare_repo, "rev-parse", rev)
+    assert status.success?, "git rev-parse failed: #{err}"
+    out.strip
+  end
+
+  def run_git(*args)
+    out, err, status = Open3.capture3(
+      "git",
+      "-c", "user.name=Scint Test",
+      "-c", "user.email=scint@example.com",
+      *args,
+    )
+    assert status.success?, "git #{args.join(' ')} failed: #{err}"
+    out
   end
 end

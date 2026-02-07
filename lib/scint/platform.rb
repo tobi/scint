@@ -29,7 +29,7 @@ module Scint
       return true if spec_platform == "ruby"
 
       spec_plat = spec_platform.is_a?(::Gem::Platform) ? spec_platform : ::Gem::Platform.new(spec_platform)
-      ::Gem::Platform.match_gem?(spec_plat, local_platform)
+      spec_plat === local_platform
     end
 
     def ruby_engine

@@ -38,6 +38,16 @@ module Scint
         File.join(@root, "git")
       end
 
+      # Isolated gem home used while compiling native extensions during install.
+      # This keeps build-time gem activation hermetic to scint-managed paths.
+      def install_env_dir
+        File.join(@root, "install-env")
+      end
+
+      def install_ruby_dir
+        File.join(install_env_dir, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
+      end
+
       # -- Per-spec paths ------------------------------------------------------
 
       def inbound_path(spec)

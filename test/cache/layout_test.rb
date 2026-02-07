@@ -61,6 +61,13 @@ class CacheLayoutTest < Minitest::Test
     assert_match %r{/tmp/cache/git/[0-9a-f]{16}$}, path
   end
 
+  def test_install_ruby_dir_is_under_install_env
+    layout = Scint::Cache::Layout.new(root: "/tmp/cache")
+
+    assert_equal "/tmp/cache/install-env", layout.install_env_dir
+    assert_equal "/tmp/cache/install-env/ruby/#{RUBY_VERSION.split(".")[0, 2].join(".")}.0", layout.install_ruby_dir
+  end
+
   def test_ensure_dir_makes_directory_once_even_with_threads
     with_tmpdir do |dir|
       layout = Scint::Cache::Layout.new(root: dir)
