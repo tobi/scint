@@ -275,9 +275,31 @@ class FetcherTest < Minitest::Test
           fetcher.fetch("https://example.test/notfound.gem", dest)
         end
         assert_includes error.message, "HTTP 404"
+        assert_includes error.message, "not found"
       end
 
       assert_equal [], Dir.glob("#{dest}.*.tmp")
+    end
+  end
+
+  def test_fetch_raises_network_error_with_body_excerpt_for_http_error
+    with_tmpdir do |dir|
+      fetcher = Scint::Downloader::Fetcher.new
+      dest = File.join(dir, "restricted.gem")
+      conn = FakeHTTP.new([
+                            http_response(
+                              Net::HTTPNotFound,
+                              body: "<h1>Download Restricted: TOKEN_DELETED</h1>\n<p>Token removed.</p>",
+                            ),
+                          ])
+
+      fetcher.stub(:connection_for, ->(_uri) { conn }) do
+        error = assert_raises(Scint::NetworkError) do
+          fetcher.fetch("https://example.test/restricted.gem", dest)
+        end
+        assert_includes error.message, "HTTP 404"
+        assert_includes error.message, "TOKEN_DELETED"
+      end
     end
   end
 end

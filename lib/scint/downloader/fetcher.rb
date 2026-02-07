@@ -54,7 +54,7 @@ module Scint
               current_uri = URI.parse(location)
               next
             else
-              raise NetworkError, "HTTP #{response.code} for #{uri}: #{response.message}"
+              raise NetworkError, http_error_message(current_uri, response)
             end
           end
 
@@ -107,6 +107,18 @@ module Scint
           @connections[key] = http
           http
         end
+      end
+
+      def http_error_message(uri, response)
+        message = "HTTP #{response.code} for #{uri}: #{response.message}"
+        body = response.body.to_s
+        return message if body.empty?
+
+        excerpt = body.gsub(/\s+/, " ").strip
+        return message if excerpt.empty?
+
+        excerpt = "#{excerpt[0, 277]}..." if excerpt.length > 280
+        "#{message} -- #{excerpt}"
       end
     end
   end
