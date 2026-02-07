@@ -102,4 +102,31 @@ class DownloaderPoolTest < Minitest::Test
     assert_equal [:a, :b], closed.sort
     assert_equal({}, pool.instance_variable_get(:@fetchers))
   end
+
+  def test_thread_fetcher_creates_fetcher_per_thread
+    pool = Scint::Downloader::Pool.new(size: 1)
+    fetcher = pool.send(:thread_fetcher)
+
+    assert_kind_of Scint::Downloader::Fetcher, fetcher
+
+    # Same thread should get same fetcher
+    same_fetcher = pool.send(:thread_fetcher)
+    assert_same fetcher, same_fetcher
+  ensure
+    pool.close
+  end
+
+  def test_reset_thread_fetcher_closes_and_removes_fetcher
+    pool = Scint::Downloader::Pool.new(size: 1)
+
+    # First create a fetcher
+    pool.send(:thread_fetcher)
+    fetchers = pool.instance_variable_get(:@fetchers)
+    tid = Thread.current.object_id
+    assert fetchers.key?(tid)
+
+    # Now reset it
+    pool.send(:reset_thread_fetcher)
+    refute fetchers.key?(tid)
+  end
 end

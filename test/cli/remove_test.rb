@@ -95,4 +95,10 @@ class CLIRemoveTest < Minitest::Test
     assert_equal "", out
     assert_includes err, "Usage: scint remove"
   end
+
+  def test_unknown_option_raises_gemfile_error
+    assert_raises(Scint::GemfileError) do
+      Scint::CLI::Remove.new(["rack", "--unknown-flag"])
+    end
+  end
 end

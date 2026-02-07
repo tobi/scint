@@ -6,6 +6,7 @@ SimpleCov.start do
   add_filter "lib/scint/vendor/"
   add_filter "lib/bundler.rb"
   add_filter "lib/bundler/"
+  add_filter "lib/scint/version.rb"
   enable_coverage :branch
   track_files "lib/**/*.rb"
 end

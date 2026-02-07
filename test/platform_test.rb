@@ -32,4 +32,12 @@ class PlatformTest < Minitest::Test
     assert_includes [true, false], Scint::Platform.macos?
     assert_includes [true, false], Scint::Platform.linux?
   end
+
+  def test_ruby_engine_returns_engine
+    assert_equal RUBY_ENGINE, Scint::Platform.ruby_engine
+  end
+
+  def test_ruby_version_returns_version
+    assert_equal RUBY_VERSION, Scint::Platform.ruby_version
+  end
 end

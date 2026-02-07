@@ -59,4 +59,17 @@ class PackageTest < Minitest::Test
       assert_includes error.message, "No metadata.gz"
     end
   end
+
+  def test_read_metadata_raises_when_no_metadata_gz
+    with_tmpdir do |dir|
+      gem_path = File.join(dir, "broken.gem")
+      # A gem file with only data.tar.gz, no metadata.gz
+      data_tar_gz = gzip(make_tar([{ type: :file, name: "lib/x.rb", content: "x" }]))
+      File.binwrite(gem_path, make_tar([{ type: :file, name: "data.tar.gz", content: data_tar_gz }]))
+
+      pkg = Scint::GemPkg::Package.new
+      error = assert_raises(Scint::InstallError) { pkg.read_metadata(gem_path) }
+      assert_includes error.message, "No metadata.gz found"
+    end
+  end
 end

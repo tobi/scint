@@ -93,4 +93,94 @@ class CLIAddTest < Minitest::Test
     assert_equal "", out
     assert_includes err, "Usage: scint add"
   end
+
+  def test_group_option_passes_group_to_editor
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        File.write("Gemfile", "source \"https://rubygems.org\"\n")
+
+        Scint::CLI::Install.stub(:new, ->(*) { flunk("install should not run") }) do
+          out, _err = with_captured_io do
+            status = Scint::CLI::Add.new(["rspec", "--group", "test", "--skip-install"]).run
+            assert_equal 0, status
+          end
+
+          assert_includes out, "Added rspec"
+        end
+
+        contents = File.read("Gemfile")
+        assert_includes contents, "rspec"
+        assert_includes contents, "test"
+      end
+    end
+  end
+
+  def test_source_option_passes_source_to_editor
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        File.write("Gemfile", "source \"https://rubygems.org\"\n")
+
+        Scint::CLI::Install.stub(:new, ->(*) { flunk("install should not run") }) do
+          out, _err = with_captured_io do
+            status = Scint::CLI::Add.new(["my_gem", "--source", "https://private.gems.org", "--skip-install"]).run
+            assert_equal 0, status
+          end
+
+          assert_includes out, "Added my_gem"
+        end
+
+        contents = File.read("Gemfile")
+        assert_includes contents, "my_gem"
+        assert_includes contents, "https://private.gems.org"
+      end
+    end
+  end
+
+  def test_git_option_passes_git_to_editor
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        File.write("Gemfile", "source \"https://rubygems.org\"\n")
+
+        Scint::CLI::Install.stub(:new, ->(*) { flunk("install should not run") }) do
+          out, _err = with_captured_io do
+            status = Scint::CLI::Add.new(["my_gem", "--git", "https://github.com/foo/bar.git", "--skip-install"]).run
+            assert_equal 0, status
+          end
+
+          assert_includes out, "Added my_gem"
+        end
+
+        contents = File.read("Gemfile")
+        assert_includes contents, "my_gem"
+        assert_includes contents, "https://github.com/foo/bar.git"
+      end
+    end
+  end
+
+  def test_path_option_passes_path_to_editor
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        File.write("Gemfile", "source \"https://rubygems.org\"\n")
+
+        Scint::CLI::Install.stub(:new, ->(*) { flunk("install should not run") }) do
+          out, _err = with_captured_io do
+            status = Scint::CLI::Add.new(["my_gem", "--path", "../vendor/my_gem", "--skip-install"]).run
+            assert_equal 0, status
+          end
+
+          assert_includes out, "Added my_gem"
+        end
+
+        contents = File.read("Gemfile")
+        assert_includes contents, "my_gem"
+        assert_includes contents, "../vendor/my_gem"
+      end
+    end
+  end
+
+  def test_unknown_option_raises_gemfile_error
+    assert_raises(Scint::GemfileError) do
+      Scint::CLI::Add.new(["rack", "--unknown-flag"])
+    end
+  end
 end

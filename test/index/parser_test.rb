@@ -44,4 +44,20 @@ class IndexParserTest < Minitest::Test
 
     assert_equal ["rack", "2.2.8", "ruby", {}, {}], line
   end
+
+  def test_parse_versions_without_checksum
+    parser = Scint::Index::Parser.new
+    versions = parser.parse_versions("---\nmygem 1.0.0\n")
+
+    assert_equal [["mygem", "1.0.0"]], versions["mygem"]
+    assert_equal "", parser.info_checksums["mygem"]
+  end
+
+  def test_parse_info_requirement_without_version_constraint
+    parser = Scint::Index::Parser.new
+    lines = parser.parse_info("rack", "2.0.0 |ruby\n")
+
+    _name, _version, _platform, _deps, reqs = lines.first
+    assert_equal({ "ruby" => ">= 0" }, reqs)
+  end
 end

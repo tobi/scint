@@ -3,6 +3,7 @@
 require_relative "../test_helper"
 require "scint/installer/planner"
 require "scint/cache/layout"
+require "scint/source/path"
 
 class PlannerTest < Minitest::Test
   Spec = Struct.new(:name, :version, :platform, :has_extensions, :size, :source, keyword_init: true)
@@ -283,6 +284,127 @@ class PlannerTest < Minitest::Test
 
       entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
       assert_equal :skip, entry.action
+    end
+  end
+
+  def test_plan_one_marks_link_for_source_with_path_method
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        bundle_path = File.join(dir, ".bundle")
+        layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+        local_dir = File.join(dir, "vendor", "mygem")
+        FileUtils.mkdir_p(local_dir)
+
+        # Source object with `path` method (hits line 123)
+        source = Object.new
+        source.define_singleton_method(:path) { Pathname.new("vendor/mygem") }
+        source.define_singleton_method(:to_s) { "vendor/mygem" }
+
+        spec = Spec.new(
+          name: "mygem",
+          version: "0.1.0",
+          platform: "ruby",
+          has_extensions: false,
+          source: source,
+        )
+
+        entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
+        assert_equal :link, entry.action
+      end
+    end
+  end
+
+  def test_plan_one_marks_link_for_path_source_via_uri
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        bundle_path = File.join(dir, ".bundle")
+        layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+        local_dir = File.join(dir, "vendor", "mygem")
+        FileUtils.mkdir_p(local_dir)
+
+        # Source::Path-like object with `uri` method and class name ending in "::Path" (line 125)
+        source = Scint::Source::Path.new(path: "vendor/mygem")
+
+        spec = Spec.new(
+          name: "mygem",
+          version: "0.1.0",
+          platform: "ruby",
+          has_extensions: false,
+          source: source,
+        )
+
+        entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
+        assert_equal :link, entry.action
+      end
+    end
+  end
+
+  def test_local_source_path_with_hash_spec_source_key
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        bundle_path = File.join(dir, ".bundle")
+        layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+        local_dir = File.join(dir, "vendor", "hashgem")
+        FileUtils.mkdir_p(local_dir)
+
+        # Use a hash-like spec that responds to :source by returning a value
+        # via the hash key (line 117: spec[:source])
+        # We need a spec that does NOT respond_to?(:source) to hit line 117.
+        # Actually, looking at lines 112-118:
+        #   if spec.respond_to?(:source) => spec.source
+        #   else => spec[:source]
+        # Our Spec struct responds to :source, so we need a plain hash.
+        # But plan_one also calls spec.name etc. So we'd need a special object.
+        # The local_source_path method is private, so let's call it directly
+        # with a hash that has [:source] but no .source method.
+        hash_spec = { source: "vendor/hashgem", name: "hashgem", version: "0.1.0" }
+
+        result = Scint::Installer::Planner.send(:local_source_path, hash_spec)
+        assert_equal File.expand_path("vendor/hashgem", dir), result
+      end
+    end
+  end
+
+  def test_local_source_path_with_uri_path_class
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        local_dir = File.join(dir, "vendor", "urigem")
+        FileUtils.mkdir_p(local_dir)
+
+        # Create a source object with .uri method (no .path method)
+        # whose class name ends in "::Path" to hit lines 124-125
+        path_class = Class.new do
+          def initialize(uri_val)
+            @uri_val = uri_val
+          end
+
+          def uri
+            @uri_val
+          end
+
+          def to_s
+            "custom path source"
+          end
+
+          # Make class name end with ::Path
+          def self.name
+            "Custom::Source::Path"
+          end
+        end
+
+        source = path_class.new("vendor/urigem")
+
+        spec = Spec.new(
+          name: "urigem",
+          version: "0.1.0",
+          platform: "ruby",
+          has_extensions: false,
+          source: source,
+        )
+
+        result = Scint::Installer::Planner.send(:local_source_path, spec)
+        assert_equal File.expand_path("vendor/urigem", dir), result
+      end
     end
   end
 

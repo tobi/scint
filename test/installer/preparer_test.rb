@@ -243,4 +243,92 @@ class PreparerTest < Minitest::Test
       assert_nil preparer.send(:load_cached_spec, spec)
     end
   end
+
+  def test_prepare_one_uses_cached_extracted_directory
+    with_tmpdir do |dir|
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      spec = fake_spec(name: "rack", version: "2.2.8")
+
+      extracted = layout.extracted_path(spec)
+      FileUtils.mkdir_p(extracted)
+      cached_spec = { "cached" => true }
+      File.binwrite(layout.spec_cache_path(spec), Marshal.dump(cached_spec))
+
+      pool = FakeDownloadPool.new
+      package = FakePackage.new(gemspec: {})
+      preparer = new_preparer(layout, pool: pool, package: package)
+
+      result = preparer.prepare_one(plan_entry(spec))
+
+      assert_equal true, result.from_cache
+      assert_equal cached_spec, result.gemspec
+      assert_equal extracted, result.extracted_path
+    end
+  end
+
+  def test_extract_gem_returns_cached_when_dest_already_exists
+    with_tmpdir do |dir|
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      spec = fake_spec(name: "rack", version: "2.2.8")
+
+      # Pre-create extracted path to simulate race condition
+      extracted = layout.extracted_path(spec)
+      FileUtils.mkdir_p(extracted)
+      File.write(File.join(extracted, "rack.gemspec"), <<~RUBY)
+        Gem::Specification.new do |s|
+          s.name = "rack"
+          s.version = "2.2.8"
+          s.summary = "rack"
+          s.authors = ["a"]
+        end
+      RUBY
+
+      pool = FakeDownloadPool.new
+      package = FakePackage.new(gemspec: {})
+      preparer = new_preparer(layout, pool: pool, package: package)
+
+      # Call extract_gem directly with a dummy gem_path
+      result = preparer.send(:extract_gem, spec, "/dummy.gem")
+
+      assert_equal true, result.from_cache
+      assert_equal extracted, result.extracted_path
+    end
+  end
+
+  def test_read_gemspec_from_extracted_returns_nil_on_load_error
+    with_tmpdir do |dir|
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      pool = FakeDownloadPool.new
+      package = FakePackage.new(gemspec: {})
+      preparer = new_preparer(layout, pool: pool, package: package)
+      spec = fake_spec(name: "broken", version: "1.0.0")
+
+      extracted = File.join(dir, "extracted")
+      FileUtils.mkdir_p(extracted)
+      File.write(File.join(extracted, "broken.gemspec"), "raise 'oops'")
+
+      result = preparer.send(:read_gemspec_from_extracted, extracted, spec)
+      assert_nil result
+    end
+  end
+
+  def test_read_gemspec_from_extracted_rescues_standard_error
+    with_tmpdir do |dir|
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      pool = FakeDownloadPool.new
+      package = FakePackage.new(gemspec: {})
+      preparer = new_preparer(layout, pool: pool, package: package)
+      spec = fake_spec(name: "erroring", version: "1.0.0")
+
+      extracted = File.join(dir, "extracted")
+      FileUtils.mkdir_p(extracted)
+      File.write(File.join(extracted, "erroring.gemspec"), "# valid gemspec file")
+
+      # Stub Gem::Specification.load to raise StandardError (line 177-178)
+      Gem::Specification.stub(:load, ->(_path) { raise StandardError, "load failed" }) do
+        result = preparer.send(:read_gemspec_from_extracted, extracted, spec)
+        assert_nil result, "should return nil when Gem::Specification.load raises StandardError"
+      end
+    end
+  end
 end

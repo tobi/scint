@@ -109,4 +109,175 @@ class FetcherTest < Minitest::Test
     assert b.finished?
     assert_equal({}, fetcher.instance_variable_get(:@connections))
   end
+
+  def test_fetch_with_string_uri_parses_automatically
+    with_tmpdir do |dir|
+      fetcher = Scint::Downloader::Fetcher.new
+      dest = File.join(dir, "rack.gem")
+      conn = FakeHTTP.new([http_response(Net::HTTPOK, body: "string-uri")])
+
+      fetcher.stub(:connection_for, ->(_uri) { conn }) do
+        result = fetcher.fetch("https://example.test/gems/rack.gem", dest)
+
+        assert_equal dest, result[:path]
+        assert_equal 10, result[:size]
+      end
+
+      assert_equal "string-uri", File.binread(dest)
+    end
+  end
+
+  def test_fetch_with_uri_object
+    with_tmpdir do |dir|
+      fetcher = Scint::Downloader::Fetcher.new
+      dest = File.join(dir, "rack.gem")
+      conn = FakeHTTP.new([http_response(Net::HTTPOK, body: "uri-obj")])
+
+      fetcher.stub(:connection_for, ->(_uri) { conn }) do
+        result = fetcher.fetch(URI.parse("https://example.test/gems/rack.gem"), dest)
+
+        assert_equal dest, result[:path]
+        assert_equal 7, result[:size]
+      end
+
+      assert_equal "uri-obj", File.binread(dest)
+    end
+  end
+
+  def test_fetch_applies_credentials_to_request
+    with_tmpdir do |dir|
+      fetcher_creds = Object.new
+      applied_uri = nil
+      fetcher_creds.define_singleton_method(:apply!) do |request, uri|
+        applied_uri = uri
+        request.basic_auth("user", "pass")
+      end
+
+      fetcher = Scint::Downloader::Fetcher.new(credentials: fetcher_creds)
+      dest = File.join(dir, "private.gem")
+      conn = FakeHTTP.new([http_response(Net::HTTPOK, body: "secret")])
+
+      fetcher.stub(:connection_for, ->(_uri) { conn }) do
+        fetcher.fetch("https://private.example.test/gems/private.gem", dest)
+      end
+
+      refute_nil applied_uri
+      assert_equal "private.example.test", applied_uri.host
+      assert_equal "secret", File.binread(dest)
+    end
+  end
+
+  def test_connection_for_reuses_started_connection
+    fetcher = Scint::Downloader::Fetcher.new
+    conn = FakeHTTP.new([])
+    fetcher.instance_variable_set(:@connections, { "example.test:443:https" => conn })
+
+    result = fetcher.send(:connection_for, URI.parse("https://example.test/path"))
+    assert_same conn, result
+  end
+
+  def test_connection_for_creates_new_connection_when_not_started
+    fetcher = Scint::Downloader::Fetcher.new
+
+    fake_http = FakeHTTP.new([])
+    started = false
+    original_new = Net::HTTP.method(:new)
+
+    Net::HTTP.stub(:new, lambda { |host, port|
+      http = Object.new
+      http.define_singleton_method(:use_ssl=) { |_v| }
+      http.define_singleton_method(:open_timeout=) { |_v| }
+      http.define_singleton_method(:read_timeout=) { |_v| }
+      http.define_singleton_method(:keep_alive_timeout=) { |_v| }
+      http.define_singleton_method(:start) { started = true }
+      http.define_singleton_method(:started?) { started }
+      http
+    }) do
+      result = fetcher.send(:connection_for, URI.parse("https://new.example.test/path"))
+      assert started
+      assert result.started?
+    end
+  end
+
+  def test_connection_for_replaces_dead_connection
+    fetcher = Scint::Downloader::Fetcher.new
+
+    dead_conn = Object.new
+    dead_conn.define_singleton_method(:started?) { false }
+
+    fetcher.instance_variable_set(:@connections, { "dead.example.test:443:https" => dead_conn })
+
+    started = false
+    Net::HTTP.stub(:new, lambda { |host, port|
+      http = Object.new
+      http.define_singleton_method(:use_ssl=) { |_v| }
+      http.define_singleton_method(:open_timeout=) { |_v| }
+      http.define_singleton_method(:read_timeout=) { |_v| }
+      http.define_singleton_method(:keep_alive_timeout=) { |_v| }
+      http.define_singleton_method(:start) { started = true }
+      http.define_singleton_method(:started?) { started }
+      http
+    }) do
+      result = fetcher.send(:connection_for, URI.parse("https://dead.example.test/path"))
+      assert started
+      assert result.started?
+      refute_same dead_conn, result
+    end
+  end
+
+  def test_fetch_cleans_up_temp_file_on_exception
+    with_tmpdir do |dir|
+      fetcher = Scint::Downloader::Fetcher.new
+      dest = File.join(dir, "fail.gem")
+
+      conn = Object.new
+      conn.define_singleton_method(:request) { |_req| raise RuntimeError, "network fail" }
+      conn.define_singleton_method(:started?) { true }
+
+      fetcher.stub(:connection_for, ->(_uri) { conn }) do
+        assert_raises(RuntimeError) do
+          fetcher.fetch("https://example.test/fail.gem", dest)
+        end
+      end
+
+      refute File.exist?(dest)
+      assert_equal [], Dir.glob("#{dest}.*.tmp")
+    end
+  end
+
+  def test_fetch_checksum_success
+    with_tmpdir do |dir|
+      fetcher = Scint::Downloader::Fetcher.new
+      dest = File.join(dir, "checked.gem")
+      body = "verified content"
+      expected_checksum = Digest::SHA256.hexdigest(body)
+      conn = FakeHTTP.new([http_response(Net::HTTPOK, body: body)])
+
+      fetcher.stub(:connection_for, ->(_uri) { conn }) do
+        result = fetcher.fetch("https://example.test/checked.gem", dest, checksum: expected_checksum)
+
+        assert_equal dest, result[:path]
+        assert_equal body.bytesize, result[:size]
+      end
+
+      assert_equal body, File.binread(dest)
+    end
+  end
+
+  def test_fetch_raises_network_error_for_http_error_response
+    with_tmpdir do |dir|
+      fetcher = Scint::Downloader::Fetcher.new
+      dest = File.join(dir, "notfound.gem")
+      conn = FakeHTTP.new([http_response(Net::HTTPNotFound, body: "not found")])
+
+      fetcher.stub(:connection_for, ->(_uri) { conn }) do
+        error = assert_raises(Scint::NetworkError) do
+          fetcher.fetch("https://example.test/notfound.gem", dest)
+        end
+        assert_includes error.message, "HTTP 404"
+      end
+
+      assert_equal [], Dir.glob("#{dest}.*.tmp")
+    end
+  end
 end

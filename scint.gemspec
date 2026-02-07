@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require_relative "lib/scint"
+require_relative "lib/scint/version"
 
 Gem::Specification.new do |spec|
   spec.name = "scint"

@@ -62,6 +62,98 @@ class RuntimeExecTest < Minitest::Test
     end
   end
 
+  def test_resolve_command_returns_original_when_no_gem_executable_found
+    with_tmpdir do |dir|
+      bundle_dir = File.join(dir, ".bundle")
+      ruby_dir = ruby_bundle_dir(bundle_dir)
+      FileUtils.mkdir_p(File.join(bundle_dir, "bin"))
+      FileUtils.mkdir_p(File.join(ruby_dir, "bin"))
+      FileUtils.mkdir_p(File.join(ruby_dir, "gems"))
+
+      result = Scint::Runtime::Exec.send(:resolve_command, "nonexistent", bundle_dir, ruby_dir)
+      assert_equal "nonexistent", result
+    end
+  end
+
+  def test_find_gem_executable_searches_gems_directories
+    with_tmpdir do |dir|
+      ruby_dir = File.join(dir, "ruby", "3.3.0")
+      gem_dir = File.join(ruby_dir, "gems", "rake-13.0.0")
+      exe_dir = File.join(gem_dir, "exe")
+      FileUtils.mkdir_p(exe_dir)
+      File.write(File.join(exe_dir, "rake"), "#!/usr/bin/env ruby\nputs 'hello'")
+
+      result = Scint::Runtime::Exec.send(:find_gem_executable, ruby_dir, "rake")
+      assert_equal File.join(exe_dir, "rake"), result
+    end
+  end
+
+  def test_find_gem_executable_returns_nil_when_gems_dir_missing
+    with_tmpdir do |dir|
+      ruby_dir = File.join(dir, "ruby", "3.3.0")
+      # Don't create gems dir
+      result = Scint::Runtime::Exec.send(:find_gem_executable, ruby_dir, "rake")
+      assert_nil result
+    end
+  end
+
+  def test_find_gem_executable_checks_bin_subdirectory_too
+    with_tmpdir do |dir|
+      ruby_dir = File.join(dir, "ruby", "3.3.0")
+      gem_dir = File.join(ruby_dir, "gems", "rspec-3.12.0")
+      bin_dir = File.join(gem_dir, "bin")
+      FileUtils.mkdir_p(bin_dir)
+      File.write(File.join(bin_dir, "rspec"), "#!/usr/bin/env ruby\nputs 'test'")
+
+      result = Scint::Runtime::Exec.send(:find_gem_executable, ruby_dir, "rspec")
+      assert_equal File.join(bin_dir, "rspec"), result
+    end
+  end
+
+  def test_write_bundle_exec_wrapper_creates_wrapper_script
+    with_tmpdir do |dir|
+      bundle_bin = File.join(dir, "bundle_bin")
+      FileUtils.mkdir_p(bundle_bin)
+
+      wrapper_path = File.join(bundle_bin, "rails")
+      target_path = File.join(dir, "gems", "railties-7.0.0", "exe", "rails")
+
+      Scint::Runtime::Exec.send(:write_bundle_exec_wrapper, wrapper_path, target_path, bundle_bin)
+
+      assert File.exist?(wrapper_path), "wrapper file should exist"
+      content = File.read(wrapper_path)
+      assert_includes content, "#!/usr/bin/env ruby"
+      assert_includes content, "load"
+      assert_equal 0o755, File.stat(wrapper_path).mode & 0o777
+    end
+  end
+
+  def test_resolve_command_with_absolute_path_returns_command_unchanged
+    result = Scint::Runtime::Exec.send(:resolve_command, "/usr/bin/ruby", "/some/bundle", "/some/ruby")
+    assert_equal "/usr/bin/ruby", result
+  end
+
+  def test_resolve_command_creates_wrapper_for_gem_executable
+    with_tmpdir do |dir|
+      bundle_dir = File.join(dir, ".bundle")
+      ruby_dir = ruby_bundle_dir(bundle_dir)
+      gems_dir = File.join(ruby_dir, "gems")
+      gem_dir = File.join(gems_dir, "rspec-3.12.0")
+      exe_dir = File.join(gem_dir, "exe")
+      FileUtils.mkdir_p(exe_dir)
+      FileUtils.mkdir_p(File.join(bundle_dir, "bin"))
+      FileUtils.mkdir_p(File.join(ruby_dir, "bin"))
+      File.write(File.join(exe_dir, "rspec"), "#!/usr/bin/env ruby\nputs 'test'")
+
+      result = Scint::Runtime::Exec.send(:resolve_command, "rspec", bundle_dir, ruby_dir)
+
+      # Should have created a wrapper in .bundle/bin
+      expected_wrapper = File.join(bundle_dir, "bin", "rspec")
+      assert_equal expected_wrapper, result
+      assert File.exist?(expected_wrapper)
+    end
+  end
+
   def test_exec_sets_bundle_gemfile_to_nil_when_project_has_no_gemfile
     with_tmpdir do |dir|
       bundle_dir = File.join(dir, ".bundle")

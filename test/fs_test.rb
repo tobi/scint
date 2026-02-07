@@ -131,4 +131,49 @@ class FSTest < Minitest::Test
       assert_equal "v2", File.read(path)
     end
   end
+
+  def test_clonefile_uses_system_cp_on_macos
+    with_tmpdir do |dir|
+      src = File.join(dir, "src.txt")
+      dst = File.join(dir, "dst.txt")
+      File.write(src, "clone")
+
+      Scint::Platform.stub(:macos?, true) do
+        # Stub system to simulate successful cp -c
+        Object.stub(:system, lambda { |*args|
+          # Simulate success: just do a regular copy
+          FileUtils.cp(src, dst) unless File.exist?(dst)
+          true
+        }) do
+          Scint::FS.clonefile(src, dst)
+        end
+      end
+
+      assert_equal "clone", File.read(dst)
+    end
+  end
+
+  def test_atomic_move_handles_cross_device_directory
+    with_tmpdir do |dir|
+      src_dir = File.join(dir, "src_dir")
+      dst_dir = File.join(dir, "dst_dir")
+      FileUtils.mkdir_p(src_dir)
+      File.write(File.join(src_dir, "file.txt"), "content")
+
+      calls = 0
+      original = File.method(:rename)
+
+      File.stub(:rename, lambda { |a, b|
+        calls += 1
+        raise Errno::EXDEV if calls == 1
+        original.call(a, b)
+      }) do
+        Scint::FS.atomic_move(src_dir, dst_dir)
+      end
+
+      assert File.exist?(File.join(dst_dir, "file.txt"))
+      assert_equal "content", File.read(File.join(dst_dir, "file.txt"))
+      refute File.exist?(src_dir)
+    end
+  end
 end

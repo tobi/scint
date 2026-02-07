@@ -1,7 +1,8 @@
 # frozen_string_literal: true
 
+require_relative "scint/version"
+
 module Scint
-  VERSION = "0.5.0"
 
   # Color support: respects NO_COLOR (https://no-color.org) and TERM=dumb.
   COLOR = !ENV.key?("NO_COLOR") && ENV["TERM"] != "dumb" && $stderr.tty?

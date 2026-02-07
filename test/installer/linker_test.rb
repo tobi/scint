@@ -184,6 +184,57 @@ class LinkerTest < Minitest::Test
     end
   end
 
+  def test_link_uses_string_gemspec_content_directly
+    with_tmpdir do |dir|
+      bundle_path = File.join(dir, ".bundle")
+      extracted = File.join(dir, "cache", "rack-2.2.8")
+      FileUtils.mkdir_p(File.join(extracted, "lib"))
+      File.write(File.join(extracted, "lib", "rack.rb"), "module Rack; end\n")
+
+      spec = fake_spec(name: "rack", version: "2.2.8")
+      string_gemspec = <<~RUBY
+        Gem::Specification.new do |s|
+          s.name = "rack"
+          s.version = "2.2.8"
+          s.authors = ["string-test"]
+          s.summary = "from string"
+        end
+      RUBY
+      prepared = Prepared.new(spec: spec, extracted_path: extracted, gemspec: string_gemspec, from_cache: true)
+
+      Scint::Installer::Linker.link(prepared, bundle_path)
+
+      spec_path = File.join(ruby_bundle_dir(bundle_path), "specifications", "rack-2.2.8.gemspec")
+      content = File.read(spec_path)
+      assert_includes content, "string-test"
+      assert_includes content, "from string"
+    end
+  end
+
+  def test_infer_bindir_returns_current_bindir_when_no_exe_or_bin_match
+    with_tmpdir do |dir|
+      bundle_path = File.join(dir, ".bundle")
+      extracted = File.join(dir, "cache", "tool-1.0.0")
+      # Create a lib dir but no exe/ or bin/ dir with the executable
+      FileUtils.mkdir_p(File.join(extracted, "lib"))
+      File.write(File.join(extracted, "lib", "tool.rb"), "module Tool; end\n")
+
+      spec = fake_spec(name: "tool", version: "1.0.0")
+      gemspec = Gem::Specification.new do |s|
+        s.name = "tool"
+        s.version = Gem::Version.new("1.0.0")
+        s.authors = ["a"]
+        s.summary = "tool"
+        s.executables = ["toolcmd"]
+        s.bindir = "custom_bin"
+      end
+      prepared = Prepared.new(spec: spec, extracted_path: extracted, gemspec: gemspec, from_cache: true)
+
+      result = Scint::Installer::Linker.send(:infer_bindir, extracted, ["toolcmd"], "custom_bin")
+      assert_equal "custom_bin", result
+    end
+  end
+
   def test_link_files_and_write_binstubs_can_run_as_separate_steps
     with_tmpdir do |dir|
       bundle_path = File.join(dir, ".bundle")

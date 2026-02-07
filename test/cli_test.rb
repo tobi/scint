@@ -78,6 +78,72 @@ class CLITest < Minitest::Test
     end
   end
 
+  def test_run_help_command_returns_zero_and_outputs_help_text
+    out, err = with_captured_io do
+      status = Scint::CLI.run(["help"])
+      assert_equal 0, status
+    end
+
+    assert_equal "", err
+    assert_includes out, "Usage: scint COMMAND"
+    assert_includes out, "Commands:"
+    assert_includes out, "install"
+    assert_includes out, "exec"
+  end
+
+  def test_run_help_flag_returns_zero_and_outputs_help_text
+    out, err = with_captured_io do
+      status = Scint::CLI.run(["--help"])
+      assert_equal 0, status
+    end
+
+    assert_equal "", err
+    assert_includes out, "Usage: scint COMMAND"
+  end
+
+  def test_run_exec_command_dispatches
+    fake = Object.new
+    fake.define_singleton_method(:run) { 0 }
+
+    require "scint/cli/exec"
+    Scint::CLI::Exec.stub(:new, ->(*) { fake }) do
+      _out, _err = with_captured_io do
+        status = Scint::CLI.run(["exec", "ruby", "-v"])
+        assert_equal 0, status
+      end
+    end
+  end
+
+  def test_run_returns_130_on_interrupt
+    require "scint/cli/exec"
+    fake = Object.new
+    fake.define_singleton_method(:run) { raise Interrupt }
+
+    Scint::CLI::Exec.stub(:new, ->(*) { fake }) do
+      _out, err = with_captured_io do
+        status = Scint::CLI.run(["exec", "ruby"])
+        assert_equal 130, status
+      end
+
+      assert_includes err, "Interrupted"
+    end
+  end
+
+  def test_run_returns_1_on_generic_exception
+    require "scint/cli/exec"
+    fake = Object.new
+    fake.define_singleton_method(:run) { raise RuntimeError, "something broke" }
+
+    Scint::CLI::Exec.stub(:new, ->(*) { fake }) do
+      _out, err = with_captured_io do
+        status = Scint::CLI.run(["exec", "ruby"])
+        assert_equal 1, status
+      end
+
+      assert_includes err, "Fatal: RuntimeError: something broke"
+    end
+  end
+
   def test_run_maps_bundler_error_to_status_code
     with_tmpdir do |dir|
       with_cwd(dir) do

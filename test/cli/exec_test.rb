@@ -144,6 +144,103 @@ class CLIExecTest < Minitest::Test
     end
   end
 
+  def test_run_returns_error_when_no_lockfile_found
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        old_err = $stderr
+        err = StringIO.new
+        $stderr = err
+
+        status = Scint::CLI::Exec.new(["ruby", "-v"]).run
+        assert_equal 1, status
+        assert_includes err.string, "No runtime lock found"
+      ensure
+        $stderr = old_err
+      end
+    end
+  end
+
+  def test_rebuild_runtime_lock_returns_nil_on_standard_error
+    with_tmpdir do |dir|
+      root = File.join(dir, "project")
+      bundle_dir = File.join(root, ".bundle")
+      ruby_dir = ruby_bundle_dir(bundle_dir)
+      specs_dir = File.join(ruby_dir, "specifications")
+      gems_dir = File.join(ruby_dir, "gems")
+      gem_dir = File.join(gems_dir, "rack-2.2.8")
+      lib_dir = File.join(gem_dir, "lib")
+
+      FileUtils.mkdir_p(specs_dir)
+      FileUtils.mkdir_p(lib_dir)
+      File.write(File.join(root, "Gemfile.lock"), <<~LOCK)
+        GEM
+          remote: https://rubygems.org/
+          specs:
+            rack (2.2.8)
+
+        DEPENDENCIES
+          rack
+      LOCK
+
+      lock_path = File.join(bundle_dir, Scint::CLI::Exec::RUNTIME_LOCK)
+      exec_instance = Scint::CLI::Exec.new(["ruby"])
+
+      # Stub FS.atomic_write to raise, simulating an error during rebuild
+      Scint::FS.stub(:atomic_write, ->(*) { raise StandardError, "disk error" }) do
+        result = exec_instance.send(:rebuild_runtime_lock, root, bundle_dir, lock_path)
+        assert_nil result
+      end
+    end
+  end
+
+  def test_read_require_paths_returns_lib_on_exception
+    with_tmpdir do |dir|
+      spec_file = File.join(dir, "bad.gemspec")
+      File.write(spec_file, "this is not valid ruby gemspec syntax }{")
+
+      exec_instance = Scint::CLI::Exec.new(["ruby"])
+      result = exec_instance.send(:read_require_paths, spec_file)
+      assert_equal ["lib"], result
+    end
+  end
+
+  def test_read_require_paths_rescues_standard_error_from_load
+    with_tmpdir do |dir|
+      spec_file = File.join(dir, "error.gemspec")
+      File.write(spec_file, "# dummy gemspec")
+
+      exec_instance = Scint::CLI::Exec.new(["ruby"])
+
+      # Stub Gem::Specification.load to raise StandardError (line 129-130)
+      Gem::Specification.stub(:load, ->(_path) { raise StandardError, "load kaboom" }) do
+        result = exec_instance.send(:read_require_paths, spec_file)
+        assert_equal ["lib"], result, "should return ['lib'] when Gem::Specification.load raises"
+      end
+    end
+  end
+
+  def test_detect_ruby_dir_fallback_to_any_directory
+    with_tmpdir do |dir|
+      root = File.join(dir, "project")
+      bundle_dir = File.join(root, ".bundle")
+      ruby_dir = File.join(bundle_dir, "ruby", "2.7.0")
+      FileUtils.mkdir_p(ruby_dir)
+
+      exec_instance = Scint::CLI::Exec.new(["ruby"])
+      result = exec_instance.send(:detect_ruby_dir, bundle_dir)
+
+      # Should fall back to the only available directory
+      assert_equal ruby_dir, result
+    end
+  end
+
+  def test_spec_full_name_with_platform
+    exec_instance = Scint::CLI::Exec.new(["ruby"])
+    spec = { name: "ffi", version: "1.17.0", platform: "x86_64-linux" }
+    result = exec_instance.send(:spec_full_name, spec)
+    assert_equal "ffi-1.17.0-x86_64-linux", result
+  end
+
   def test_run_rebuild_adds_nested_lib_dir_when_only_subdirs_exist
     with_tmpdir do |dir|
       root = File.join(dir, "project")

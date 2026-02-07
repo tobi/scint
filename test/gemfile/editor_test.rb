@@ -67,4 +67,11 @@ class GemfileEditorTest < Minitest::Test
       end
     end
   end
+
+  def test_read_raises_when_gemfile_not_found
+    with_tmpdir do |dir|
+      editor = Scint::Gemfile::Editor.new(File.join(dir, "nonexistent"))
+      assert_raises(Scint::GemfileError) { editor.add("rack") }
+    end
+  end
 end

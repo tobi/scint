@@ -75,4 +75,25 @@ class ExtractorTest < Minitest::Test
       assert_equal "ok", File.read(File.join(dest, "lib", "from_ruby.rb"))
     end
   end
+
+  def test_extract_with_ruby_creates_directories_from_tar
+    with_tmpdir do |dir|
+      extractor = Scint::GemPkg::Extractor.new
+      tar_gz = File.join(dir, "data.tar.gz")
+      dest = File.join(dir, "dest")
+
+      tar_data = make_tar([
+        { type: :dir, name: "lib/nested/" },
+        { type: :file, name: "lib/nested/deep.rb", content: "ok" },
+      ])
+      File.binwrite(tar_gz, gzip(tar_data))
+
+      extractor.stub(:system_tar_available?, false) do
+        extractor.extract(tar_gz, dest)
+      end
+
+      assert Dir.exist?(File.join(dest, "lib", "nested"))
+      assert_equal "ok", File.read(File.join(dest, "lib", "nested", "deep.rb"))
+    end
+  end
 end

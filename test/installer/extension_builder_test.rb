@@ -259,4 +259,358 @@ class ExtensionBuilderTest < Minitest::Test
     assert_equal true, seen.first.start_with?("$ ")
     assert_includes seen.join("\n"), "hello"
   end
+
+  def test_build_full_flow_cache_miss
+    with_tmpdir do |dir|
+      bundle_path = File.join(dir, ".bundle")
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      spec = fake_spec(name: "native", version: "1.0.0")
+      abi_key = "ruby-test-arch"
+
+      # Create source directory with extconf.rb
+      extracted = File.join(dir, "src")
+      ext_dir = File.join(extracted, "ext", "native")
+      FileUtils.mkdir_p(ext_dir)
+      File.write(File.join(ext_dir, "extconf.rb"), "")
+
+      prepared = Prepared.new(spec: spec, extracted_path: extracted, gemspec: nil, from_cache: false)
+
+      # Stub compile_extension to simulate a successful build
+      Scint::Installer::ExtensionBuilder.stub(:compile_extension, lambda { |ext, build, install, *args|
+        File.write(File.join(install, "native.so"), "binary")
+      }) do
+        assert Scint::Installer::ExtensionBuilder.build(prepared, bundle_path, layout, abi_key: abi_key)
+      end
+
+      # Verify cached ext was created
+      cached_ext = layout.ext_path(spec, abi_key)
+      assert Dir.exist?(cached_ext)
+      assert File.exist?(File.join(cached_ext, "gem.build_complete"))
+
+      # Verify linked into bundle path
+      linked = File.join(
+        ruby_bundle_dir(bundle_path),
+        "extensions",
+        Scint::Platform.gem_arch,
+        Scint::Platform.extension_api_version,
+        "native-1.0.0",
+      )
+      assert Dir.exist?(linked)
+    end
+  end
+
+  def test_compile_extension_routes_to_extconf
+    calls = []
+    Scint::Installer::ExtensionBuilder.stub(:compile_extconf, ->(ext_dir, build_dir, install_dir, env, make_jobs, output_tail) { calls << :extconf }) do
+      with_tmpdir do |dir|
+        ext_dir = File.join(dir, "ext")
+        FileUtils.mkdir_p(ext_dir)
+        File.write(File.join(ext_dir, "extconf.rb"), "")
+
+        Scint::Installer::ExtensionBuilder.send(
+          :compile_extension,
+          ext_dir, "/tmp/build", "/tmp/install", dir,
+          fake_spec(name: "x", version: "1.0.0"),
+          "/tmp/ruby", 1,
+        )
+      end
+    end
+
+    assert_equal [:extconf], calls
+  end
+
+  def test_compile_extension_routes_to_cmake
+    calls = []
+    Scint::Installer::ExtensionBuilder.stub(:compile_cmake, ->(ext_dir, build_dir, install_dir, env, make_jobs, output_tail) { calls << :cmake }) do
+      with_tmpdir do |dir|
+        ext_dir = File.join(dir, "ext")
+        FileUtils.mkdir_p(ext_dir)
+        File.write(File.join(ext_dir, "CMakeLists.txt"), "")
+
+        Scint::Installer::ExtensionBuilder.send(
+          :compile_extension,
+          ext_dir, "/tmp/build", "/tmp/install", dir,
+          fake_spec(name: "x", version: "1.0.0"),
+          "/tmp/ruby", 1,
+        )
+      end
+    end
+
+    assert_equal [:cmake], calls
+  end
+
+  def test_compile_extension_routes_to_rake
+    calls = []
+    Scint::Installer::ExtensionBuilder.stub(:compile_rake, ->(ext_dir, build_dir, install_dir, ruby_dir, env, output_tail) { calls << :rake }) do
+      with_tmpdir do |dir|
+        ext_dir = File.join(dir, "ext")
+        FileUtils.mkdir_p(ext_dir)
+        File.write(File.join(ext_dir, "Rakefile"), "")
+
+        Scint::Installer::ExtensionBuilder.send(
+          :compile_extension,
+          ext_dir, "/tmp/build", "/tmp/install", dir,
+          fake_spec(name: "x", version: "1.0.0"),
+          "/tmp/ruby", 1,
+        )
+      end
+    end
+
+    assert_equal [:rake], calls
+  end
+
+  def test_compile_extension_raises_for_unknown_build_system
+    with_tmpdir do |dir|
+      ext_dir = File.join(dir, "ext")
+      FileUtils.mkdir_p(ext_dir)
+
+      error = assert_raises(Scint::ExtensionBuildError) do
+        Scint::Installer::ExtensionBuilder.send(
+          :compile_extension,
+          ext_dir, "/tmp/build", "/tmp/install", dir,
+          fake_spec(name: "x", version: "1.0.0"),
+          "/tmp/ruby", 1,
+        )
+      end
+
+      assert_includes error.message, "No known build system"
+    end
+  end
+
+  def test_find_rake_executable_finds_highest_version
+    with_tmpdir do |dir|
+      ruby_dir = File.join(dir, "ruby")
+      gems_dir = File.join(ruby_dir, "gems")
+
+      rake_old = File.join(gems_dir, "rake-13.0.0", "exe")
+      rake_new = File.join(gems_dir, "rake-13.2.1", "exe")
+      FileUtils.mkdir_p(rake_old)
+      FileUtils.mkdir_p(rake_new)
+      File.write(File.join(rake_old, "rake"), "#!/usr/bin/env ruby")
+      File.write(File.join(rake_new, "rake"), "#!/usr/bin/env ruby")
+
+      result = Scint::Installer::ExtensionBuilder.send(:find_rake_executable, ruby_dir)
+      assert_equal File.join(rake_new, "rake"), result
+    end
+  end
+
+  def test_find_rake_executable_prefers_exe_over_bin
+    with_tmpdir do |dir|
+      ruby_dir = File.join(dir, "ruby")
+      rake_dir = File.join(ruby_dir, "gems", "rake-13.0.0")
+      FileUtils.mkdir_p(File.join(rake_dir, "exe"))
+      FileUtils.mkdir_p(File.join(rake_dir, "bin"))
+      File.write(File.join(rake_dir, "exe", "rake"), "#!/usr/bin/env ruby")
+      File.write(File.join(rake_dir, "bin", "rake"), "#!/usr/bin/env ruby")
+
+      result = Scint::Installer::ExtensionBuilder.send(:find_rake_executable, ruby_dir)
+      assert_equal File.join(rake_dir, "exe", "rake"), result
+    end
+  end
+
+  def test_find_rake_executable_returns_nil_when_no_gems_dir
+    with_tmpdir do |dir|
+      result = Scint::Installer::ExtensionBuilder.send(:find_rake_executable, dir)
+      assert_nil result
+    end
+  end
+
+  def test_find_rake_executable_returns_nil_when_no_rake_installed
+    with_tmpdir do |dir|
+      ruby_dir = File.join(dir, "ruby")
+      FileUtils.mkdir_p(File.join(ruby_dir, "gems", "rspec-3.0.0", "exe"))
+
+      result = Scint::Installer::ExtensionBuilder.send(:find_rake_executable, ruby_dir)
+      assert_nil result
+    end
+  end
+
+  def test_link_extensions_skips_when_directory_already_exists
+    with_tmpdir do |dir|
+      bundle_path = File.join(dir, ".bundle")
+      spec = fake_spec(name: "ffi", version: "1.17.0")
+      abi_key = "ruby-test-arch"
+      ruby_dir = File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
+
+      ext_install_dir = File.join(
+        ruby_dir,
+        "extensions",
+        Scint::Platform.gem_arch,
+        Scint::Platform.extension_api_version,
+        "ffi-1.17.0",
+      )
+      FileUtils.mkdir_p(ext_install_dir)
+      File.write(File.join(ext_install_dir, "marker"), "existing")
+
+      cached_ext = File.join(dir, "cached_ext")
+      FileUtils.mkdir_p(cached_ext)
+      File.write(File.join(cached_ext, "ffi_ext.so"), "binary")
+
+      # Should not raise or overwrite -- hardlink_tree not called since dir exists
+      Scint::Installer::ExtensionBuilder.send(:link_extensions, cached_ext, ruby_dir, spec, abi_key)
+
+      # Existing content preserved
+      assert_equal "existing", File.read(File.join(ext_install_dir, "marker"))
+      # New file not linked since directory already existed
+      refute File.exist?(File.join(ext_install_dir, "ffi_ext.so"))
+    end
+  end
+
+  def test_spec_full_name_with_ruby_platform
+    spec = fake_spec(name: "rack", version: "2.2.8", platform: "ruby")
+    result = Scint::Installer::ExtensionBuilder.send(:spec_full_name, spec)
+    assert_equal "rack-2.2.8", result
+  end
+
+  def test_spec_full_name_with_native_platform
+    spec = fake_spec(name: "ffi", version: "1.17.0", platform: "x86_64-linux")
+    result = Scint::Installer::ExtensionBuilder.send(:spec_full_name, spec)
+    assert_equal "ffi-1.17.0-x86_64-linux", result
+  end
+
+  def test_spec_full_name_with_empty_platform
+    spec = fake_spec(name: "rack", version: "2.2.8", platform: "")
+    result = Scint::Installer::ExtensionBuilder.send(:spec_full_name, spec)
+    assert_equal "rack-2.2.8", result
+  end
+
+  def test_spec_full_name_with_nil_platform
+    spec = Struct.new(:name, :version, keyword_init: true).new(name: "rack", version: "2.2.8")
+    result = Scint::Installer::ExtensionBuilder.send(:spec_full_name, spec)
+    assert_equal "rack-2.2.8", result
+  end
+
+  def test_compile_cmake_invokes_cmake_commands
+    calls = []
+    Scint::Installer::ExtensionBuilder.stub(:run_cmd, ->(env, *cmd, **opts) { calls << cmd }) do
+      Scint::Installer::ExtensionBuilder.send(
+        :compile_cmake,
+        "/tmp/ext",
+        "/tmp/build",
+        "/tmp/install",
+        {},
+        4,
+      )
+    end
+
+    assert_equal 3, calls.size
+    assert_includes calls[0], "cmake"
+    assert_includes calls[0], "-B"
+    assert_includes calls[1], "--build"
+    assert_includes calls[1], "4"
+    assert_includes calls[2], "--install"
+  end
+
+  def test_compile_rake_without_found_rake_executable
+    calls = []
+    Scint::Installer::ExtensionBuilder.stub(:run_cmd, ->(env, *cmd, **opts) { calls << cmd }) do
+      with_tmpdir do |dir|
+        ext_dir = File.join(dir, "ext")
+        FileUtils.mkdir_p(ext_dir)
+
+        Scint::Installer::ExtensionBuilder.send(
+          :compile_rake,
+          ext_dir,
+          "/tmp/build",
+          "/tmp/install",
+          "/tmp/ruby",
+          {},
+        )
+      end
+    end
+
+    # Without a found rake_exe, it uses ruby -S rake
+    assert_equal 1, calls.size
+    assert_includes calls[0], "-S"
+    assert_includes calls[0], "rake"
+  end
+
+  def test_compile_rake_with_found_rake_executable
+    calls = []
+    Scint::Installer::ExtensionBuilder.stub(:run_cmd, ->(env, *cmd, **opts) { calls << cmd }) do
+      with_tmpdir do |dir|
+        ext_dir = File.join(dir, "ext")
+        FileUtils.mkdir_p(ext_dir)
+
+        # Set up a ruby_dir with a rake executable so find_rake_executable returns a path
+        ruby_dir = File.join(dir, "ruby")
+        rake_exe_dir = File.join(ruby_dir, "gems", "rake-13.2.1", "exe")
+        FileUtils.mkdir_p(rake_exe_dir)
+        File.write(File.join(rake_exe_dir, "rake"), "#!/usr/bin/env ruby\n")
+
+        Scint::Installer::ExtensionBuilder.send(
+          :compile_rake,
+          ext_dir,
+          "/tmp/build",
+          "/tmp/install",
+          ruby_dir,
+          {},
+        )
+      end
+    end
+
+    # With a found rake_exe, it uses ruby <rake_exe_path> compile (line 174)
+    assert_equal 1, calls.size
+    assert_includes calls[0].last, "compile"
+    # Should NOT include -S rake since the rake executable was found
+    refute_includes calls[0], "-S"
+    # Should include the rake executable path
+    assert calls[0].any? { |arg| arg.include?("rake-13.2.1") }, "should use found rake executable path"
+  end
+
+  def test_compile_rake_copies_shared_objects
+    with_tmpdir do |dir|
+      ext_dir = File.join(dir, "ext")
+      install_dir = File.join(dir, "install")
+      FileUtils.mkdir_p(ext_dir)
+      FileUtils.mkdir_p(install_dir)
+
+      # Simulate a built .so file in ext dir
+      File.write(File.join(ext_dir, "native.so"), "binary")
+
+      # Stub run_cmd to not actually run anything
+      Scint::Installer::ExtensionBuilder.stub(:run_cmd, ->(*_args, **_opts) { nil }) do
+        Scint::Installer::ExtensionBuilder.send(
+          :compile_rake,
+          ext_dir,
+          "/tmp/build",
+          install_dir,
+          "/tmp/ruby",
+          {},
+        )
+      end
+
+      assert File.exist?(File.join(install_dir, "native.so"))
+    end
+  end
+
+  def test_run_cmd_debug_mode_uses_process_spawn
+    with_tmpdir do |dir|
+      with_env("SCINT_DEBUG", "1") do
+        Scint::Installer::ExtensionBuilder.send(
+          :run_cmd,
+          {},
+          RbConfig.ruby,
+          "-e",
+          "exit 0",
+        )
+      end
+    end
+  end
+
+  def test_run_cmd_debug_mode_raises_on_failure
+    with_env("SCINT_DEBUG", "1") do
+      error = assert_raises(Scint::ExtensionBuildError) do
+        Scint::Installer::ExtensionBuilder.send(
+          :run_cmd,
+          {},
+          RbConfig.ruby,
+          "-e",
+          "exit 1",
+        )
+      end
+
+      assert_includes error.message, "exit 1"
+    end
+  end
 end

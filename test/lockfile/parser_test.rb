@@ -91,4 +91,49 @@ class LockfileParserTest < Minitest::Test
     lock = Scint::Lockfile::Parser.parse(contents)
     assert_equal ["rack"], lock.dependencies.keys
   end
+
+  def test_parse_source_with_multiple_remotes
+    contents = <<~LOCK
+      GEM
+        remote: https://rubygems.org/
+        remote: https://gems.example.com/
+        specs:
+          rack (2.2.8)
+
+      DEPENDENCIES
+        rack
+    LOCK
+
+    lock = Scint::Lockfile::Parser.parse(contents)
+    source = lock.sources.first
+    assert_instance_of Scint::Source::Rubygems, source
+    assert_includes source.remotes, "https://rubygems.org/"
+    assert_includes source.remotes, "https://gems.example.com/"
+  end
+
+  def test_parse_checksum_without_checksum_string
+    contents = <<~LOCK
+      CHECKSUMS
+        rack (2.2.8)
+    LOCK
+
+    lock = Scint::Lockfile::Parser.parse(contents)
+    assert_equal [], lock.checksums["rack-2.2.8"]
+  end
+
+  def test_parse_path_source
+    contents = <<~LOCK
+      PATH
+        remote: vendor/mygem
+        specs:
+          mygem (0.1.0)
+
+      DEPENDENCIES
+        mygem
+    LOCK
+
+    lock = Scint::Lockfile::Parser.parse(contents)
+    source = lock.sources.first
+    assert_instance_of Scint::Source::Path, source
+  end
 end
