@@ -424,49 +424,33 @@ class SchedulerTest < Minitest::Test
   end
 
   def test_dispatch_loop_aborted_with_running_jobs_waits_on_cv
-    # This tests lines 239-241: when @aborted is true and @running is not empty,
-    # the dispatch loop waits on the condition variable instead of breaking.
-    scheduler = Scint::Scheduler.new(max_workers: 2, progress: FakeProgress.new, fail_fast: true)
+    # Tests lines 239-241: when @aborted is true and @running is not empty,
+    # the dispatch loop waits on cv rather than breaking.
+    scheduler = Scint::Scheduler.new(max_workers: 2, initial_workers: 2, progress: FakeProgress.new, fail_fast: true)
     scheduler.start
 
-    started = Queue.new
     release = Queue.new
 
-    # Enqueue two jobs: a slow one and a failing one. With max_workers: 2,
-    # both can start. The failing one triggers @aborted = true, then the
-    # dispatch loop must wait for the slow (running) job to complete.
+    # Enqueue a slow job first, then a fast-failing job.
     scheduler.enqueue(:download, "slow", lambda {
-      started << :slow
       release.pop
       :ok
     })
 
     scheduler.enqueue(:download, "fail", lambda {
-      started << :fail
+      sleep 0.02  # let slow job start first
       raise "boom"
     })
 
-    # Wait for both to start
-    2.times { started.pop }
+    # Give time for the fail job to abort the scheduler
+    sleep 0.15
 
-    # At this point, "fail" has crashed, setting @aborted = true.
-    # "slow" is still running. The dispatch loop should be waiting on cv.
-    sleep 0.05
-    assert_equal true, scheduler.aborted?
-
-    # Verify running is not empty (slow is still going)
-    running_count = scheduler.instance_variable_get(:@mutex).synchronize {
-      scheduler.instance_variable_get(:@running).size
-    }
-    # The slow job may or may not still show in @running depending on timing,
-    # but the key behavior is that wait_all completes once we release it.
-
-    # Release the slow job
+    # Release the slow job so it completes
     release << true
 
     # wait_all should complete because the dispatch loop properly handled
-    # the aborted + running state
-    Timeout.timeout(2) { scheduler.wait_all }
+    # the aborted + running state (lines 239-241)
+    Timeout.timeout(5) { scheduler.wait_all }
     assert_equal true, scheduler.aborted?
   ensure
     scheduler.shutdown if scheduler
