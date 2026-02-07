@@ -290,6 +290,7 @@ class FetcherTest < Minitest::Test
                             http_response(
                               Net::HTTPNotFound,
                               body: "<h1>Download Restricted: TOKEN_DELETED</h1>\n<p>Token removed.</p>",
+                              headers: { "x-debug" => "Token removed." },
                             ),
                           ])
 
@@ -299,6 +300,10 @@ class FetcherTest < Minitest::Test
         end
         assert_includes error.message, "HTTP 404"
         assert_includes error.message, "TOKEN_DELETED"
+        assert_equal "https://example.test/restricted.gem", error.uri
+        assert_equal 404, error.http_status
+        assert_equal "Token removed.", error.response_headers["x-debug"]
+        assert_includes error.response_body, "TOKEN_DELETED"
       end
     end
   end

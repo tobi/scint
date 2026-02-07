@@ -329,7 +329,12 @@ module Scint
           job.error = error
           @failed[job.id] = job
           @errors << { job_id: job.id, type: job.type, name: job.name, error: error }
-          @aborted = true if @fail_fast
+          if @fail_fast
+            @aborted = true
+            # Drop queued work immediately; wait_all will return once current
+            # in-flight jobs drain.
+            @pending.clear
+          end
         else
           job.state = :completed
           @completed[job.id] = job

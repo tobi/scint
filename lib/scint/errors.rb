@@ -26,6 +26,16 @@ module Scint
   end
 
   class NetworkError < BundlerError
+    attr_reader :uri, :http_status, :response_headers, :response_body
+
+    def initialize(message = nil, uri: nil, http_status: nil, response_headers: nil, response_body: nil)
+      super(message)
+      @uri = uri
+      @http_status = http_status
+      @response_headers = response_headers
+      @response_body = response_body
+    end
+
     def status_code
       7
     end

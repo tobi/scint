@@ -59,6 +59,38 @@ class DownloaderPoolTest < Minitest::Test
     end
   end
 
+  def test_download_preserves_http_error_metadata_after_retries
+    pool = Scint::Downloader::Pool.new(size: 1)
+
+    fetcher = Object.new
+    fetcher.define_singleton_method(:fetch) do |_uri, _dest, checksum: nil|
+      raise Scint::NetworkError.new(
+        "HTTP 400 for https://example.test/fail.gem: Bad Request -- token deleted",
+        uri: "https://example.test/fail.gem",
+        http_status: 400,
+        response_headers: { "content-type" => "text/html" },
+        response_body: "<h1>TOKEN_DELETED</h1>",
+      )
+    end
+
+    pool.define_singleton_method(:thread_fetcher) { fetcher }
+    pool.define_singleton_method(:reset_thread_fetcher) { nil }
+
+    with_tmpdir do |dir|
+      error = nil
+      pool.stub(:sleep, nil) do
+        error = assert_raises(Scint::NetworkError) do
+          pool.download("https://example.test/fail.gem", File.join(dir, "fail.gem"))
+        end
+      end
+
+      assert_equal 400, error.http_status
+      assert_equal "https://example.test/fail.gem", error.uri
+      assert_equal "text/html", error.response_headers["content-type"]
+      assert_includes error.response_body, "TOKEN_DELETED"
+    end
+  end
+
   def test_download_batch_collects_success_and_failure_results
     pool = Scint::Downloader::Pool.new(size: 2)
 

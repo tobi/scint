@@ -150,7 +150,9 @@ module Scint
           if errors.any?
             $stderr.puts "#{RED}Some gems failed to install:#{RESET}"
             errors.each do |err|
-              $stderr.puts "  #{BOLD}#{err[:name]}#{RESET}: #{err[:error].message}"
+              error = err[:error]
+              $stderr.puts "  #{BOLD}#{err[:name]}#{RESET}: #{error.message}"
+              emit_network_error_details(error)
             end
           elsif stats[:failed] > 0
             $stderr.puts "#{YELLOW}Warning: #{stats[:failed]} jobs failed but no error details captured#{RESET}"
@@ -677,8 +679,11 @@ module Scint
         # Leave headroom for compile and binstub lanes so link/download
         # throughput cannot fully starve them.
         io_cpu_limit = [worker_count - compile_slots - 1, 1].max
+        # Keep download in-flight set bounded so fail-fast exits quickly on
+        # auth/source errors instead of queueing a large burst.
+        download_limit = [io_cpu_limit, 8].min
         {
-          download: io_cpu_limit,
+          download: download_limit,
           extract: io_cpu_limit,
           link: io_cpu_limit,
           build_ext: compile_slots,
@@ -1478,6 +1483,28 @@ module Scint
         workers = worker_count.to_i
         noun = workers == 1 ? "worker" : "workers"
         "#{format_elapsed(elapsed_ms)}, #{workers} #{noun} used"
+      end
+
+      def emit_network_error_details(error)
+        return unless error.is_a?(NetworkError)
+
+        headers = error.response_headers
+        body = error.response_body.to_s
+        return if (headers.nil? || headers.empty?) && body.empty?
+
+        if headers && !headers.empty?
+          $stderr.puts "    headers:"
+          headers.sort.each do |key, value|
+            $stderr.puts "      #{key}: #{value}"
+          end
+        end
+
+        return if body.empty?
+
+        $stderr.puts "    body:"
+        body.each_line do |line|
+          $stderr.puts "      #{line.rstrip}"
+        end
       end
 
       def warn_missing_bundle_gitignore_entry

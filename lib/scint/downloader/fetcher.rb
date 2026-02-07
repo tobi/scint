@@ -54,7 +54,13 @@ module Scint
               current_uri = URI.parse(location)
               next
             else
-              raise NetworkError, http_error_message(current_uri, response)
+              raise NetworkError.new(
+                http_error_message(current_uri, response),
+                uri: current_uri.to_s,
+                http_status: response.code.to_i,
+                response_headers: response_headers_hash(response),
+                response_body: response.body.to_s,
+              )
             end
           end
 
@@ -119,6 +125,12 @@ module Scint
 
         excerpt = "#{excerpt[0, 277]}..." if excerpt.length > 280
         "#{message} -- #{excerpt}"
+      end
+
+      def response_headers_hash(response)
+        headers = {}
+        response.each_header { |k, v| headers[k] = v }
+        headers
       end
     end
   end

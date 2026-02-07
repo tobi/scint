@@ -45,6 +45,16 @@ module Scint
               reset_thread_fetcher
               retry
             end
+            if e.is_a?(NetworkError)
+              raise NetworkError.new(
+                "Failed to download #{uri} after #{MAX_RETRIES} retries: #{e.message}",
+                uri: (e.uri || uri.to_s),
+                http_status: e.http_status,
+                response_headers: e.response_headers,
+                response_body: e.response_body,
+              )
+            end
+
             raise NetworkError, "Failed to download #{uri} after #{MAX_RETRIES} retries: #{e.message}"
           end
         end
