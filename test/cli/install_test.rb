@@ -357,9 +357,33 @@ class CLIInstallTest < Minitest::Test
 
     local = Gem::Platform.new("x86_64-linux")
     Scint::Platform.stub(:local_platform, local) do
+      install.stub(:preferred_platforms_for_locked_specs, {}) do
+        resolved = install.send(:lockfile_to_resolved, lockfile)
+        assert_equal 1, resolved.size
+        assert_equal "x86_64-linux", resolved.first.platform
+      end
+    end
+  end
+
+  def test_lockfile_to_resolved_upgrades_ruby_variant_using_provider_preference
+    install = Scint::CLI::Install.new([])
+    source = Scint::Source::Rubygems.new(remotes: ["https://rubygems.org/"])
+    lockfile = Scint::Lockfile::LockfileData.new(
+      specs: [
+        { name: "nokogiri", version: "1.18.10", platform: "ruby", dependencies: [], source: source, checksum: nil },
+      ],
+      dependencies: {},
+      platforms: [],
+      sources: [source],
+      bundler_version: nil,
+      ruby_version: nil,
+      checksums: nil,
+    )
+
+    install.stub(:preferred_platforms_for_locked_specs, { "nokogiri-1.18.10" => "arm64-darwin" }) do
       resolved = install.send(:lockfile_to_resolved, lockfile)
       assert_equal 1, resolved.size
-      assert_equal "x86_64-linux", resolved.first.platform
+      assert_equal "arm64-darwin", resolved.first.platform
     end
   end
 
@@ -510,7 +534,6 @@ class CLIInstallTest < Minitest::Test
       install = Scint::CLI::Install.new([])
       bundle_path = File.join(dir, ".bundle")
       ruby_dir = ruby_bundle_dir(bundle_path)
-      build_ruby_dir = cache.install_ruby_dir
 
       spec = fake_spec(name: "ffi", version: "1.17.0")
       extracted = cache.extracted_path(spec)
@@ -543,9 +566,47 @@ class CLIInstallTest < Minitest::Test
         cache.full_name(spec),
       )
       assert File.exist?(File.join(local_ext, "ffi_ext.so"))
+      refute Dir.exist?(File.join(cache.install_ruby_dir, "gems", cache.full_name(spec)))
+    end
+  end
 
-      assert Dir.exist?(File.join(build_ruby_dir, "gems", cache.full_name(spec)))
-      assert File.exist?(File.join(build_ruby_dir, "specifications", "#{cache.full_name(spec)}.gemspec"))
+  def test_sync_build_env_dependencies_copies_declared_deps_and_rake
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      bundle_path = File.join(dir, ".bundle")
+      source_ruby_dir = ruby_bundle_dir(bundle_path)
+      target_ruby_dir = cache.install_ruby_dir
+
+      dep_name = "mini_portile2-2.8.5"
+      dep_spec = File.join(source_ruby_dir, "specifications", "#{dep_name}.gemspec")
+      dep_gem = File.join(source_ruby_dir, "gems", dep_name)
+      FileUtils.mkdir_p(File.dirname(dep_spec))
+      FileUtils.mkdir_p(dep_gem)
+      File.write(File.join(dep_gem, "lib.rb"), "")
+      File.write(dep_spec, "Gem::Specification.new do |s| s.name='mini_portile2'; s.version='2.8.5'; end\n")
+
+      rake_name = "rake-13.2.1"
+      rake_spec = File.join(source_ruby_dir, "specifications", "#{rake_name}.gemspec")
+      rake_gem = File.join(source_ruby_dir, "gems", rake_name)
+      FileUtils.mkdir_p(rake_gem)
+      FileUtils.mkdir_p(File.join(rake_gem, "exe"))
+      File.write(File.join(rake_gem, "exe", "rake"), "")
+      FileUtils.mkdir_p(File.dirname(rake_spec))
+      File.write(rake_spec, "Gem::Specification.new do |s| s.name='rake'; s.version='13.2.1'; end\n")
+
+      spec = fake_spec(
+        name: "nokogiri",
+        version: "1.18.10",
+        dependencies: [{ name: "mini_portile2", version_reqs: [">= 0"] }],
+      )
+
+      install.send(:sync_build_env_dependencies, spec, bundle_path, cache)
+
+      assert Dir.exist?(File.join(target_ruby_dir, "gems", dep_name))
+      assert File.exist?(File.join(target_ruby_dir, "specifications", "#{dep_name}.gemspec"))
+      assert Dir.exist?(File.join(target_ruby_dir, "gems", rake_name))
+      assert File.exist?(File.join(target_ruby_dir, "specifications", "#{rake_name}.gemspec"))
     end
   end
 

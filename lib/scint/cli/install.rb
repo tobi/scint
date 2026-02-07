@@ -383,7 +383,7 @@ module Scint
         by_gem = Hash.new { |h, k| h[k] = [] }
         lockfile.specs.each { |ls| by_gem[[ls[:name], ls[:version]]] << ls }
 
-        by_gem.map do |(_name, _version), specs|
+        resolved = by_gem.map do |(_name, _version), specs|
           best = pick_best_platform_spec(specs, local_plat)
 
           source = best[:source]
@@ -405,6 +405,8 @@ module Scint
             checksum: best[:checksum],
           )
         end
+
+        apply_locked_platform_preferences(resolved)
       end
 
       # Preference: exact platform match > compatible match > ruby > first.
@@ -434,6 +436,55 @@ module Scint
         end
 
         best
+      end
+
+      # Lockfiles can carry only the ruby variant for a gem version.
+      # Re-check compact index for the same locked version and upgrade to the
+      # best local platform variant when available.
+      def apply_locked_platform_preferences(resolved_specs)
+        preferred = preferred_platforms_for_locked_specs(resolved_specs)
+        return resolved_specs if preferred.empty?
+
+        resolved_specs.each do |spec|
+          key = "#{spec.name}-#{spec.version}"
+          platform = preferred[key]
+          next if platform.nil? || platform.empty?
+
+          spec.platform = platform
+        end
+
+        resolved_specs
+      end
+
+      def preferred_platforms_for_locked_specs(resolved_specs)
+        out = {}
+        by_source = resolved_specs
+          .select { |spec| rubygems_source_uri?(spec.source) }
+          .group_by { |spec| spec.source.to_s.chomp("/") }
+
+        by_source.each do |source_uri, specs|
+          begin
+            client = Index::Client.new(source_uri, credentials: @credentials)
+            provider = Resolver::Provider.new(client)
+            provider.prefetch(specs.map(&:name).uniq)
+
+            specs.each do |spec|
+              preferred = provider.preferred_platform_for(spec.name, Gem::Version.new(spec.version.to_s))
+              preferred = preferred.to_s
+              next if preferred.empty? || preferred == spec.platform.to_s
+
+              out["#{spec.name}-#{spec.version}"] = preferred
+            end
+          rescue StandardError
+            next
+          end
+        end
+
+        out
+      end
+
+      def rubygems_source_uri?(source)
+        source.is_a?(String) && source.match?(%r{\Ahttps?://})
       end
 
       def download_gem(entry, cache)
@@ -772,7 +823,6 @@ module Scint
           from_cache: true,
         )
         Installer::Linker.link_files(prepared, bundle_path)
-        Installer::Linker.link_files_to_ruby_dir(prepared, cache.install_ruby_dir)
         # If this gem has a cached native build, materialize it during link.
         # This lets reinstalling into a fresh .bundle skip build_ext entirely.
         Installer::ExtensionBuilder.link_cached_build(prepared, bundle_path, cache)
@@ -808,6 +858,8 @@ module Scint
             dep.name
           end
         end
+        dep_names << "rake"
+        dep_names.uniq!
         return if dep_names.empty?
 
         source_ruby_dir = File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")

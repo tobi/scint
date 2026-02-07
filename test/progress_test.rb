@@ -176,6 +176,22 @@ class ProgressTest < Minitest::Test
     assert_includes out.string, "\e[?25h"
   end
 
+  def test_interactive_mode_prints_slow_operation_in_scrollback
+    out = FakeTTY.new
+    progress = Scint::Progress.new(output: out)
+
+    progress.on_enqueue(1, :link, "central_icons")
+    progress.on_start(1, :link, "central_icons")
+    progress.instance_variable_get(:@job_started_at)[1] =
+      Process.clock_gettime(Process::CLOCK_MONOTONIC) - 1.5
+    progress.on_complete(1, :link, "central_icons")
+    progress.stop
+
+    text = out.string
+    assert_includes text, "Installing central_icons"
+    assert_match(/\d+\.\d{2}s/, text)
+  end
+
   def test_stop_positions_cursor_below_final_panel_for_followup_output
     out = FakeTTY.new
     progress = Scint::Progress.new(output: out)

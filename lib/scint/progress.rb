@@ -24,9 +24,17 @@ module Scint
     MAX_LINE_LEN = 220
     MIN_RENDER_WIDTH = 40
     MAX_PANEL_ROWS = 14
+    SLOW_OPERATION_THRESHOLD_SECONDS = 1.0
     SPINNER_FRAMES = %w[⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏].freeze
     IDLE_MARK = "○".freeze
     PANEL_PHASE_ORDER = %i[download extract build_ext link].freeze
+    SLOW_OPERATION_TYPES = {
+      fetch_index: true,
+      download: true,
+      extract: true,
+      link: true,
+      build_ext: true,
+    }.freeze
 
     PHASE_LABELS = {
       fetch_index: "Fetching index",
@@ -55,6 +63,7 @@ module Scint
       @failed = Hash.new(0)
       @total = Hash.new(0)
       @active_jobs = {}
+      @job_started_at = {}
       @build_tail = []
       @build_tail_by_name = {}
       @spinner_idx = 0
@@ -119,6 +128,7 @@ module Scint
 
       @mutex.synchronize do
         @active_jobs[job_id] = { type: type, name: name }
+        @job_started_at[job_id] = Process.clock_gettime(Process::CLOCK_MONOTONIC) if slow_operation_type?(type)
         @started += 1
         emit_setup_gap_if_needed(type)
         @phase_started_at[type] ||= Process.clock_gettime(Process::CLOCK_MONOTONIC) if stream_type?(type)
@@ -136,6 +146,8 @@ module Scint
         @completed[type] += 1
         active = @active_jobs.delete(job_id)
         @build_tail_by_name.delete(active[:name]) if active
+        elapsed = consume_job_elapsed(job_id)
+        emit_slow_operation_locked(type, name, elapsed) if slow_operation?(type, elapsed)
         if !@interactive || !stream_type?(type)
           emit_phase_completion_locked(type)
         end
@@ -147,8 +159,10 @@ module Scint
 
       @mutex.synchronize do
         active = @active_jobs.delete(job_id)
+        elapsed = consume_job_elapsed(job_id)
         @build_tail_by_name.delete(active[:name]) if active
         @failed[type] += 1
+        emit_slow_operation_locked(type, name, elapsed) if slow_operation?(type, elapsed)
         clear_live_block_locked
         label = PHASE_LABELS[type] || type.to_s
         @output.puts "#{RED}FAILED#{RESET} #{label} #{BOLD}#{name}#{RESET}: #{error.message}"
@@ -195,6 +209,37 @@ module Scint
 
     def hidden_type?(type)
       HIDDEN_TYPES[type] == true
+    end
+
+    def slow_operation_type?(type)
+      SLOW_OPERATION_TYPES[type] == true
+    end
+
+    def consume_job_elapsed(job_id)
+      started_at = @job_started_at.delete(job_id)
+      return nil unless started_at
+
+      Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+    end
+
+    def slow_operation?(type, elapsed)
+      slow_operation_type?(type) &&
+        elapsed &&
+        elapsed >= SLOW_OPERATION_THRESHOLD_SECONDS
+    end
+
+    def emit_slow_operation_locked(type, name, elapsed)
+      label = PHASE_LABELS[type] || type.to_s
+      line = "#{DIM}#{IDLE_MARK} #{label} #{BOLD}#{name}#{RESET} #{DIM}#{format_phase_elapsed(elapsed)}#{RESET}"
+
+      if @interactive
+        clear_live_block_locked
+        @output.print "\r"
+        @output.puts fit_line(line, @render_width)
+        render_live_locked if any_stream_activity?
+      else
+        @output.puts fit_line(line, 180)
+      end
     end
 
     def render_live_locked
