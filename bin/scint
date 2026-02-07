@@ -5,6 +5,31 @@
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
 require "scint"
+
+if ENV["SCINT_IO_TRACE"] && !ENV["SCINT_IO_TRACE"].empty?
+  require "scint/debug/io_trace"
+  Scint::Debug::IOTrace.enable!(ENV["SCINT_IO_TRACE"])
+end
+
+profiler = nil
+if ENV["SCINT_PROFILE"] && !ENV["SCINT_PROFILE"].empty?
+  require "scint/debug/sampler"
+  hz = ENV.fetch("SCINT_PROFILE_HZ", "250").to_i
+  depth = ENV.fetch("SCINT_PROFILE_DEPTH", "40").to_i
+  profiler = Scint::Debug::Sampler.new(path: ENV["SCINT_PROFILE"], hz: hz, max_depth: depth)
+  profiler.start
+end
+
 require "scint/cli"
 
-exit Scint::CLI.run(ARGV)
+exit_code = 1
+begin
+  exit_code = Scint::CLI.run(ARGV)
+ensure
+  profiler&.stop(exit_code: exit_code)
+  if defined?(Scint::Debug::IOTrace)
+    Scint::Debug::IOTrace.disable!
+  end
+end
+
+exit(exit_code)

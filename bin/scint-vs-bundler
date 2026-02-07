@@ -1,0 +1,247 @@
+#!/usr/bin/env bash
+# Benchmark: stock bundler vs scint, cold and warm caches.
+#
+# Cold = fresh install dir, no caches.
+# Warm = fresh install dir, but gem download caches are warm from the cold run.
+#
+# No copying needed — warm runs just get a new BUNDLE_PATH while keeping
+# the same GEM_HOME / GEM_PATH / global cache so downloads are already cached.
+#
+# Creates an isolated tmp directory for all outputs. Clean up with:
+#   rm -rf "$TMPROOT"
+#
+# Usage: ./bin/scint-vs-bundler [/path/to/project]
+#   Default project: current working directory
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT="${1:-$PWD}"
+SCINT_BIN="$REPO_ROOT/bin/scint"
+TMPBASE="${TMPDIR:-/tmp}"
+TMPROOT="$(mktemp -d "${TMPBASE%/}/scint-bench-XXXXXX")"
+RUBY_API_DIR="$(ruby -rrbconfig -e 'print RbConfig::CONFIG["ruby_version"]')"
+
+if [[ ! -x "$SCINT_BIN" ]]; then
+  echo "scint binary not found at: $SCINT_BIN" >&2
+  exit 1
+fi
+
+if [[ ! -f "$PROJECT/Gemfile" ]]; then
+  echo "Gemfile not found in project: $PROJECT" >&2
+  exit 1
+fi
+
+# Each run gets its own BUNDLE_PATH (install destination).
+# GEM_HOME/GEM_PATH stay shared so download caches persist between cold→warm.
+# Scint uses XDG_CACHE_HOME for its global cache — redirect to tmpdir.
+BUNDLER_COLD="$TMPROOT/bundler-cold"
+BUNDLER_WARM="$TMPROOT/bundler-warm"
+BUNDLER_GEM_HOME="$TMPROOT/bundler-gem-home"
+SCINT_COLD="$TMPROOT/scint-cold"
+SCINT_WARM="$TMPROOT/scint-warm"
+SCINT_GEM_HOME="$TMPROOT/scint-gem-home"
+SCINT_XDG_CACHE="$TMPROOT/scint-cache"
+LOGS="$TMPROOT/logs"
+mkdir -p "$BUNDLER_COLD" "$BUNDLER_WARM" "$BUNDLER_GEM_HOME" \
+         "$SCINT_COLD" "$SCINT_WARM" "$SCINT_GEM_HOME" "$SCINT_XDG_CACHE" "$LOGS"
+
+echo "=== Benchmark: bundler vs scint ==="
+echo "Project:  $PROJECT"
+echo "Tmp root: $TMPROOT"
+echo ""
+
+# Helper: time a command, capture output, return elapsed seconds
+run_timed() {
+  local label="$1"
+  local logfile="$2"
+  shift 2
+
+  echo "--- $label ---"
+  local start end_time elapsed
+  start=$(ruby -e 'puts Process.clock_gettime(Process::CLOCK_MONOTONIC)')
+
+  # Run in the project directory, tee to both log and stdout
+  (cd "$PROJECT" && "$@") 2>&1 | tee "$logfile" || true
+
+  end_time=$(ruby -e 'puts Process.clock_gettime(Process::CLOCK_MONOTONIC)')
+  elapsed=$(ruby -e "puts (($end_time - $start)).round(2)")
+  echo "  Elapsed: ${elapsed}s (log: $logfile)"
+  echo "$elapsed" > "${logfile}.time"
+}
+
+# ── 1. Cold bundler ──────────────────────────────────────────────
+echo ""
+echo "════════════════════════════════════════"
+echo " 1/4  Bundler (cold)"
+echo "════════════════════════════════════════"
+SYSTEM_GEM_DIR="$(ruby -e 'puts Gem.default_dir')"
+run_timed "bundler install (cold)" "$LOGS/bundler-cold.log" \
+  env BUNDLE_PATH="$BUNDLER_COLD" \
+      GEM_HOME="$BUNDLER_GEM_HOME" \
+      GEM_PATH="$BUNDLER_GEM_HOME:$SYSTEM_GEM_DIR" \
+      BUNDLE_DISABLE_SHARED_GEMS=1 \
+  bundle install --jobs=8
+
+# ── 2. Warm bundler (new install dir, same gem cache) ────────────
+echo ""
+echo "════════════════════════════════════════"
+echo " 2/4  Bundler (warm)"
+echo "════════════════════════════════════════"
+run_timed "bundler install (warm)" "$LOGS/bundler-warm.log" \
+  env BUNDLE_PATH="$BUNDLER_WARM" \
+      GEM_HOME="$BUNDLER_GEM_HOME" \
+      GEM_PATH="$BUNDLER_GEM_HOME:$SYSTEM_GEM_DIR" \
+      BUNDLE_DISABLE_SHARED_GEMS=1 \
+  bundle install --jobs=8
+
+# ── 3. Cold scint ────────────────────────────────────────────────
+echo ""
+echo "════════════════════════════════════════"
+echo " 3/4  Scint (cold)"
+echo "════════════════════════════════════════"
+run_timed "scint install (cold)" "$LOGS/scint-cold.log" \
+  env BUNDLE_PATH="$SCINT_COLD" \
+      GEM_HOME="$SCINT_GEM_HOME" \
+      GEM_PATH="$SCINT_GEM_HOME:$SYSTEM_GEM_DIR" \
+      XDG_CACHE_HOME="$SCINT_XDG_CACHE" \
+  "$SCINT_BIN" install --path "$SCINT_COLD"
+
+# ── 4. Warm scint (new install dir, global cache already warm) ───
+echo ""
+echo "════════════════════════════════════════"
+echo " 4/4  Scint (warm)"
+echo "════════════════════════════════════════"
+run_timed "scint install (warm)" "$LOGS/scint-warm.log" \
+  env BUNDLE_PATH="$SCINT_WARM" \
+      GEM_HOME="$SCINT_GEM_HOME" \
+      GEM_PATH="$SCINT_GEM_HOME:$SYSTEM_GEM_DIR" \
+      XDG_CACHE_HOME="$SCINT_XDG_CACHE" \
+  "$SCINT_BIN" install --path "$SCINT_WARM"
+
+# ── Summary ──────────────────────────────────────────────────────
+echo ""
+echo "════════════════════════════════════════"
+echo " Results"
+echo "════════════════════════════════════════"
+
+bc=$(cat "$LOGS/bundler-cold.log.time")
+bw=$(cat "$LOGS/bundler-warm.log.time")
+sc=$(cat "$LOGS/scint-cold.log.time")
+sw=$(cat "$LOGS/scint-warm.log.time")
+
+printf "  %-20s %8ss\n" "Bundler (cold):" "$bc"
+printf "  %-20s %8ss\n" "Bundler (warm):" "$bw"
+printf "  %-20s %8ss\n" "Scint (cold):" "$sc"
+printf "  %-20s %8ss\n" "Scint (warm):" "$sw"
+echo ""
+
+cold_speedup=$(ruby -e "puts ($bc.to_f / $sc.to_f).round(1)")
+warm_speedup=$(ruby -e "puts ($bw.to_f / $sw.to_f).round(1)")
+echo "  Cold speedup: ${cold_speedup}x"
+echo "  Warm speedup: ${warm_speedup}x"
+
+# ── Directory comparison ─────────────────────────────────────────
+echo ""
+echo "════════════════════════════════════════"
+echo " Directory comparison"
+echo "════════════════════════════════════════"
+
+DIFF_LOG="$LOGS/diff-report.txt"
+> "$DIFF_LOG"
+
+# Compare installed gem directories
+bundler_gems="$BUNDLER_COLD/ruby/$RUBY_API_DIR/gems"
+scint_gems="$SCINT_COLD/ruby/$RUBY_API_DIR/gems"
+
+if [[ -d "$bundler_gems" && -d "$scint_gems" ]]; then
+  # Gem directories present in each
+  bundler_gem_list=$(cd "$bundler_gems" && ls -1 | sort)
+  scint_gem_list=$(cd "$scint_gems" && ls -1 | sort)
+
+  only_bundler=$(comm -23 <(echo "$bundler_gem_list") <(echo "$scint_gem_list"))
+  only_scint=$(comm -13 <(echo "$bundler_gem_list") <(echo "$scint_gem_list"))
+  in_both=$(comm -12 <(echo "$bundler_gem_list") <(echo "$scint_gem_list"))
+
+  bundler_count=$(echo "$bundler_gem_list" | wc -l | tr -d ' ')
+  scint_count=$(echo "$scint_gem_list" | wc -l | tr -d ' ')
+  both_count=$(echo "$in_both" | wc -l | tr -d ' ')
+
+  echo "  Bundler gems: $bundler_count"
+  echo "  Scint gems:   $scint_count"
+  echo "  In common:    $both_count"
+
+  if [[ -n "$only_bundler" ]]; then
+    echo ""
+    echo "  Only in bundler:"
+    echo "$only_bundler" | sed 's/^/    /'
+  fi
+
+  if [[ -n "$only_scint" ]]; then
+    echo ""
+    echo "  Only in scint:"
+    echo "$only_scint" | sed 's/^/    /'
+  fi
+
+  # Compare gemspec counts
+  bundler_specs="$BUNDLER_COLD/ruby/$RUBY_API_DIR/specifications"
+  scint_specs="$SCINT_COLD/ruby/$RUBY_API_DIR/specifications"
+  if [[ -d "$bundler_specs" && -d "$scint_specs" ]]; then
+    bs_count=$(ls -1 "$bundler_specs" | wc -l | tr -d ' ')
+    ss_count=$(ls -1 "$scint_specs" | wc -l | tr -d ' ')
+    echo ""
+    echo "  Bundler gemspecs: $bs_count"
+    echo "  Scint gemspecs:   $ss_count"
+  fi
+
+  # Compare bin directories
+  bundler_bin="$BUNDLER_COLD/ruby/$RUBY_API_DIR/bin"
+  scint_bin_dir="$SCINT_COLD/ruby/$RUBY_API_DIR/bin"
+  if [[ -d "$bundler_bin" && -d "$scint_bin_dir" ]]; then
+    bb_count=$(ls -1 "$bundler_bin" | wc -l | tr -d ' ')
+    sb_count=$(ls -1 "$scint_bin_dir" | wc -l | tr -d ' ')
+    echo ""
+    echo "  Bundler bins: $bb_count"
+    echo "  Scint bins:   $sb_count"
+
+    only_b_bins=$(comm -23 <(ls -1 "$bundler_bin" | sort) <(ls -1 "$scint_bin_dir" | sort))
+    only_s_bins=$(comm -13 <(ls -1 "$bundler_bin" | sort) <(ls -1 "$scint_bin_dir" | sort))
+    if [[ -n "$only_b_bins" ]]; then
+      echo "  Bins only in bundler:"
+      echo "$only_b_bins" | sed 's/^/    /'
+    fi
+    if [[ -n "$only_s_bins" ]]; then
+      echo "  Bins only in scint:"
+      echo "$only_s_bins" | sed 's/^/    /'
+    fi
+  fi
+
+  # Check a few random gems for file count differences
+  echo ""
+  echo "  File count spot-check (first 10 shared gems):"
+  echo "$in_both" | head -10 | while read -r gem; do
+    bf=$(find "$bundler_gems/$gem" -type f 2>/dev/null | wc -l | tr -d ' ')
+    sf=$(find "$scint_gems/$gem" -type f 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$bf" != "$sf" ]]; then
+      echo "    $gem: bundler=$bf scint=$sf  ← DIFF"
+    else
+      echo "    $gem: $bf files ✓"
+    fi
+  done
+
+  # Disk size comparison
+  echo ""
+  bundler_size=$(du -sh "$BUNDLER_COLD" 2>/dev/null | cut -f1)
+  scint_size=$(du -sh "$SCINT_COLD" 2>/dev/null | cut -f1)
+  echo "  Bundler total size: $bundler_size"
+  echo "  Scint total size:   $scint_size"
+else
+  echo "  ⚠ Could not find gem directories to compare"
+  echo "  Bundler: $bundler_gems (exists: $(test -d "$bundler_gems" && echo yes || echo no))"
+  echo "  Scint:   $scint_gems (exists: $(test -d "$scint_gems" && echo yes || echo no))"
+fi
+
+echo ""
+echo "All logs and data in: $TMPROOT"
+echo "Clean up: rm -rf $TMPROOT"

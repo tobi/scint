@@ -37,6 +37,22 @@ scint cache clear
 scint cache dir
 ```
 
+Performance and IO diagnostics:
+
+```bash
+# Ruby sampling profile (JSON)
+SCINT_PROFILE=/tmp/scint-profile.json SCINT_PROFILE_HZ=400 scint install --force
+
+# Ruby-level IO trace (JSONL)
+SCINT_IO_TRACE=/tmp/scint-io.jsonl scint install --force
+
+# Summarize high-volume IO operations for quick LLM review
+scint-io-summary /tmp/scint-io.jsonl
+
+# Syscall-level trace (Linux strace / macOS dtruss)
+scint-syscall-trace /tmp/scint-sys.log -- scint install --force
+```
+
 Compatibility example:
 
 ```bash

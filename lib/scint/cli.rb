@@ -65,6 +65,12 @@ module Scint
           --path P   Install gems to path
           --verbose  Verbose output
           --force    Reinstall all gems, ignoring cache and local bundle state
+
+        Debug ENV:
+          SCINT_PROFILE=/tmp/scint-profile.json     Write Ruby sampling profile
+          SCINT_PROFILE_HZ=250                      Sampler frequency
+          SCINT_PROFILE_DEPTH=40                    Max stack depth
+          SCINT_IO_TRACE=/tmp/scint-io.jsonl        Write JSONL IO trace
       HELP
     end
   end

@@ -1,0 +1,41 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "rbconfig"
+
+def usage
+  warn "Usage: scint-syscall-trace LOGFILE -- CMD [ARGS...]"
+  warn "Example: scint-syscall-trace /tmp/scint-sys.log -- scint install"
+  exit 2
+end
+
+sep = ARGV.index("--")
+usage unless sep && sep.positive?
+
+logfile = ARGV[0]
+cmd = ARGV[(sep + 1)..]
+usage if logfile.nil? || logfile.empty? || cmd.nil? || cmd.empty?
+
+if system("command -v strace >/dev/null 2>&1")
+  exec("strace", "-ff", "-tt", "-s", "256", "-e", "trace=file,process", "-o", logfile, *cmd)
+end
+
+if system("command -v dtruss >/dev/null 2>&1")
+  if Process.uid != 0
+    warn "dtruss usually requires root on macOS. Re-run with sudo:"
+    warn "  sudo #{File.expand_path($PROGRAM_NAME)} #{logfile} -- #{cmd.join(" ")}"
+    exit 2
+  end
+
+  exec(
+    "dtruss",
+    "-f",
+    "-t", "open,open_nocancel,stat64,lstat64,access,rename,unlink,mkdir,rmdir,read,write,pread,pwrite,clonefile",
+    "-o", logfile,
+    "--",
+    *cmd
+  )
+end
+
+warn "No supported syscall tracer found (expected strace or dtruss)."
+exit 2

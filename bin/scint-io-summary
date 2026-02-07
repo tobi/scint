@@ -1,0 +1,46 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "json"
+
+path = ARGV[0]
+unless path && !path.empty?
+  warn "Usage: scint-io-summary TRACE.jsonl"
+  exit 2
+end
+
+op_counts = Hash.new(0)
+op_path_counts = Hash.new(0)
+line_count = 0
+
+File.foreach(path) do |line|
+  begin
+    row = JSON.parse(line)
+  rescue JSON::ParserError
+    next
+  end
+
+  line_count += 1
+  op = row["op"] || "(unknown)"
+  op_counts[op] += 1
+
+  args = row.dig("data", "args")
+  first_arg = args.is_a?(Array) ? args[0] : nil
+  if first_arg.is_a?(String) && !first_arg.empty?
+    op_path_counts[[op, first_arg]] += 1
+  end
+end
+
+puts "trace_file=#{path}"
+puts "total_rows=#{line_count}"
+puts
+puts "Top operations:"
+op_counts.sort_by { |_k, v| -v }.first(30).each do |op, count|
+  puts "#{count}\t#{op}"
+end
+
+puts
+puts "Top repeated op+path:"
+op_path_counts.sort_by { |_k, v| -v }.first(50).each do |(op, p), count|
+  puts "#{count}\t#{op}\t#{p}"
+end
