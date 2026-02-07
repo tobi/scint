@@ -32,13 +32,44 @@ class FSTest < Minitest::Test
       File.write(src, "hello")
 
       Scint::Platform.stub(:macos?, false) do
-        File.stub(:link, ->(_s, _d) { raise Errno::EXDEV }) do
-          Scint::FS.clonefile(src, dst)
+        Scint::Platform.stub(:linux?, false) do
+          File.stub(:link, ->(_s, _d) { raise Errno::EXDEV }) do
+            Scint::FS.clonefile(src, dst)
+          end
         end
       end
 
       assert_equal "hello", File.read(dst)
       refute_equal File.stat(src).ino, File.stat(dst).ino
+    end
+  end
+
+  def test_clonefile_uses_reflink_on_linux
+    with_tmpdir do |dir|
+      src = File.join(dir, "src.txt")
+      dst = File.join(dir, "dst.txt")
+      File.write(src, "hello")
+
+      called = false
+      Scint::Platform.stub(:macos?, false) do
+        Scint::Platform.stub(:linux?, true) do
+          Scint::FS.stub(:system, lambda { |*args|
+            called = true
+            assert_equal "cp", args[0]
+            assert_equal "--reflink=always", args[1]
+            assert_equal src, args[2]
+            assert_equal dst, args[3]
+            assert_equal({ [:out, :err] => File::NULL }, args[4])
+            FileUtils.cp(src, dst)
+            true
+          }) do
+            Scint::FS.clonefile(src, dst)
+          end
+        end
+      end
+
+      assert called
+      assert_equal "hello", File.read(dst)
     end
   end
 
@@ -151,6 +182,38 @@ class FSTest < Minitest::Test
       end
 
       assert fallback_called
+      assert_equal "a", File.binread(File.join(dst, "a.txt"))
+    end
+  end
+
+  def test_clone_tree_uses_reflink_on_linux
+    with_tmpdir do |dir|
+      src = File.join(dir, "src")
+      dst = File.join(dir, "dst")
+      FileUtils.mkdir_p(src)
+      File.binwrite(File.join(src, "a.txt"), "a")
+
+      called = false
+      Scint::Platform.stub(:macos?, false) do
+        Scint::Platform.stub(:linux?, true) do
+          Scint::FS.stub(:system, lambda { |*args|
+            called = true
+            assert_equal "cp", args[0]
+            assert_equal "--reflink=always", args[1]
+            assert_equal "-R", args[2]
+            assert_equal File.join(src, "."), args[3]
+            assert_equal dst, args[4]
+            assert_equal({ [:out, :err] => File::NULL }, args[5])
+            FileUtils.mkdir_p(dst)
+            FileUtils.cp_r(File.join(src, "."), dst)
+            true
+          }) do
+            Scint::FS.clone_tree(src, dst)
+          end
+        end
+      end
+
+      assert called
       assert_equal "a", File.binread(File.join(dst, "a.txt"))
     end
   end

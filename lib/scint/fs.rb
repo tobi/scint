@@ -32,6 +32,11 @@ module Scint
         return if system("cp", "-c", src, dst, [:out, :err] => File::NULL)
       end
 
+      # Try Linux reflink copy-on-write where supported (btrfs/xfs/etc).
+      if Platform.linux?
+        return if system("cp", "--reflink=always", src, dst, [:out, :err] => File::NULL)
+      end
+
       # Fallback: hardlink
       begin
         File.link(src, dst)
@@ -57,6 +62,12 @@ module Scint
       if Platform.macos?
         src_contents = File.join(src_dir, ".")
         return if system("cp", "-cR", src_contents, dst_dir, [:out, :err] => File::NULL)
+      end
+
+      # Fast path on Linux filesystems with reflink support.
+      if Platform.linux?
+        src_contents = File.join(src_dir, ".")
+        return if system("cp", "--reflink=always", "-R", src_contents, dst_dir, [:out, :err] => File::NULL)
       end
 
       hardlink_tree(src_dir, dst_dir)
