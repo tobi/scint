@@ -145,4 +145,20 @@ class ExtensionBuilderTest < Minitest::Test
       end
     end
   end
+
+  def test_run_cmd_emits_tail_callback_with_command
+    seen = nil
+    Scint::Installer::ExtensionBuilder.send(
+      :run_cmd,
+      {},
+      RbConfig.ruby,
+      "-e",
+      'STDOUT.puts("hello")',
+      output_tail: ->(lines) { seen = lines },
+    )
+
+    refute_nil seen
+    assert_equal true, seen.first.start_with?("$ ")
+    assert_includes seen.join("\n"), "hello"
+  end
 end

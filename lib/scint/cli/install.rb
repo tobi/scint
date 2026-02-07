@@ -116,13 +116,13 @@ module Scint
           if to_install.empty?
             elapsed_ms = elapsed_ms_since(start_time)
             warn_missing_bundle_gitignore_entry
-            $stdout.puts "\n#{GREEN}Bundle complete!#{RESET} #{GREEN}#{total_gems}#{RESET} gems installed total (#{cached_gems} cached, #{updated_gems} updated, 0 compiled). #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
+            $stdout.puts "\n#{GREEN}#{total_gems}#{RESET} gems installed total#{install_breakdown(cached: cached_gems, updated: updated_gems)}. #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
             return 0
           end
 
           # 8. Build a dependency-aware task graph:
           # download -> link_files -> build_ext -> binstub (where applicable).
-          compiled_gems = enqueue_install_dag(scheduler, plan, cache, bundle_path)
+          compiled_gems = enqueue_install_dag(scheduler, plan, cache, bundle_path, scheduler.progress)
 
           # 9. Wait for everything
           scheduler.wait_all
@@ -147,14 +147,14 @@ module Scint
 
           if has_failures
             warn_missing_bundle_gitignore_entry
-            $stdout.puts "\n#{RED}Bundle failed!#{RESET} #{installed_total}/#{total_gems} gems installed total (#{cached_gems} cached, #{updated_gems} updated, #{compiled_gems} compiled, #{RED}#{failed_count} failed#{RESET}). #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
+            $stdout.puts "\n#{RED}Bundle failed!#{RESET} #{installed_total}/#{total_gems} gems installed total#{install_breakdown(cached: cached_gems, updated: updated_gems, compiled: compiled_gems, failed: failed_count)}. #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
             1
           else
             # 10. Write lockfile + runtime config only for successful installs
             write_lockfile(resolved, gemfile)
             write_runtime_config(resolved, bundle_path)
             warn_missing_bundle_gitignore_entry
-            $stdout.puts "\n#{GREEN}Bundle complete!#{RESET} #{GREEN}#{total_gems}#{RESET} gems installed total (#{cached_gems} cached, #{updated_gems} updated, #{compiled_gems} compiled). #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
+            $stdout.puts "\n#{GREEN}#{total_gems}#{RESET} gems installed total#{install_breakdown(cached: cached_gems, updated: updated_gems, compiled: compiled_gems)}. #{DIM}(#{format_elapsed(elapsed_ms)})#{RESET}"
             0
           end
         ensure
@@ -500,7 +500,7 @@ module Scint
 
       # Enqueue dependency-aware install tasks so compile/binstub can run
       # concurrently with link/download once prerequisites are satisfied.
-      def enqueue_install_dag(scheduler, plan, cache, bundle_path)
+      def enqueue_install_dag(scheduler, plan, cache, bundle_path, progress = nil)
         link_job_by_key = {}
         link_job_by_name = {}
         build_job_by_key = {}
@@ -540,7 +540,7 @@ module Scint
           dep_links = dependency_link_job_ids(entry.spec, link_job_by_name)
           depends_on = ([own_link] + dep_links).uniq
           build_id = scheduler.enqueue(:build_ext, entry.spec.name,
-                                       -> { build_extensions(entry, cache, bundle_path) },
+                                       -> { build_extensions(entry, cache, bundle_path, progress) },
                                        depends_on: depends_on)
           build_job_by_key[key] = build_id
         end
@@ -620,7 +620,7 @@ module Scint
         Installer::Linker.link_files(prepared, bundle_path)
       end
 
-      def build_extensions(entry, cache, bundle_path)
+      def build_extensions(entry, cache, bundle_path, progress = nil)
         extracted = entry.cached_path || cache.extracted_path(entry.spec)
         gemspec = load_gemspec(extracted, entry.spec, cache)
 
@@ -631,7 +631,12 @@ module Scint
           from_cache: true,
         )
 
-        Installer::ExtensionBuilder.build(prepared, bundle_path, cache)
+        Installer::ExtensionBuilder.build(
+          prepared,
+          bundle_path,
+          cache,
+          output_tail: ->(lines) { progress&.on_build_tail(entry.spec.name, lines) },
+        )
       end
 
       def write_binstubs(entry, cache, bundle_path)
@@ -898,6 +903,16 @@ module Scint
         false
       rescue StandardError
         false
+      end
+
+      def install_breakdown(**counts)
+        parts = counts.filter_map do |label, n|
+          next if n.zero?
+          color = (label == :failed) ? RED : ""
+          reset = color.empty? ? "" : RESET
+          "#{color}#{n} #{label}#{reset}"
+        end
+        parts.empty? ? "" : " (#{parts.join(", ")})"
       end
 
       def parse_options

@@ -14,7 +14,7 @@ module Scint
       # prepared_gem: PreparedGem struct
       # bundle_path:  .bundle/ root
       # abi_key:      e.g. "ruby-3.3.0-arm64-darwin24" (defaults to Platform.abi_key)
-      def build(prepared_gem, bundle_path, cache_layout, abi_key: Platform.abi_key)
+      def build(prepared_gem, bundle_path, cache_layout, abi_key: Platform.abi_key, output_tail: nil)
         spec = prepared_gem.spec
         ruby_dir = ruby_install_dir(bundle_path)
 
@@ -37,7 +37,7 @@ module Scint
           FS.mkdir_p(install_dir)
 
           ext_dirs.each do |ext_dir|
-            compile_extension(ext_dir, build_dir, install_dir, src_dir, spec, ruby_dir)
+            compile_extension(ext_dir, build_dir, install_dir, src_dir, spec, ruby_dir, output_tail)
           end
 
           # Write marker
@@ -82,45 +82,45 @@ module Scint
         dirs.uniq
       end
 
-      def compile_extension(ext_dir, build_dir, install_dir, gem_dir, spec, ruby_dir)
+      def compile_extension(ext_dir, build_dir, install_dir, gem_dir, spec, ruby_dir, output_tail = nil)
         env = build_env(gem_dir, ruby_dir)
 
         if File.exist?(File.join(ext_dir, "extconf.rb"))
-          compile_extconf(ext_dir, build_dir, install_dir, env)
+          compile_extconf(ext_dir, build_dir, install_dir, env, output_tail)
         elsif File.exist?(File.join(ext_dir, "CMakeLists.txt"))
-          compile_cmake(ext_dir, build_dir, install_dir, env)
+          compile_cmake(ext_dir, build_dir, install_dir, env, output_tail)
         elsif File.exist?(File.join(ext_dir, "Rakefile"))
-          compile_rake(ext_dir, build_dir, install_dir, ruby_dir, env)
+          compile_rake(ext_dir, build_dir, install_dir, ruby_dir, env, output_tail)
         else
           raise ExtensionBuildError, "No known build system in #{ext_dir}"
         end
       end
 
-      def compile_extconf(ext_dir, build_dir, install_dir, env)
+      def compile_extconf(ext_dir, build_dir, install_dir, env, output_tail = nil)
         run_cmd(env, RbConfig.ruby, File.join(ext_dir, "extconf.rb"),
                 "--with-opt-dir=#{RbConfig::CONFIG["prefix"]}",
-                chdir: build_dir)
-        run_cmd(env, "make", "-j#{Platform.cpu_count}", "-C", build_dir)
+                chdir: build_dir, output_tail: output_tail)
+        run_cmd(env, "make", "-j#{Platform.cpu_count}", "-C", build_dir, output_tail: output_tail)
         run_cmd(env, "make", "install", "DESTDIR=", "sitearchdir=#{install_dir}", "sitelibdir=#{install_dir}",
-                chdir: build_dir)
+                chdir: build_dir, output_tail: output_tail)
       end
 
-      def compile_cmake(ext_dir, build_dir, install_dir, env)
+      def compile_cmake(ext_dir, build_dir, install_dir, env, output_tail = nil)
         run_cmd(env, "cmake", ext_dir, "-B", build_dir,
-                "-DCMAKE_INSTALL_PREFIX=#{install_dir}")
-        run_cmd(env, "cmake", "--build", build_dir, "--parallel", Platform.cpu_count.to_s)
-        run_cmd(env, "cmake", "--install", build_dir)
+                "-DCMAKE_INSTALL_PREFIX=#{install_dir}", output_tail: output_tail)
+        run_cmd(env, "cmake", "--build", build_dir, "--parallel", Platform.cpu_count.to_s, output_tail: output_tail)
+        run_cmd(env, "cmake", "--install", build_dir, output_tail: output_tail)
       end
 
-      def compile_rake(ext_dir, build_dir, install_dir, ruby_dir, env)
+      def compile_rake(ext_dir, build_dir, install_dir, ruby_dir, env, output_tail = nil)
         rake_exe = find_rake_executable(ruby_dir)
         begin
           if rake_exe
             run_cmd(env, RbConfig.ruby, rake_exe, "compile",
-                    chdir: ext_dir)
+                    chdir: ext_dir, output_tail: output_tail)
           else
             run_cmd(env, RbConfig.ruby, "-S", "rake", "compile",
-                    chdir: ext_dir)
+                    chdir: ext_dir, output_tail: output_tail)
           end
         rescue ExtensionBuildError => e
           # Some gems ship a Rakefile but do not expose a compile task.
@@ -170,7 +170,7 @@ module Scint
         }
       end
 
-      def run_cmd(env, *cmd, chdir: nil)
+      def run_cmd(env, *cmd, chdir: nil, output_tail: nil)
         opts = { chdir: chdir }.compact
 
         if ENV["SCINT_DEBUG"]
@@ -184,6 +184,11 @@ module Scint
         end
 
         out, err, status = Open3.capture3(env, *cmd, **opts)
+        tail = ([out, err].join.lines.map(&:rstrip).reject(&:empty?)).last(5)
+        if output_tail
+          cmd_line = "$ #{cmd.join(" ")}"
+          output_tail.call([cmd_line, *tail])
+        end
 
         unless status.success?
           details = [out, err].join
