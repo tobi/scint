@@ -2,7 +2,7 @@
 
 module Bundler2
   module CLI
-    COMMANDS = %w[install exec version help].freeze
+    COMMANDS = %w[install exec cache version help].freeze
 
     def self.run(argv)
       argv = argv.dup
@@ -15,6 +15,9 @@ module Bundler2
       when "exec", "e"
         require_relative "cli/exec"
         CLI::Exec.new(argv).run
+      when "cache", "c"
+        require_relative "cli/cache"
+        CLI::Cache.new(argv).run
       when "version", "-v", "--version"
         $stdout.puts "bundler2 #{Bundler2::VERSION}"
         0
@@ -34,7 +37,7 @@ module Bundler2
       130
     rescue => e
       $stderr.puts "Fatal: #{e.class}: #{e.message}"
-      $stderr.puts e.backtrace.first(10).map { |l| "  #{l}" }.join("\n") if ENV["BUNDLER2_DEBUG"]
+      $stderr.puts e.backtrace.first(10).map { |l| "  #{l}" }.join("\n")
       1
     end
 
@@ -45,6 +48,7 @@ module Bundler2
         Commands:
           install    Install gems from Gemfile (default)
           exec       Execute a command in the bundle context
+          cache      Manage bundler2 cache (list/clear/dir)
           version    Print version
           help       Show this help
 

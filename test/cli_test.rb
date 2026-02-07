@@ -38,6 +38,20 @@ class CLITest < Minitest::Test
     assert_includes err, "Unknown command"
   end
 
+  def test_run_cache_command_dispatches
+    with_tmpdir do |dir|
+      with_env("XDG_CACHE_HOME", dir) do
+        out, err = with_captured_io do
+          status = Bundler2::CLI.run(["cache", "dir"])
+          assert_equal 0, status
+        end
+
+        assert_equal "", err
+        assert_equal File.join(dir, "bundler2") + "\n", out
+      end
+    end
+  end
+
   def test_run_maps_bundler_error_to_status_code
     _out, err = with_captured_io do
       status = Bundler2::CLI.run(["install"])
