@@ -1,12 +1,12 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
-require "bundler2/fs"
-require "bundler2/platform"
+require "scint/fs"
+require "scint/platform"
 
 class FSTest < Minitest::Test
   def setup
-    Bundler2::FS.instance_variable_set(:@mkdir_cache, {})
+    Scint::FS.instance_variable_set(:@mkdir_cache, {})
   end
 
   def test_mkdir_p_is_memoized
@@ -16,8 +16,8 @@ class FSTest < Minitest::Test
       original = FileUtils.method(:mkdir_p)
 
       FileUtils.stub(:mkdir_p, ->(path) { calls += 1; original.call(path) }) do
-        Bundler2::FS.mkdir_p(target)
-        Bundler2::FS.mkdir_p(target)
+        Scint::FS.mkdir_p(target)
+        Scint::FS.mkdir_p(target)
       end
 
       assert Dir.exist?(target)
@@ -31,9 +31,9 @@ class FSTest < Minitest::Test
       dst = File.join(dir, "dst.txt")
       File.write(src, "hello")
 
-      Bundler2::Platform.stub(:macos?, false) do
+      Scint::Platform.stub(:macos?, false) do
         File.stub(:link, ->(_s, _d) { raise Errno::EXDEV }) do
-          Bundler2::FS.clonefile(src, dst)
+          Scint::FS.clonefile(src, dst)
         end
       end
 
@@ -49,7 +49,7 @@ class FSTest < Minitest::Test
       FileUtils.mkdir_p(File.join(src, "nested"))
       File.binwrite(File.join(src, "nested", "a.bin"), "abc")
 
-      Bundler2::FS.hardlink_tree(src, dst)
+      Scint::FS.hardlink_tree(src, dst)
 
       linked = File.join(dst, "nested", "a.bin")
       assert File.exist?(linked)
@@ -65,7 +65,7 @@ class FSTest < Minitest::Test
       File.binwrite(File.join(src, "file.txt"), "copied")
 
       File.stub(:link, ->(_s, _d) { raise Errno::EXDEV }) do
-        Bundler2::FS.hardlink_tree(src, dst)
+        Scint::FS.hardlink_tree(src, dst)
       end
 
       copied = File.join(dst, "file.txt")
@@ -80,7 +80,7 @@ class FSTest < Minitest::Test
       dst = File.join(dir, "dst")
 
       assert_raises(Errno::ENOENT) do
-        Bundler2::FS.hardlink_tree(src, dst)
+        Scint::FS.hardlink_tree(src, dst)
       end
     end
   end
@@ -100,7 +100,7 @@ class FSTest < Minitest::Test
 
         original.call(a, b)
       }) do
-        Bundler2::FS.atomic_move(src, dst)
+        Scint::FS.atomic_move(src, dst)
       end
 
       assert_equal "x", File.binread(dst)
@@ -112,7 +112,7 @@ class FSTest < Minitest::Test
     captured = nil
 
     assert_raises(RuntimeError) do
-      Bundler2::FS.with_tempdir("bundler2-fs") do |dir|
+      Scint::FS.with_tempdir("scint-fs") do |dir|
         captured = dir
         raise "boom"
       end
@@ -125,8 +125,8 @@ class FSTest < Minitest::Test
     with_tmpdir do |dir|
       path = File.join(dir, "out.txt")
 
-      Bundler2::FS.atomic_write(path, "v1")
-      Bundler2::FS.atomic_write(path, "v2")
+      Scint::FS.atomic_write(path, "v1")
+      Scint::FS.atomic_write(path, "v2")
 
       assert_equal "v2", File.read(path)
     end

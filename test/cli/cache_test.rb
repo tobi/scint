@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
-require "bundler2/cli/cache"
+require "scint/cli/cache"
 
 class CLICacheTest < Minitest::Test
   def with_captured_io
@@ -22,12 +22,12 @@ class CLICacheTest < Minitest::Test
     with_tmpdir do |dir|
       with_env("XDG_CACHE_HOME", dir) do
         out, err = with_captured_io do
-          status = Bundler2::CLI::Cache.new(["dir"]).run
+          status = Scint::CLI::Cache.new(["dir"]).run
           assert_equal 0, status
         end
 
         assert_equal "", err
-        assert_equal File.join(dir, "bundler2") + "\n", out
+        assert_equal File.join(dir, "scint") + "\n", out
       end
     end
   end
@@ -36,7 +36,7 @@ class CLICacheTest < Minitest::Test
     with_tmpdir do |dir|
       with_env("XDG_CACHE_HOME", dir) do
         out, _err = with_captured_io do
-          status = Bundler2::CLI::Cache.new(["list"]).run
+          status = Scint::CLI::Cache.new(["list"]).run
           assert_equal 0, status
         end
 
@@ -48,7 +48,7 @@ class CLICacheTest < Minitest::Test
   def test_list_shows_entries
     with_tmpdir do |dir|
       with_env("XDG_CACHE_HOME", dir) do
-        root = File.join(dir, "bundler2")
+        root = File.join(dir, "scint")
         inbound = File.join(root, "inbound")
         marker = File.join(root, "marker.txt")
 
@@ -57,7 +57,7 @@ class CLICacheTest < Minitest::Test
         File.write(marker, "x")
 
         out, _err = with_captured_io do
-          status = Bundler2::CLI::Cache.new(["list"]).run
+          status = Scint::CLI::Cache.new(["list"]).run
           assert_equal 0, status
         end
 
@@ -71,12 +71,12 @@ class CLICacheTest < Minitest::Test
   def test_clear_removes_entries
     with_tmpdir do |dir|
       with_env("XDG_CACHE_HOME", dir) do
-        root = File.join(dir, "bundler2")
+        root = File.join(dir, "scint")
         FileUtils.mkdir_p(File.join(root, "extracted"))
         File.write(File.join(root, "extracted", "x"), "1")
 
         out, _err = with_captured_io do
-          status = Bundler2::CLI::Cache.new(["clear"]).run
+          status = Scint::CLI::Cache.new(["clear"]).run
           assert_equal 0, status
         end
 
@@ -88,7 +88,7 @@ class CLICacheTest < Minitest::Test
 
   def test_unknown_subcommand_exits_with_error
     out, err = with_captured_io do
-      status = Bundler2::CLI::Cache.new(["wat"]).run
+      status = Scint::CLI::Cache.new(["wat"]).run
       assert_equal 1, status
     end
 

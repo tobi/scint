@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
-require "bundler2/lockfile/parser"
+require "scint/lockfile/parser"
 
 class LockfileParserTest < Minitest::Test
   def test_parse_full_lockfile
@@ -43,12 +43,12 @@ class LockfileParserTest < Minitest::Test
          2.5.5
     LOCK
 
-    lock = Bundler2::Lockfile::Parser.parse(contents)
+    lock = Scint::Lockfile::Parser.parse(contents)
 
     assert_equal 3, lock.sources.size
-    assert_equal Bundler2::Source::Rubygems, lock.sources[0].class
-    assert_equal Bundler2::Source::Git, lock.sources[1].class
-    assert_equal Bundler2::Source::Path, lock.sources[2].class
+    assert_equal Scint::Source::Rubygems, lock.sources[0].class
+    assert_equal Scint::Source::Git, lock.sources[1].class
+    assert_equal Scint::Source::Path, lock.sources[2].class
 
     rack = lock.specs.find { |s| s[:name] == "rack" }
     assert_equal "2.2.8", rack[:version]
@@ -76,7 +76,7 @@ class LockfileParserTest < Minitest::Test
       >>>>>>> other
     LOCK
 
-    assert_raises(Bundler2::LockfileError) { Bundler2::Lockfile::Parser.parse(contents) }
+    assert_raises(Scint::LockfileError) { Scint::Lockfile::Parser.parse(contents) }
   end
 
   def test_parse_ignores_unknown_sections
@@ -88,7 +88,7 @@ class LockfileParserTest < Minitest::Test
         rack
     LOCK
 
-    lock = Bundler2::Lockfile::Parser.parse(contents)
+    lock = Scint::Lockfile::Parser.parse(contents)
     assert_equal ["rack"], lock.dependencies.keys
   end
 end

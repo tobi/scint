@@ -1,14 +1,14 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
-require "bundler2/lockfile/writer"
-require "bundler2/lockfile/parser"
+require "scint/lockfile/writer"
+require "scint/lockfile/parser"
 
 class LockfileWriterTest < Minitest::Test
   def test_writer_outputs_all_sections_and_sorted_specs
-    source = Bundler2::Source::Rubygems.new(remotes: ["https://rubygems.org/"])
+    source = Scint::Source::Rubygems.new(remotes: ["https://rubygems.org/"])
 
-    data = Bundler2::Lockfile::LockfileData.new(
+    data = Scint::Lockfile::LockfileData.new(
       specs: [
         {
           name: "rack",
@@ -39,7 +39,7 @@ class LockfileWriterTest < Minitest::Test
       },
     )
 
-    out = Bundler2::Lockfile::Writer.write(data)
+    out = Scint::Lockfile::Writer.write(data)
 
     assert_includes out, "GEM\n"
     assert_includes out, "  remote: https://rubygems.org/"
@@ -55,8 +55,8 @@ class LockfileWriterTest < Minitest::Test
   end
 
   def test_writer_output_is_parseable_for_core_sections
-    source = Bundler2::Source::Rubygems.new(remotes: ["https://rubygems.org/"])
-    data = Bundler2::Lockfile::LockfileData.new(
+    source = Scint::Source::Rubygems.new(remotes: ["https://rubygems.org/"])
+    data = Scint::Lockfile::LockfileData.new(
       specs: [{ name: "rack", version: "2.2.8", platform: "ruby", source: "https://rubygems.org/", dependencies: [] }],
       dependencies: [{ name: "rack", version_reqs: [">= 0"], pinned: false }],
       platforms: ["ruby"],
@@ -66,8 +66,8 @@ class LockfileWriterTest < Minitest::Test
       checksums: nil,
     )
 
-    out = Bundler2::Lockfile::Writer.write(data)
-    parsed = Bundler2::Lockfile::Parser.parse(out)
+    out = Scint::Lockfile::Writer.write(data)
+    parsed = Scint::Lockfile::Parser.parse(out)
 
     assert_equal ["rack"], parsed.dependencies.keys
     assert_equal "rack", parsed.specs.first[:name]

@@ -1,12 +1,12 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
-require "bundler2/index/client"
+require "scint/index/client"
 
 class IndexClientTest < Minitest::Test
   def test_fetch_names_uses_etag_cache_and_memoizes_within_session
     with_tmpdir do |dir|
-      client = Bundler2::Index::Client.new("https://example.test", cache_dir: dir)
+      client = Scint::Index::Client.new("https://example.test", cache_dir: dir)
 
       calls = 0
       response = http_response(Net::HTTPOK, body: "---\nrack\n", headers: { "ETag" => '"etag-1"' })
@@ -30,7 +30,7 @@ class IndexClientTest < Minitest::Test
 
   def test_fetch_versions_range_append_path
     with_tmpdir do |dir|
-      client = Bundler2::Index::Client.new("https://example.test", cache_dir: dir)
+      client = Scint::Index::Client.new("https://example.test", cache_dir: dir)
       cache = client.instance_variable_get(:@cache)
       cache.write_versions("abc", etag: "old")
 
@@ -53,7 +53,7 @@ class IndexClientTest < Minitest::Test
 
   def test_fetch_info_uses_binary_cache_when_checksum_matches
     with_tmpdir do |dir|
-      client = Bundler2::Index::Client.new("https://example.test", cache_dir: dir)
+      client = Scint::Index::Client.new("https://example.test", cache_dir: dir)
       cache = client.instance_variable_get(:@cache)
       parser = client.instance_variable_get(:@parser)
 
@@ -71,7 +71,7 @@ class IndexClientTest < Minitest::Test
 
   def test_prefetch_skips_binary_cached_and_fresh_info_files
     with_tmpdir do |dir|
-      client = Bundler2::Index::Client.new("https://example.test", cache_dir: dir)
+      client = Scint::Index::Client.new("https://example.test", cache_dir: dir)
       cache = client.instance_variable_get(:@cache)
       parser = client.instance_variable_get(:@parser)
 
@@ -98,7 +98,7 @@ class IndexClientTest < Minitest::Test
   end
 
   def test_decode_body_handles_gzip_encoded_responses
-    client = Bundler2::Index::Client.new("https://example.test")
+    client = Scint::Index::Client.new("https://example.test")
     body = gzip("rack\n")
     response = http_response(Net::HTTPOK, body: body, headers: { "Content-Encoding" => "gzip" })
 
@@ -108,7 +108,7 @@ class IndexClientTest < Minitest::Test
   end
 
   def test_extract_etag_handles_weak_and_quoted_values
-    client = Bundler2::Index::Client.new("https://example.test")
+    client = Scint::Index::Client.new("https://example.test")
     response = http_response(Net::HTTPOK, headers: { "ETag" => 'W/"abc123"' })
 
     assert_equal "abc123", client.send(:extract_etag, response)

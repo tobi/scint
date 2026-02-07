@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
-require "bundler2/resolver/resolver"
-require "bundler2/gemfile/dependency"
+require "scint/resolver/resolver"
+require "scint/gemfile/dependency"
 
 class ResolverTest < Minitest::Test
   class FakeIndexClient
@@ -67,13 +67,13 @@ class ResolverTest < Minitest::Test
       dependencies: {},
     )
 
-    resolver = Bundler2::Resolver::Resolver.new(
+    resolver = Scint::Resolver::Resolver.new(
       provider: provider,
       dependencies: [],
       locked_specs: { "rack" => "2.0.0" },
     )
 
-    package = Bundler2::PubGrub::Package.new("rack")
+    package = Scint::PubGrub::Package.new("rack")
     assert_equal(
       [Gem::Version.new("2.0.0"), Gem::Version.new("3.0.0"), Gem::Version.new("1.0.0")],
       resolver.all_versions_for(package),
@@ -82,7 +82,7 @@ class ResolverTest < Minitest::Test
 
   def test_requirement_to_range_for_pessimistic_constraint
     provider = FakeProvider.new(versions: {}, dependencies: {})
-    resolver = Bundler2::Resolver::Resolver.new(provider: provider, dependencies: [])
+    resolver = Scint::Resolver::Resolver.new(provider: provider, dependencies: [])
 
     range = resolver.send(:requirement_to_range, Gem::Requirement.new("~> 2.3.4"))
 
@@ -94,11 +94,11 @@ class ResolverTest < Minitest::Test
   def test_root_dependencies_merge_duplicate_package_constraints
     provider = FakeProvider.new(versions: {}, dependencies: {})
     deps = [
-      Bundler2::Gemfile::Dependency.new("rack", version_reqs: [">= 2.0"]),
-      Bundler2::Gemfile::Dependency.new("rack", version_reqs: ["< 3.0"]),
+      Scint::Gemfile::Dependency.new("rack", version_reqs: [">= 2.0"]),
+      Scint::Gemfile::Dependency.new("rack", version_reqs: ["< 3.0"]),
     ]
 
-    resolver = Bundler2::Resolver::Resolver.new(provider: provider, dependencies: deps)
+    resolver = Scint::Resolver::Resolver.new(provider: provider, dependencies: deps)
     root_deps = resolver.send(:root_dependencies)
 
     assert_equal 1, root_deps.size
@@ -117,9 +117,9 @@ class ResolverTest < Minitest::Test
       has_extensions: { ["rack", "2.2.8"] => true },
       platforms: { ["rack", "2.2.8"] => "arm64-darwin" },
     )
-    resolver = Bundler2::Resolver::Resolver.new(provider: provider, dependencies: [])
+    resolver = Scint::Resolver::Resolver.new(provider: provider, dependencies: [])
 
-    package = Bundler2::PubGrub::Package.new("rack")
+    package = Scint::PubGrub::Package.new("rack")
     spec = resolver.send(:build_resolved_spec, package, Gem::Version.new("2.2.8"))
 
     assert_equal "rack", spec.name

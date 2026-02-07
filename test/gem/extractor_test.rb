@@ -1,12 +1,12 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
-require "bundler2/gem/extractor"
+require "scint/gem/extractor"
 
 class ExtractorTest < Minitest::Test
   def test_extract_with_ruby_ignores_path_traversal_entries
     with_tmpdir do |dir|
-      extractor = Bundler2::GemPkg::Extractor.new
+      extractor = Scint::GemPkg::Extractor.new
       tar_gz = File.join(dir, "data.tar.gz")
       dest = File.join(dir, "dest")
 
@@ -27,7 +27,7 @@ class ExtractorTest < Minitest::Test
 
   def test_extract_with_ruby_only_creates_safe_symlinks
     with_tmpdir do |dir|
-      extractor = Bundler2::GemPkg::Extractor.new
+      extractor = Scint::GemPkg::Extractor.new
       tar_gz = File.join(dir, "data.tar.gz")
       dest = File.join(dir, "dest")
 
@@ -51,7 +51,7 @@ class ExtractorTest < Minitest::Test
   end
 
   def test_system_tar_available_returns_false_if_tar_missing
-    extractor = Bundler2::GemPkg::Extractor.new
+    extractor = Scint::GemPkg::Extractor.new
 
     extractor.stub(:system, ->(*_args) { raise Errno::ENOENT }) do
       assert_equal false, extractor.send(:system_tar_available?)
@@ -61,7 +61,7 @@ class ExtractorTest < Minitest::Test
 
   def test_extract_with_system_tar_falls_back_to_ruby
     with_tmpdir do |dir|
-      extractor = Bundler2::GemPkg::Extractor.new
+      extractor = Scint::GemPkg::Extractor.new
       tar_gz = File.join(dir, "data.tar.gz")
       dest = File.join(dir, "dest")
 

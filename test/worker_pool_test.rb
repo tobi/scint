@@ -1,16 +1,16 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
-require "bundler2/worker_pool"
+require "scint/worker_pool"
 
 class WorkerPoolTest < Minitest::Test
   def test_start_requires_handler_block
-    pool = Bundler2::WorkerPool.new(1)
+    pool = Scint::WorkerPool.new(1)
     assert_raises(RuntimeError) { pool.start }
   end
 
   def test_worker_pool_executes_jobs_and_callbacks
-    pool = Bundler2::WorkerPool.new(2, name: "test")
+    pool = Scint::WorkerPool.new(2, name: "test")
     done = Thread::Queue.new
 
     pool.start(1) { |payload| payload * 2 }
@@ -27,7 +27,7 @@ class WorkerPoolTest < Minitest::Test
   end
 
   def test_grow_to_increases_worker_count_up_to_max
-    pool = Bundler2::WorkerPool.new(3)
+    pool = Scint::WorkerPool.new(3)
     pool.start(1) { |payload| payload }
 
     pool.grow_to(10)
@@ -37,7 +37,7 @@ class WorkerPoolTest < Minitest::Test
   end
 
   def test_callback_errors_are_captured_on_job
-    pool = Bundler2::WorkerPool.new(1)
+    pool = Scint::WorkerPool.new(1)
     done = Thread::Queue.new
 
     old_err = $stderr

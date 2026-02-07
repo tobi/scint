@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
-require "bundler2/resolver/provider"
+require "scint/resolver/provider"
 
 class ProviderTest < Minitest::Test
   class FakeIndexClient
@@ -25,7 +25,7 @@ class ProviderTest < Minitest::Test
 
   def provider_with(data, platforms: ["ruby", "x86_64-linux"])
     client = FakeIndexClient.new(data)
-    Bundler2::Resolver::Provider.new(client, platforms: platforms)
+    Scint::Resolver::Provider.new(client, platforms: platforms)
   end
 
   def test_versions_for_filters_platforms_and_sorts
@@ -70,7 +70,7 @@ class ProviderTest < Minitest::Test
 
   def test_locked_version_returns_gem_version
     client = FakeIndexClient.new({})
-    provider = Bundler2::Resolver::Provider.new(client, locked_specs: { "rack" => "2.2.8" })
+    provider = Scint::Resolver::Provider.new(client, locked_specs: { "rack" => "2.2.8" })
 
     assert_equal Gem::Version.new("2.2.8"), provider.locked_version("rack")
     assert_nil provider.locked_version("rails")
@@ -90,7 +90,7 @@ class ProviderTest < Minitest::Test
 
   def test_prefetch_populates_internal_info_cache
     client = FakeIndexClient.new("rack" => [["rack", "2.2.8", "ruby", {}, {}]])
-    provider = Bundler2::Resolver::Provider.new(client)
+    provider = Scint::Resolver::Provider.new(client)
 
     provider.prefetch(["rack"])
     versions = provider.versions_for("rack")

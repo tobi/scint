@@ -10,9 +10,9 @@ require "digest"
 
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
-require "bundler2"
-require "bundler2/errors"
-require "bundler2/fs"
+require "scint"
+require "scint/errors"
+require "scint/fs"
 
 module LegacyStub
   def stub(method_name, value = nil)
@@ -37,8 +37,8 @@ end
 
 Object.include(LegacyStub)
 
-module Bundler2TestHelpers
-  def with_tmpdir(prefix = "bundler2-test")
+module ScintTestHelpers
+  def with_tmpdir(prefix = "scint-test")
     Dir.mktmpdir(prefix) do |dir|
       yield dir
     end
@@ -69,7 +69,7 @@ module Bundler2TestHelpers
   end
 
   def fake_spec(name:, version:, platform: "ruby", source: "https://rubygems.org", has_extensions: false, dependencies: [])
-    Bundler2::ResolvedSpec.new(
+    Scint::ResolvedSpec.new(
       name: name,
       version: version,
       platform: platform,
@@ -124,7 +124,7 @@ module Bundler2TestHelpers
       s.name = name
       s.version = Gem::Version.new(version)
       s.platform = platform
-      s.authors = ["bundler2-test"]
+      s.authors = ["scint-test"]
       s.summary = "test gem"
       s.files = files.keys
       s.require_paths = require_paths
@@ -169,5 +169,5 @@ module Bundler2TestHelpers
 end
 
 class Minitest::Test
-  include Bundler2TestHelpers
+  include ScintTestHelpers
 end

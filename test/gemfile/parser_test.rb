@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
-require "bundler2/gemfile/parser"
+require "scint/gemfile/parser"
 
 class GemfileParserTest < Minitest::Test
   def test_parse_complex_gemfile_dsl
@@ -31,7 +31,7 @@ class GemfileParserTest < Minitest::Test
         end
       RUBY
 
-      result = Bundler2::Gemfile::Parser.parse(gemfile)
+      result = Scint::Gemfile::Parser.parse(gemfile)
       deps = result.dependencies.each_with_object({}) { |d, h| h[d.name] = d }
 
       assert_equal [">= 2.2"], deps.fetch("rack").version_reqs
@@ -65,7 +65,7 @@ class GemfileParserTest < Minitest::Test
         eval_gemfile "Gemfile.extra"
       RUBY
 
-      result = Bundler2::Gemfile::Parser.parse(gemfile)
+      result = Scint::Gemfile::Parser.parse(gemfile)
       assert_equal ["rack"], result.dependencies.map(&:name)
     end
   end
@@ -78,7 +78,7 @@ class GemfileParserTest < Minitest::Test
         gem "demo", github: "https://github.com/ruby/ruby/pull/123"
       RUBY
 
-      dep = Bundler2::Gemfile::Parser.parse(gemfile).dependencies.first
+      dep = Scint::Gemfile::Parser.parse(gemfile).dependencies.first
       assert_equal "https://github.com/ruby/ruby.git", dep.source_options[:git]
       assert_equal "refs/pull/123/head", dep.source_options[:ref]
     end
@@ -92,7 +92,7 @@ class GemfileParserTest < Minitest::Test
         totally_unknown_helper "x"
       RUBY
 
-      error = assert_raises(Bundler2::GemfileError) { Bundler2::Gemfile::Parser.parse(gemfile) }
+      error = assert_raises(Scint::GemfileError) { Scint::Gemfile::Parser.parse(gemfile) }
       assert_includes error.message, "Undefined local variable or method"
     end
   end
@@ -102,7 +102,7 @@ class GemfileParserTest < Minitest::Test
       gemfile = File.join(dir, "Gemfile")
       File.write(gemfile, "gem \"rack\"\nend\n")
 
-      error = assert_raises(Bundler2::GemfileError) { Bundler2::Gemfile::Parser.parse(gemfile) }
+      error = assert_raises(Scint::GemfileError) { Scint::Gemfile::Parser.parse(gemfile) }
       assert_includes error.message, "Syntax error"
     end
   end

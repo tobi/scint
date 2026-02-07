@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
-require "bundler2/cli/exec"
+require "scint/cli/exec"
 
 class CLIExecTest < Minitest::Test
   def with_captured_stderr
@@ -14,7 +14,7 @@ class CLIExecTest < Minitest::Test
   end
 
   def test_run_requires_command
-    cli = Bundler2::CLI::Exec.new([])
+    cli = Scint::CLI::Exec.new([])
 
     with_captured_stderr do |err|
       assert_equal 1, cli.run
@@ -26,20 +26,20 @@ class CLIExecTest < Minitest::Test
     with_tmpdir do |dir|
       root = File.join(dir, "project")
       nested = File.join(root, "a", "b")
-      lock_dir = File.join(root, ".bundle")
-      lock_path = File.join(lock_dir, Bundler2::CLI::Exec::RUNTIME_LOCK)
+      lock_dir = File.join(root, ".scint")
+      lock_path = File.join(lock_dir, Scint::CLI::Exec::RUNTIME_LOCK)
 
       FileUtils.mkdir_p(nested)
       FileUtils.mkdir_p(lock_dir)
       File.binwrite(lock_path, Marshal.dump({}))
 
       called = nil
-      Bundler2::Runtime::Exec.stub(:exec, lambda { |cmd, args, path|
+      Scint::Runtime::Exec.stub(:exec, lambda { |cmd, args, path|
         called = [cmd, args, path]
         0
       }) do
         with_cwd(nested) do
-          status = Bundler2::CLI::Exec.new(["ruby", "-v"]).run
+          status = Scint::CLI::Exec.new(["ruby", "-v"]).run
           assert_equal 0, status
         end
       end
@@ -54,7 +54,7 @@ class CLIExecTest < Minitest::Test
     with_tmpdir do |dir|
       root = File.join(dir, "project")
       nested = File.join(root, "a", "b")
-      bundle_dir = File.join(root, ".bundle")
+      bundle_dir = File.join(root, ".scint")
       ruby_dir = ruby_bundle_dir(bundle_dir)
       specs_dir = File.join(ruby_dir, "specifications")
       gems_dir = File.join(ruby_dir, "gems")
@@ -75,17 +75,17 @@ class CLIExecTest < Minitest::Test
       LOCK
 
       called = nil
-      Bundler2::Runtime::Exec.stub(:exec, lambda { |cmd, args, path|
+      Scint::Runtime::Exec.stub(:exec, lambda { |cmd, args, path|
         called = [cmd, args, path]
         0
       }) do
         with_cwd(nested) do
-          status = Bundler2::CLI::Exec.new(["ruby", "-v"]).run
+          status = Scint::CLI::Exec.new(["ruby", "-v"]).run
           assert_equal 0, status
         end
       end
 
-      rebuilt_path = File.join(root, ".bundle", Bundler2::CLI::Exec::RUNTIME_LOCK)
+      rebuilt_path = File.join(root, ".scint", Scint::CLI::Exec::RUNTIME_LOCK)
       assert_equal File.realpath(rebuilt_path), File.realpath(called[2])
       assert File.exist?(rebuilt_path)
 
@@ -99,7 +99,7 @@ class CLIExecTest < Minitest::Test
     with_tmpdir do |dir|
       root = File.join(dir, "project")
       nested = File.join(root, "a", "b")
-      bundle_dir = File.join(root, ".bundle")
+      bundle_dir = File.join(root, ".scint")
       ruby_dir = ruby_bundle_dir(bundle_dir)
       specs_dir = File.join(ruby_dir, "specifications")
       gems_dir = File.join(ruby_dir, "gems")
@@ -124,20 +124,20 @@ class CLIExecTest < Minitest::Test
         s.name = "concurrent-ruby"
         s.version = Gem::Version.new("1.3.6")
         s.summary = "test"
-        s.authors = ["bundler2-test"]
+        s.authors = ["scint-test"]
         s.files = []
         s.require_paths = ["lib/concurrent-ruby"]
       end
       File.write(spec_file, gemspec.to_ruby)
 
-      Bundler2::Runtime::Exec.stub(:exec, ->(_cmd, _args, _path) { 0 }) do
+      Scint::Runtime::Exec.stub(:exec, ->(_cmd, _args, _path) { 0 }) do
         with_cwd(nested) do
-          status = Bundler2::CLI::Exec.new(["ruby", "-v"]).run
+          status = Scint::CLI::Exec.new(["ruby", "-v"]).run
           assert_equal 0, status
         end
       end
 
-      rebuilt_path = File.join(root, ".bundle", Bundler2::CLI::Exec::RUNTIME_LOCK)
+      rebuilt_path = File.join(root, ".scint", Scint::CLI::Exec::RUNTIME_LOCK)
       data = Marshal.load(File.binread(rebuilt_path))
       assert_equal [File.realpath(custom_lib_dir)],
                    data.fetch("concurrent-ruby")[:load_paths].map { |p| File.realpath(p) }
@@ -148,7 +148,7 @@ class CLIExecTest < Minitest::Test
     with_tmpdir do |dir|
       root = File.join(dir, "project")
       nested = File.join(root, "a", "b")
-      bundle_dir = File.join(root, ".bundle")
+      bundle_dir = File.join(root, ".scint")
       ruby_dir = ruby_bundle_dir(bundle_dir)
       specs_dir = File.join(ruby_dir, "specifications")
       gems_dir = File.join(ruby_dir, "gems")
@@ -174,20 +174,20 @@ class CLIExecTest < Minitest::Test
         s.name = "concurrent-ruby"
         s.version = Gem::Version.new("1.3.6")
         s.summary = "test"
-        s.authors = ["bundler2-test"]
+        s.authors = ["scint-test"]
         s.files = []
         s.require_paths = ["lib"]
       end
       File.write(spec_file, gemspec.to_ruby)
 
-      Bundler2::Runtime::Exec.stub(:exec, ->(_cmd, _args, _path) { 0 }) do
+      Scint::Runtime::Exec.stub(:exec, ->(_cmd, _args, _path) { 0 }) do
         with_cwd(nested) do
-          status = Bundler2::CLI::Exec.new(["ruby", "-v"]).run
+          status = Scint::CLI::Exec.new(["ruby", "-v"]).run
           assert_equal 0, status
         end
       end
 
-      rebuilt_path = File.join(root, ".bundle", Bundler2::CLI::Exec::RUNTIME_LOCK)
+      rebuilt_path = File.join(root, ".scint", Scint::CLI::Exec::RUNTIME_LOCK)
       data = Marshal.load(File.binread(rebuilt_path))
       load_paths = data.fetch("concurrent-ruby")[:load_paths].map { |p| File.realpath(p) }
 

@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
-require "bundler2/gem/package"
+require "scint/gem/package"
 
 class PackageTest < Minitest::Test
   def test_read_metadata_returns_gemspec
@@ -14,7 +14,7 @@ class PackageTest < Minitest::Test
         files: { "lib/demo.rb" => "module Demo; end\n" },
       )
 
-      pkg = Bundler2::GemPkg::Package.new
+      pkg = Scint::GemPkg::Package.new
       spec = pkg.read_metadata(gem_path)
 
       assert_equal "demo", spec.name
@@ -35,7 +35,7 @@ class PackageTest < Minitest::Test
         },
       )
 
-      pkg = Bundler2::GemPkg::Package.new
+      pkg = Scint::GemPkg::Package.new
       dest = File.join(dir, "out")
       result = pkg.extract(gem_path, dest)
 
@@ -53,8 +53,8 @@ class PackageTest < Minitest::Test
       data_tar_gz = gzip(make_tar([{ type: :file, name: "lib/x.rb", content: "x" }]))
       File.binwrite(gem_path, make_tar([{ type: :file, name: "data.tar.gz", content: data_tar_gz }]))
 
-      pkg = Bundler2::GemPkg::Package.new
-      error = assert_raises(Bundler2::InstallError) { pkg.extract(gem_path, File.join(dir, "out")) }
+      pkg = Scint::GemPkg::Package.new
+      error = assert_raises(Scint::InstallError) { pkg.extract(gem_path, File.join(dir, "out")) }
 
       assert_includes error.message, "No metadata.gz"
     end

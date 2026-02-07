@@ -1,18 +1,18 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
-require "bundler2/downloader/pool"
+require "scint/downloader/pool"
 
 class DownloaderPoolTest < Minitest::Test
   def test_download_retries_and_resets_fetcher
-    pool = Bundler2::Downloader::Pool.new(size: 1)
+    pool = Scint::Downloader::Pool.new(size: 1)
 
     attempts = 0
     reset_calls = 0
     fetcher = Object.new
     fetcher.define_singleton_method(:fetch) do |_uri, dest, checksum: nil|
       attempts += 1
-      raise Bundler2::NetworkError, "temporary" if attempts < 3
+      raise Scint::NetworkError, "temporary" if attempts < 3
 
       FileUtils.mkdir_p(File.dirname(dest))
       File.binwrite(dest, "ok")
@@ -37,7 +37,7 @@ class DownloaderPoolTest < Minitest::Test
   end
 
   def test_download_raises_after_max_retries
-    pool = Bundler2::Downloader::Pool.new(size: 1)
+    pool = Scint::Downloader::Pool.new(size: 1)
 
     fetcher = Object.new
     fetcher.define_singleton_method(:fetch) do |_uri, _dest, checksum: nil|
@@ -50,7 +50,7 @@ class DownloaderPoolTest < Minitest::Test
     with_tmpdir do |dir|
       error = nil
       pool.stub(:sleep, nil) do
-        error = assert_raises(Bundler2::NetworkError) do
+        error = assert_raises(Scint::NetworkError) do
           pool.download("https://example.test/fail.gem", File.join(dir, "fail.gem"))
         end
       end
@@ -60,10 +60,10 @@ class DownloaderPoolTest < Minitest::Test
   end
 
   def test_download_batch_collects_success_and_failure_results
-    pool = Bundler2::Downloader::Pool.new(size: 2)
+    pool = Scint::Downloader::Pool.new(size: 2)
 
     pool.stub(:download, lambda { |uri, dest, checksum: nil|
-      raise Bundler2::NetworkError, "boom" if uri.include?("bad")
+      raise Scint::NetworkError, "boom" if uri.include?("bad")
 
       FileUtils.mkdir_p(File.dirname(dest))
       File.binwrite(dest, "gem")
@@ -88,7 +88,7 @@ class DownloaderPoolTest < Minitest::Test
   end
 
   def test_close_closes_all_fetchers
-    pool = Bundler2::Downloader::Pool.new(size: 1)
+    pool = Scint::Downloader::Pool.new(size: 1)
     closed = []
 
     a = Object.new

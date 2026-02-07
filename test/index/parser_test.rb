@@ -1,18 +1,18 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
-require "bundler2/index/parser"
+require "scint/index/parser"
 
 class IndexParserTest < Minitest::Test
   def test_parse_names_strips_header
-    parser = Bundler2::Index::Parser.new
+    parser = Scint::Index::Parser.new
     names = parser.parse_names("---\nrack\nrails\n")
 
     assert_equal %w[rack rails], names
   end
 
   def test_parse_versions_handles_adds_deletes_and_checksums
-    parser = Bundler2::Index::Parser.new
+    parser = Scint::Index::Parser.new
     versions = parser.parse_versions(<<~DATA)
       ---
       rack 1.0.0,1.1.0 abc
@@ -27,7 +27,7 @@ class IndexParserTest < Minitest::Test
   end
 
   def test_parse_info_parses_deps_requirements_and_platform
-    parser = Bundler2::Index::Parser.new
+    parser = Scint::Index::Parser.new
     lines = parser.parse_info("rack", "2.2.8-x86_64-linux dep1:>=1&<2,dep2|ruby:>=3.1,rubygems:>=3.4\n")
 
     name, version, platform, deps, reqs = lines.first
@@ -39,7 +39,7 @@ class IndexParserTest < Minitest::Test
   end
 
   def test_parse_info_defaults_platform_to_ruby
-    parser = Bundler2::Index::Parser.new
+    parser = Scint::Index::Parser.new
     line = parser.parse_info("rack", "2.2.8\n").first
 
     assert_equal ["rack", "2.2.8", "ruby", {}, {}], line

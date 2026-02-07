@@ -6,7 +6,7 @@
 - we attempt to do expensive operations in bulk such as mass unpacking of gems
 - we do everything in parallel that can be parallel
 - version number resolution works by casing the strings 1.1.1 into int64 at different orders of magnitude so that version comparisons are just int comparisons. 
-- final bundle install step is to bring all gems to ./.bundle in the most efficient operation imaginable
+- final bundle install step is to bring all gems to ./.scint in the most efficient operation imaginable
 - the installation process involves compilation. We attempt to have compilation happen while its not blocking other operations, but also only one compilation at a time
 - we have a book keeping object that governs the worker pools and that's present during each step (fetch, extract, compile, install) and recieves the tasks for each phase from the workers. 
 - i suspect that we need to fork of a worker for compilation which we then have to communicate with via some rpc format. simple "-> CALL method, <- RESULT:\n...." type line protocol through stdin/out might work well enough there. 

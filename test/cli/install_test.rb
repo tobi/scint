@@ -1,9 +1,9 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
-require "bundler2/cli/install"
-require "bundler2/cache/layout"
-require "bundler2/source/rubygems"
+require "scint/cli/install"
+require "scint/cache/layout"
+require "scint/source/rubygems"
 
 class CLIInstallTest < Minitest::Test
   class FakeScheduler
@@ -34,8 +34,8 @@ class CLIInstallTest < Minitest::Test
 
   def test_load_gemspec_uses_cached_spec_without_evaluating_extracted_gemspec
     with_tmpdir do |dir|
-      cache = Bundler2::Cache::Layout.new(root: File.join(dir, "cache"))
-      install = Bundler2::CLI::Install.new([])
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
       spec = fake_spec(name: "rack", version: "2.2.8")
 
       cached = Gem::Specification.new do |s|
@@ -61,8 +61,8 @@ class CLIInstallTest < Minitest::Test
 
   def test_load_gemspec_falls_back_to_inbound_metadata
     with_tmpdir do |dir|
-      cache = Bundler2::Cache::Layout.new(root: File.join(dir, "cache"))
-      install = Bundler2::CLI::Install.new([])
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
       spec = fake_spec(name: "demo", version: "1.0.0")
 
       inbound = cache.inbound_path(spec)
@@ -77,8 +77,8 @@ class CLIInstallTest < Minitest::Test
 
   def test_load_gemspec_refreshes_stale_cached_require_paths_from_inbound
     with_tmpdir do |dir|
-      cache = Bundler2::Cache::Layout.new(root: File.join(dir, "cache"))
-      install = Bundler2::CLI::Install.new([])
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
       spec = fake_spec(name: "concurrent-ruby", version: "1.3.6")
 
       extracted = cache.extracted_path(spec)
@@ -114,29 +114,29 @@ class CLIInstallTest < Minitest::Test
 
   def test_enqueue_link_after_download_always_enqueues_link
     with_tmpdir do |dir|
-      cache = Bundler2::Cache::Layout.new(root: File.join(dir, "cache"))
-      install = Bundler2::CLI::Install.new([])
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
       scheduler = FakeScheduler.new
 
       spec = fake_spec(name: "ffi", version: "1.17.0", has_extensions: true)
-      entry = Bundler2::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
+      entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
 
-      install.send(:enqueue_link_after_download, scheduler, entry, cache, File.join(dir, ".bundle"))
+      install.send(:enqueue_link_after_download, scheduler, entry, cache, File.join(dir, ".scint"))
       assert_equal :link, scheduler.enqueued.last[:type]
     end
   end
 
   def test_enqueue_builds_only_for_native_buildable_entries
     with_tmpdir do |dir|
-      cache = Bundler2::Cache::Layout.new(root: File.join(dir, "cache"))
-      install = Bundler2::CLI::Install.new([])
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
       scheduler = FakeScheduler.new
 
       native = fake_spec(name: "ffi", version: "1.17.0", has_extensions: true)
       java_only = fake_spec(name: "concurrent-ruby", version: "1.3.6", has_extensions: true)
 
-      native_entry = Bundler2::PlanEntry.new(spec: native, action: :build_ext, cached_path: nil, gem_path: nil)
-      java_entry = Bundler2::PlanEntry.new(spec: java_only, action: :build_ext, cached_path: nil, gem_path: nil)
+      native_entry = Scint::PlanEntry.new(spec: native, action: :build_ext, cached_path: nil, gem_path: nil)
+      java_entry = Scint::PlanEntry.new(spec: java_only, action: :build_ext, cached_path: nil, gem_path: nil)
 
       ext_dir = File.join(cache.extracted_path(native), "ext", "ffi_c")
       FileUtils.mkdir_p(ext_dir)
@@ -146,7 +146,7 @@ class CLIInstallTest < Minitest::Test
       FileUtils.mkdir_p(java_ext)
       File.write(File.join(java_ext, "ConcurrentRubyService.java"), "")
 
-      install.send(:enqueue_builds, scheduler, [native_entry, java_entry], cache, File.join(dir, ".bundle"))
+      install.send(:enqueue_builds, scheduler, [native_entry, java_entry], cache, File.join(dir, ".scint"))
 
       types = scheduler.enqueued.map { |e| [e[:type], e[:name]] }
       assert_includes types, [:build_ext, "ffi"]
@@ -155,13 +155,13 @@ class CLIInstallTest < Minitest::Test
   end
 
   def test_format_elapsed_uses_ms_for_short_durations
-    install = Bundler2::CLI::Install.new([])
+    install = Scint::CLI::Install.new([])
     assert_equal "999ms", install.send(:format_elapsed, 999)
     assert_equal "1000ms", install.send(:format_elapsed, 1000)
   end
 
   def test_format_elapsed_uses_seconds_for_long_durations
-    install = Bundler2::CLI::Install.new([])
+    install = Scint::CLI::Install.new([])
     assert_equal "1.0s", install.send(:format_elapsed, 1001)
     assert_equal "2.35s", install.send(:format_elapsed, 2349)
   end
@@ -173,21 +173,21 @@ class CLIInstallTest < Minitest::Test
         s.name = "concurrent-ruby"
         s.version = Gem::Version.new("1.3.6")
         s.summary = "test"
-        s.authors = ["bundler2-test"]
+        s.authors = ["scint-test"]
         s.files = []
         s.require_paths = ["lib/concurrent-ruby"]
       end
       File.write(spec_file, gemspec.to_ruby)
 
-      install = Bundler2::CLI::Install.new([])
+      install = Scint::CLI::Install.new([])
       assert_equal ["lib/concurrent-ruby"], install.send(:read_require_paths, spec_file)
     end
   end
 
   def test_lockfile_to_resolved_converts_source_objects_to_uris
-    install = Bundler2::CLI::Install.new([])
-    source = Bundler2::Source::Rubygems.new(remotes: ["https://rubygems.org/"])
-    lockfile = Bundler2::Lockfile::LockfileData.new(
+    install = Scint::CLI::Install.new([])
+    source = Scint::Source::Rubygems.new(remotes: ["https://rubygems.org/"])
+    lockfile = Scint::Lockfile::LockfileData.new(
       specs: [
         {
           name: "rack",
@@ -215,10 +215,10 @@ class CLIInstallTest < Minitest::Test
       with_cwd(dir) do
         File.write(".gitignore", "tmp/\nlog/\n")
 
-        install = Bundler2::CLI::Install.new([])
+        install = Scint::CLI::Install.new([])
         with_captured_stderr do |err|
           install.send(:warn_missing_bundle_gitignore_entry)
-          assert_includes err.string, "does not ignore .bundle"
+          assert_includes err.string, "does not ignore .scint"
         end
       end
     end
@@ -227,9 +227,9 @@ class CLIInstallTest < Minitest::Test
   def test_warn_missing_bundle_gitignore_entry_noop_when_bundle_present
     with_tmpdir do |dir|
       with_cwd(dir) do
-        File.write(".gitignore", "tmp/\n.bundle/\n")
+        File.write(".gitignore", "tmp/\n.scint/\n")
 
-        install = Bundler2::CLI::Install.new([])
+        install = Scint::CLI::Install.new([])
         with_captured_stderr do |err|
           install.send(:warn_missing_bundle_gitignore_entry)
           assert_equal "", err.string

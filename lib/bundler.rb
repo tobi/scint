@@ -2,18 +2,18 @@
 
 require "pathname"
 require "base64"
-require "bundler2/runtime/setup"
-require "bundler2/gemfile/parser"
+require "scint/runtime/setup"
+require "scint/gemfile/parser"
 
-# Minimal Bundler compatibility shim for `bundle2 exec`.
+# Minimal Bundler compatibility shim for `scint exec`.
 # This intentionally implements only the subset commonly used by apps:
 # - `require "bundler/setup"` (handled by lib/bundler/setup.rb)
 # - `Bundler.setup`
 # - `Bundler.require`
 module Bundler
-  RUNTIME_LOCK = "bundler2.lock.marshal"
+  RUNTIME_LOCK = "scint.lock.marshal"
   ORIGINAL_ENV = begin
-    encoded = ENV["BUNDLER2_ORIGINAL_ENV"]
+    encoded = ENV["SCINT_ORIGINAL_ENV"]
     if encoded && !encoded.empty?
       Marshal.load(Base64.decode64(encoded))
     else
@@ -29,11 +29,11 @@ module Bundler
 
       lock_path = find_runtime_lock
       unless lock_path
-        raise LoadError, "Runtime lock not found. Run `bundle2 install` first."
+        raise LoadError, "Runtime lock not found. Run `scint install` first."
       end
 
-      ENV["BUNDLER2_RUNTIME_LOCK"] ||= lock_path
-      @lock_data = ::Bundler2::Runtime::Setup.setup(lock_path)
+      ENV["SCINT_RUNTIME_LOCK"] ||= lock_path
+      @lock_data = ::Scint::Runtime::Setup.setup(lock_path)
     end
 
     def require(*_groups)
@@ -60,7 +60,7 @@ module Bundler
     end
 
     def bundle_path
-      root.join(".bundle")
+      root.join(".scint")
     end
 
     def load
@@ -83,8 +83,8 @@ module Bundler
     def unbundled_env
       env = original_env
       env["RUBYOPT"] = filter_bundler_setup_from_rubyopt(env["RUBYOPT"])
-      env.delete("BUNDLER2_RUNTIME_LOCK")
-      env.delete("BUNDLER2_ORIGINAL_ENV")
+      env.delete("SCINT_RUNTIME_LOCK")
+      env.delete("SCINT_ORIGINAL_ENV")
       env
     end
 
@@ -113,7 +113,7 @@ module Bundler
       gemfile = ENV["BUNDLE_GEMFILE"]
       @gemfile_dependencies =
         if gemfile && File.exist?(gemfile)
-          ::Bundler2::Gemfile::Parser.parse(gemfile).dependencies
+          ::Scint::Gemfile::Parser.parse(gemfile).dependencies
         else
           []
         end
@@ -135,18 +135,18 @@ module Bundler
     end
 
     def find_runtime_lock
-      env_path = ENV["BUNDLER2_RUNTIME_LOCK"]
+      env_path = ENV["SCINT_RUNTIME_LOCK"]
       return env_path if env_path && File.exist?(env_path)
 
       gemfile = ENV["BUNDLE_GEMFILE"]
       if gemfile && !gemfile.empty?
-        candidate = File.join(File.dirname(gemfile), ".bundle", RUNTIME_LOCK)
+        candidate = File.join(File.dirname(gemfile), ".scint", RUNTIME_LOCK)
         return candidate if File.exist?(candidate)
       end
 
       dir = Dir.pwd
       loop do
-        candidate = File.join(dir, ".bundle", RUNTIME_LOCK)
+        candidate = File.join(dir, ".scint", RUNTIME_LOCK)
         return candidate if File.exist?(candidate)
 
         parent = File.dirname(dir)

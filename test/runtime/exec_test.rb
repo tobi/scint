@@ -1,15 +1,15 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
-require "bundler2/runtime/exec"
+require "scint/runtime/exec"
 require "base64"
 
 class RuntimeExecTest < Minitest::Test
   def test_exec_sets_environment_and_invokes_kernel_exec
     with_tmpdir do |dir|
       project = File.join(dir, "app")
-      bundle_dir = File.join(project, ".bundle")
-      lock_path = File.join(bundle_dir, "bundler2.lock.marshal")
+      bundle_dir = File.join(project, ".scint")
+      lock_path = File.join(bundle_dir, "scint.lock.marshal")
       FileUtils.mkdir_p(bundle_dir)
 
       existing = File.join(project, "vendor", "rack", "lib")
@@ -30,17 +30,17 @@ class RuntimeExecTest < Minitest::Test
           called = args
           :exec_stubbed
         }) do
-          result = Bundler2::Runtime::Exec.exec("ruby", ["-v"], lock_path)
+          result = Scint::Runtime::Exec.exec("ruby", ["-v"], lock_path)
           assert_equal :exec_stubbed, result
         end
 
         assert_equal ["ruby", "-v"], called
-        bundler2_lib_dir = File.expand_path("../../lib", __dir__)
-        assert_equal true, ENV["RUBYLIB"].start_with?(bundler2_lib_dir)
+        scint_lib_dir = File.expand_path("../../lib", __dir__)
+        assert_equal true, ENV["RUBYLIB"].start_with?(scint_lib_dir)
         assert_includes ENV["RUBYLIB"], existing
         assert_includes ENV["RUBYLIB"], "already"
         assert_equal "-rbundler/setup", ENV["RUBYOPT"]
-        assert_equal lock_path, ENV["BUNDLER2_RUNTIME_LOCK"]
+        assert_equal lock_path, ENV["SCINT_RUNTIME_LOCK"]
 
         ruby_dir = ruby_bundle_dir(bundle_dir)
         assert_equal ruby_dir, ENV["GEM_HOME"]
@@ -52,7 +52,7 @@ class RuntimeExecTest < Minitest::Test
         assert_equal File.join(ruby_dir, "bin"), path_parts[1]
         assert_equal File.join(project, "Gemfile"), ENV["BUNDLE_GEMFILE"]
 
-        original_env = Marshal.load(Base64.decode64(ENV["BUNDLER2_ORIGINAL_ENV"]))
+        original_env = Marshal.load(Base64.decode64(ENV["SCINT_ORIGINAL_ENV"]))
         assert_equal old_env["PATH"], original_env["PATH"]
       end
     ensure
@@ -62,14 +62,14 @@ class RuntimeExecTest < Minitest::Test
 
   def test_exec_sets_bundle_gemfile_to_nil_when_project_has_no_gemfile
     with_tmpdir do |dir|
-      bundle_dir = File.join(dir, ".bundle")
-      lock_path = File.join(bundle_dir, "bundler2.lock.marshal")
+      bundle_dir = File.join(dir, ".scint")
+      lock_path = File.join(bundle_dir, "scint.lock.marshal")
       FileUtils.mkdir_p(bundle_dir)
       File.binwrite(lock_path, Marshal.dump({}))
 
       old_env = ENV.to_hash
       Kernel.stub(:exec, ->(*_args) { :ok }) do
-        Bundler2::Runtime::Exec.exec("ruby", [], lock_path)
+        Scint::Runtime::Exec.exec("ruby", [], lock_path)
       end
 
       assert_nil ENV["BUNDLE_GEMFILE"]

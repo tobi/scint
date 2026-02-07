@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
-require "bundler2/scheduler"
+require "scint/scheduler"
 require "timeout"
 
 class SchedulerTest < Minitest::Test
@@ -15,10 +15,10 @@ class SchedulerTest < Minitest::Test
   end
 
   def test_pending_queue_orders_by_priority
-    scheduler = Bundler2::Scheduler.new(max_workers: 1, progress: FakeProgress.new)
+    scheduler = Scint::Scheduler.new(max_workers: 1, progress: FakeProgress.new)
 
-    low = Bundler2::Scheduler::Job.new(id: 1, type: :link, name: "l", payload: {}, state: :pending, depends_on: [])
-    high = Bundler2::Scheduler::Job.new(id: 2, type: :download, name: "d", payload: {}, state: :pending, depends_on: [])
+    low = Scint::Scheduler::Job.new(id: 1, type: :link, name: "l", payload: {}, state: :pending, depends_on: [])
+    high = Scint::Scheduler::Job.new(id: 2, type: :download, name: "d", payload: {}, state: :pending, depends_on: [])
 
     scheduler.send(:insert_pending, low)
     scheduler.send(:insert_pending, high)
@@ -28,7 +28,7 @@ class SchedulerTest < Minitest::Test
   end
 
   def test_wait_all_includes_follow_up_jobs
-    scheduler = Bundler2::Scheduler.new(max_workers: 2, initial_workers: 1, progress: FakeProgress.new)
+    scheduler = Scint::Scheduler.new(max_workers: 2, initial_workers: 1, progress: FakeProgress.new)
     scheduler.start
 
     events = []
@@ -52,7 +52,7 @@ class SchedulerTest < Minitest::Test
   end
 
   def test_scheduler_records_job_and_follow_up_errors
-    scheduler = Bundler2::Scheduler.new(max_workers: 2, progress: FakeProgress.new)
+    scheduler = Scint::Scheduler.new(max_workers: 2, progress: FakeProgress.new)
     scheduler.start
 
     scheduler.enqueue(:download, "bad", -> { raise "download boom" })
@@ -70,7 +70,7 @@ class SchedulerTest < Minitest::Test
   end
 
   def test_wait_for_blocks_until_type_finishes
-    scheduler = Bundler2::Scheduler.new(max_workers: 1, progress: FakeProgress.new)
+    scheduler = Scint::Scheduler.new(max_workers: 1, progress: FakeProgress.new)
     scheduler.start
 
     started = Thread::Queue.new
@@ -100,7 +100,7 @@ class SchedulerTest < Minitest::Test
   end
 
   def test_wait_all_does_not_hang_when_worker_job_raises_exception
-    scheduler = Bundler2::Scheduler.new(max_workers: 1, progress: FakeProgress.new)
+    scheduler = Scint::Scheduler.new(max_workers: 1, progress: FakeProgress.new)
     scheduler.start
 
     scheduler.enqueue(:download, "crash", -> { raise Exception, "hard crash" })
@@ -114,7 +114,7 @@ class SchedulerTest < Minitest::Test
   end
 
   def test_fail_fast_aborts_queue_after_first_error
-    scheduler = Bundler2::Scheduler.new(max_workers: 1, progress: FakeProgress.new, fail_fast: true)
+    scheduler = Scint::Scheduler.new(max_workers: 1, progress: FakeProgress.new, fail_fast: true)
     scheduler.start
 
     executed = []

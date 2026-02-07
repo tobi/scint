@@ -1,13 +1,13 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
-require "bundler2/source/rubygems"
-require "bundler2/source/git"
-require "bundler2/source/path"
+require "scint/source/rubygems"
+require "scint/source/git"
+require "scint/source/path"
 
 class SourceTypesTest < Minitest::Test
   def test_rubygems_normalizes_remotes_and_builds_lock_output
-    source = Bundler2::Source::Rubygems.new(remotes: ["https://rubygems.org", "https://gems.example.com/private/"])
+    source = Scint::Source::Rubygems.new(remotes: ["https://rubygems.org", "https://gems.example.com/private/"])
     source.add_remote("https://rubygems.org/")
 
     assert_equal ["https://rubygems.org/", "https://gems.example.com/private/"], source.remotes
@@ -20,13 +20,13 @@ class SourceTypesTest < Minitest::Test
   end
 
   def test_rubygems_from_lock_preserves_remote_priority
-    source = Bundler2::Source::Rubygems.from_lock("remote" => ["https://second/", "https://first/"])
+    source = Scint::Source::Rubygems.from_lock("remote" => ["https://second/", "https://first/"])
     assert_equal ["https://first/", "https://second/"], source.remotes
     assert_equal "https://first/", source.uri
   end
 
   def test_git_source_lock_and_identity
-    source = Bundler2::Source::Git.new(
+    source = Scint::Source::Git.new(
       uri: "https://github.com/acme/project.git",
       revision: "abc123",
       branch: "main",
@@ -45,15 +45,15 @@ class SourceTypesTest < Minitest::Test
     assert_includes lock, "  submodules: true"
     assert_includes lock, "  glob: *.gemspec"
 
-    same = Bundler2::Source::Git.new(uri: "https://github.com/acme/project.git", branch: "main", submodules: true)
+    same = Scint::Source::Git.new(uri: "https://github.com/acme/project.git", branch: "main", submodules: true)
     assert_equal source, same
     assert_equal source.hash, same.hash
   end
 
   def test_path_source_uses_expanded_path_for_equality
     with_tmpdir do |dir|
-      a = Bundler2::Source::Path.new(path: File.join(dir, "vendor", "..", "vendor", "gems"))
-      b = Bundler2::Source::Path.new(path: File.join(dir, "vendor", "gems"))
+      a = Scint::Source::Path.new(path: File.join(dir, "vendor", "..", "vendor", "gems"))
+      b = Scint::Source::Path.new(path: File.join(dir, "vendor", "gems"))
 
       assert_equal a, b
       assert_equal a.hash, b.hash

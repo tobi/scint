@@ -1,12 +1,12 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
-require "bundler2/progress"
+require "scint/progress"
 
 class ProgressTest < Minitest::Test
   def test_logs_tasks_sequentially_and_summarizes_failures
     out = StringIO.new
-    progress = Bundler2::Progress.new(output: out)
+    progress = Scint::Progress.new(output: out)
 
     progress.on_enqueue(1, :link, "rack")
     progress.on_start(1, :link, "rack")

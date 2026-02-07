@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
-require "bundler2/downloader/fetcher"
+require "scint/downloader/fetcher"
 
 class FetcherTest < Minitest::Test
   class FakeHTTP
@@ -31,7 +31,7 @@ class FetcherTest < Minitest::Test
 
   def test_fetch_success_writes_file
     with_tmpdir do |dir|
-      fetcher = Bundler2::Downloader::Fetcher.new
+      fetcher = Scint::Downloader::Fetcher.new
       dest = File.join(dir, "rack.gem")
       conn = FakeHTTP.new([http_response(Net::HTTPOK, body: "abc")])
 
@@ -48,7 +48,7 @@ class FetcherTest < Minitest::Test
 
   def test_fetch_follows_redirects
     with_tmpdir do |dir|
-      fetcher = Bundler2::Downloader::Fetcher.new
+      fetcher = Scint::Downloader::Fetcher.new
       dest = File.join(dir, "rack.gem")
       responses = [
         http_response(Net::HTTPFound, headers: { "location" => "https://example.test/next" }),
@@ -65,15 +65,15 @@ class FetcherTest < Minitest::Test
   end
 
   def test_fetch_raises_after_too_many_redirects
-    fetcher = Bundler2::Downloader::Fetcher.new
+    fetcher = Scint::Downloader::Fetcher.new
 
-    redirects = Array.new(Bundler2::Downloader::Fetcher::MAX_REDIRECTS + 1) do
+    redirects = Array.new(Scint::Downloader::Fetcher::MAX_REDIRECTS + 1) do
       http_response(Net::HTTPFound, headers: { "location" => "https://example.test/loop" })
     end
     conn = FakeHTTP.new(redirects)
 
     fetcher.stub(:connection_for, ->(_uri) { conn }) do
-      error = assert_raises(Bundler2::NetworkError) do
+      error = assert_raises(Scint::NetworkError) do
         fetcher.fetch("https://example.test/start", "/tmp/unused")
       end
       assert_includes error.message, "Too many redirects"
@@ -82,12 +82,12 @@ class FetcherTest < Minitest::Test
 
   def test_fetch_checksum_mismatch_removes_temp_file
     with_tmpdir do |dir|
-      fetcher = Bundler2::Downloader::Fetcher.new
+      fetcher = Scint::Downloader::Fetcher.new
       dest = File.join(dir, "rack.gem")
       conn = FakeHTTP.new([http_response(Net::HTTPOK, body: "abc")])
 
       fetcher.stub(:connection_for, ->(_uri) { conn }) do
-        assert_raises(Bundler2::NetworkError) do
+        assert_raises(Scint::NetworkError) do
           fetcher.fetch("https://example.test/rack.gem", dest, checksum: "deadbeef")
         end
       end
@@ -98,7 +98,7 @@ class FetcherTest < Minitest::Test
   end
 
   def test_close_finishes_and_clears_connections
-    fetcher = Bundler2::Downloader::Fetcher.new
+    fetcher = Scint::Downloader::Fetcher.new
     a = FakeHTTP.new([])
     b = FakeHTTP.new([])
     fetcher.instance_variable_set(:@connections, { "a" => a, "b" => b })

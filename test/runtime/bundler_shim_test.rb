@@ -5,11 +5,11 @@ require "open3"
 require "base64"
 
 class BundlerShimTest < Minitest::Test
-  def test_bundler_setup_and_require_use_bundler2_runtime_lock
+  def test_bundler_setup_and_require_use_scint_runtime_lock
     with_tmpdir do |dir|
       project_dir = File.join(dir, "app")
-      bundle_dir = File.join(project_dir, ".bundle")
-      lock_path = File.join(bundle_dir, "bundler2.lock.marshal")
+      bundle_dir = File.join(project_dir, ".scint")
+      lock_path = File.join(bundle_dir, "scint.lock.marshal")
       gem_lib = File.join(project_dir, "vendor", "my_gem", "lib")
       gemfile_path = File.join(project_dir, "Gemfile")
 
@@ -23,13 +23,13 @@ class BundlerShimTest < Minitest::Test
       script = <<~RUBY
         require "bundler/setup"
         Bundler.require
-        print [defined?(Bundler2), defined?(Bundler), defined?(MY_GEM_LOADED)].join("|")
+        print [defined?(Scint), defined?(Bundler), defined?(MY_GEM_LOADED)].join("|")
       RUBY
 
       out, err, status = Open3.capture3(
         {
           "BUNDLE_GEMFILE" => gemfile_path,
-          "BUNDLER2_RUNTIME_LOCK" => lock_path,
+          "SCINT_RUNTIME_LOCK" => lock_path,
         },
         RbConfig.ruby,
         "-I#{lib_dir}",
@@ -46,8 +46,8 @@ class BundlerShimTest < Minitest::Test
   def test_bundler_original_env_and_unbundled_env_are_available
     with_tmpdir do |dir|
       project_dir = File.join(dir, "app")
-      bundle_dir = File.join(project_dir, ".bundle")
-      lock_path = File.join(bundle_dir, "bundler2.lock.marshal")
+      bundle_dir = File.join(project_dir, ".scint")
+      lock_path = File.join(bundle_dir, "scint.lock.marshal")
       gemfile_path = File.join(project_dir, "Gemfile")
 
       FileUtils.mkdir_p(bundle_dir)
@@ -80,8 +80,8 @@ class BundlerShimTest < Minitest::Test
       out, err, status = Open3.capture3(
         {
           "BUNDLE_GEMFILE" => gemfile_path,
-          "BUNDLER2_RUNTIME_LOCK" => lock_path,
-          "BUNDLER2_ORIGINAL_ENV" => encoded,
+          "SCINT_RUNTIME_LOCK" => lock_path,
+          "SCINT_ORIGINAL_ENV" => encoded,
           "PATH" => "/tmp/custom-path",
           "RUBYOPT" => "-rbundler/setup",
         },

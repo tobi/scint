@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
-require "bundler2/installer/preparer"
-require "bundler2/cache/layout"
+require "scint/installer/preparer"
+require "scint/cache/layout"
 
 class PreparerTest < Minitest::Test
   FakeDownloadPool = Struct.new(:batch_results, :download_calls, :download_batch_items, :closed, keyword_init: true) do
@@ -60,19 +60,19 @@ class PreparerTest < Minitest::Test
   end
 
   def new_preparer(layout, pool:, package:)
-    preparer = Bundler2::Installer::Preparer.new(layout: layout)
+    preparer = Scint::Installer::Preparer.new(layout: layout)
     preparer.instance_variable_set(:@download_pool, pool)
     preparer.instance_variable_set(:@package, package)
     preparer
   end
 
   def plan_entry(spec, cached_path: nil, gem_path: nil)
-    Bundler2::Installer::PlanEntry.new(spec: spec, action: :download, cached_path: cached_path, gem_path: gem_path)
+    Scint::Installer::PlanEntry.new(spec: spec, action: :download, cached_path: cached_path, gem_path: gem_path)
   end
 
   def test_prepare_uses_existing_extracted_cache_and_cached_spec
     with_tmpdir do |dir|
-      layout = Bundler2::Cache::Layout.new(root: File.join(dir, "cache"))
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = fake_spec(name: "rack", version: "2.2.8")
 
       extracted = layout.extracted_path(spec)
@@ -97,7 +97,7 @@ class PreparerTest < Minitest::Test
 
   def test_prepare_uses_extracted_gemspec_when_cached_spec_missing
     with_tmpdir do |dir|
-      layout = Bundler2::Cache::Layout.new(root: File.join(dir, "cache"))
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = fake_spec(name: "rack", version: "2.2.8")
 
       extracted = layout.extracted_path(spec)
@@ -126,7 +126,7 @@ class PreparerTest < Minitest::Test
 
   def test_prepare_extracts_when_inbound_exists_but_not_extracted
     with_tmpdir do |dir|
-      layout = Bundler2::Cache::Layout.new(root: File.join(dir, "cache"))
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = fake_spec(name: "rack", version: "2.2.8")
       inbound = layout.inbound_path(spec)
       FileUtils.mkdir_p(File.dirname(inbound))
@@ -148,7 +148,7 @@ class PreparerTest < Minitest::Test
 
   def test_prepare_downloads_missing_gems_and_extracts
     with_tmpdir do |dir|
-      layout = Bundler2::Cache::Layout.new(root: File.join(dir, "cache"))
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       a = fake_spec(name: "a", version: "1.0.0")
       b = fake_spec(name: "b", version: "1.0.0")
       entries = [
@@ -172,7 +172,7 @@ class PreparerTest < Minitest::Test
 
   def test_prepare_raises_install_error_when_download_batch_contains_error
     with_tmpdir do |dir|
-      layout = Bundler2::Cache::Layout.new(root: File.join(dir, "cache"))
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = fake_spec(name: "broken", version: "1.0.0")
 
       pool = FakeDownloadPool.new(
@@ -183,7 +183,7 @@ class PreparerTest < Minitest::Test
       package = FakePackage.new(gemspec: {})
       preparer = new_preparer(layout, pool: pool, package: package)
 
-      error = assert_raises(Bundler2::InstallError) { preparer.prepare([plan_entry(spec)]) }
+      error = assert_raises(Scint::InstallError) { preparer.prepare([plan_entry(spec)]) }
       assert_includes error.message, "Failed to download broken"
       assert_equal true, pool.closed
     end
@@ -191,7 +191,7 @@ class PreparerTest < Minitest::Test
 
   def test_prepare_one_downloads_when_missing
     with_tmpdir do |dir|
-      layout = Bundler2::Cache::Layout.new(root: File.join(dir, "cache"))
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = fake_spec(name: "solo", version: "1.0.0")
       entry = plan_entry(spec, cached_path: "https://example.test/gems/solo-1.0.0.gem")
 
@@ -209,7 +209,7 @@ class PreparerTest < Minitest::Test
   end
 
   def test_gem_download_uri_falls_back_to_rubygems_filename
-    layout = Bundler2::Cache::Layout.new(root: "/tmp/cache")
+    layout = Scint::Cache::Layout.new(root: "/tmp/cache")
     preparer = new_preparer(layout, pool: FakeDownloadPool.new, package: FakePackage.new(gemspec: {}))
     spec = fake_spec(name: "ffi", version: "1.17.0", platform: "x86_64-linux")
     entry = plan_entry(spec)
@@ -219,7 +219,7 @@ class PreparerTest < Minitest::Test
   end
 
   def test_gem_download_uri_prefers_cached_path_then_gem_path
-    layout = Bundler2::Cache::Layout.new(root: "/tmp/cache")
+    layout = Scint::Cache::Layout.new(root: "/tmp/cache")
     preparer = new_preparer(layout, pool: FakeDownloadPool.new, package: FakePackage.new(gemspec: {}))
     spec = fake_spec(name: "rack", version: "2.2.8")
 
@@ -232,7 +232,7 @@ class PreparerTest < Minitest::Test
 
   def test_load_cached_spec_returns_nil_for_corrupt_data
     with_tmpdir do |dir|
-      layout = Bundler2::Cache::Layout.new(root: File.join(dir, "cache"))
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       preparer = new_preparer(layout, pool: FakeDownloadPool.new, package: FakePackage.new(gemspec: {}))
       spec = fake_spec(name: "rack", version: "2.2.8")
 

@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
-require "bundler2/cli"
+require "scint/cli"
 
 class CLITest < Minitest::Test
   def with_captured_io
@@ -20,17 +20,17 @@ class CLITest < Minitest::Test
 
   def test_run_version_command
     out, err = with_captured_io do
-      status = Bundler2::CLI.run(["version"])
+      status = Scint::CLI.run(["version"])
       assert_equal 0, status
     end
 
-    assert_match(/bundler2 #{Regexp.escape(Bundler2::VERSION)}/, out)
+    assert_match(/scint #{Regexp.escape(Scint::VERSION)}/, out)
     assert_equal "", err
   end
 
   def test_run_unknown_command
     out, err = with_captured_io do
-      status = Bundler2::CLI.run(["unknown"])
+      status = Scint::CLI.run(["unknown"])
       assert_equal 1, status
     end
 
@@ -42,19 +42,19 @@ class CLITest < Minitest::Test
     with_tmpdir do |dir|
       with_env("XDG_CACHE_HOME", dir) do
         out, err = with_captured_io do
-          status = Bundler2::CLI.run(["cache", "dir"])
+          status = Scint::CLI.run(["cache", "dir"])
           assert_equal 0, status
         end
 
         assert_equal "", err
-        assert_equal File.join(dir, "bundler2") + "\n", out
+        assert_equal File.join(dir, "scint") + "\n", out
       end
     end
   end
 
   def test_run_maps_bundler_error_to_status_code
     _out, err = with_captured_io do
-      status = Bundler2::CLI.run(["install"])
+      status = Scint::CLI.run(["install"])
       assert_equal 4, status
     end
 
