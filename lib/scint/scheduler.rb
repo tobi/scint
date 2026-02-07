@@ -15,6 +15,7 @@ module Scint
       extract:     4,
       link:        5,
       build_ext:   6,
+      binstub:     7,
     }.freeze
 
     Job = Struct.new(:id, :type, :name, :payload, :state, :result, :error,
@@ -24,7 +25,9 @@ module Scint
 
     # max_workers: hard ceiling (default cpu_count * 2, capped at 50)
     # initial_workers: how many threads to start with (default 1 — grow dynamically)
-    def initialize(max_workers: nil, initial_workers: 1, progress: nil, fail_fast: false)
+    # per_type_limits: optional hash { job_type => max_concurrent }
+    # Example: { build_ext: 1, binstub: 1, link: 30 }
+    def initialize(max_workers: nil, initial_workers: 1, progress: nil, fail_fast: false, per_type_limits: {})
       @max_workers = [max_workers || Platform.cpu_count * 2, 50].min
       @initial_workers = [[initial_workers, 1].max, @max_workers].min
       @current_workers = @initial_workers
@@ -40,6 +43,8 @@ module Scint
       @running = {}        # id => Job
       @completed = {}      # id => Job
       @failed = {}         # id => Job
+      @running_by_type = Hash.new(0)
+      @per_type_limits = normalize_per_type_limits(per_type_limits)
 
       @errors = []         # collected errors
       @next_id = 0
@@ -253,6 +258,7 @@ module Scint
           if job
             job.state = :running
             @running[job.id] = job
+            @running_by_type[job.type] += 1
           end
         end
 
@@ -271,6 +277,8 @@ module Scint
     # Must be called inside @mutex
     def pick_ready_job
       @pending.each_with_index do |job, idx|
+        next unless type_slot_available?(job.type)
+
         # Check if dependencies are met
         deps_met = job.depends_on.all? do |dep_id|
           dep = @jobs[dep_id]
@@ -314,6 +322,7 @@ module Scint
 
       @mutex.synchronize do
         @running.delete(job.id)
+        @running_by_type[job.type] -= 1 if @running_by_type[job.type] > 0
 
         if error
           job.state = :failed
@@ -359,6 +368,25 @@ module Scint
           end
         end
       end
+    end
+
+    def normalize_per_type_limits(limits)
+      out = {}
+      limits.each do |type, limit|
+        next unless PRIORITIES.key?(type)
+        next if limit.nil?
+
+        n = limit.to_i
+        out[type] = n if n > 0
+      end
+      out
+    end
+
+    def type_slot_available?(type)
+      limit = @per_type_limits[type]
+      return true unless limit
+
+      @running_by_type[type] < limit
     end
   end
 end

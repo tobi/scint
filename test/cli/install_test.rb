@@ -14,7 +14,7 @@ class CLIInstallTest < Minitest::Test
     end
 
     def enqueue(type, name, payload = nil, depends_on: [], follow_up: nil)
-      @enqueued << { type: type, name: name, payload: payload }
+      @enqueued << { type: type, name: name, payload: payload, depends_on: depends_on, follow_up: follow_up }
       @enqueued.size
     end
 
@@ -152,6 +152,61 @@ class CLIInstallTest < Minitest::Test
       assert_includes types, [:build_ext, "ffi"]
       refute_includes types, [:build_ext, "concurrent-ruby"]
     end
+  end
+
+  def test_enqueue_install_dag_wires_build_and_binstub_dependencies
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      scheduler = FakeScheduler.new
+      bundle_path = File.join(dir, ".bundle")
+
+      dep_spec = fake_spec(name: "dep", version: "1.0.0", has_extensions: false)
+      main_spec = fake_spec(
+        name: "main",
+        version: "1.0.0",
+        has_extensions: true,
+        dependencies: [{ name: "dep", version_reqs: [">= 0"] }],
+      )
+
+      dep_ext = File.join(cache.extracted_path(dep_spec), "lib")
+      main_ext = File.join(cache.extracted_path(main_spec), "ext", "main")
+      FileUtils.mkdir_p(dep_ext)
+      FileUtils.mkdir_p(main_ext)
+      File.write(File.join(main_ext, "extconf.rb"), "")
+
+      plan = [
+        Scint::PlanEntry.new(spec: dep_spec, action: :link, cached_path: cache.extracted_path(dep_spec), gem_path: nil),
+        Scint::PlanEntry.new(spec: main_spec, action: :build_ext, cached_path: cache.extracted_path(main_spec), gem_path: nil),
+      ]
+
+      compiled = install.send(:enqueue_install_dag, scheduler, plan, cache, bundle_path)
+      assert_equal 1, compiled
+
+      dep_link = scheduler.enqueued.find { |e| e[:type] == :link && e[:name] == "dep" }
+      main_link = scheduler.enqueued.find { |e| e[:type] == :link && e[:name] == "main" }
+      main_build = scheduler.enqueued.find { |e| e[:type] == :build_ext && e[:name] == "main" }
+      main_binstub = scheduler.enqueued.find { |e| e[:type] == :binstub && e[:name] == "main" }
+
+      refute_nil dep_link
+      refute_nil main_link
+      refute_nil main_build
+      refute_nil main_binstub
+
+      assert_includes main_build[:depends_on], scheduler.enqueued.index(main_link) + 1
+      assert_includes main_build[:depends_on], scheduler.enqueued.index(dep_link) + 1
+      assert_includes main_binstub[:depends_on], scheduler.enqueued.index(main_link) + 1
+      assert_includes main_binstub[:depends_on], scheduler.enqueued.index(main_build) + 1
+    end
+  end
+
+  def test_install_task_limits_reserves_lanes_for_compile_and_binstub
+    install = Scint::CLI::Install.new([])
+    limits = install.send(:install_task_limits, 8)
+    assert_equal 6, limits[:download]
+    assert_equal 6, limits[:link]
+    assert_equal 1, limits[:build_ext]
+    assert_equal 1, limits[:binstub]
   end
 
   def test_format_elapsed_uses_ms_for_short_durations

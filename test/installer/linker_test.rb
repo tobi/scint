@@ -183,4 +183,31 @@ class LinkerTest < Minitest::Test
       assert_includes spec_content, "s.executables = [\"rake\""
     end
   end
+
+  def test_link_files_and_write_binstubs_can_run_as_separate_steps
+    with_tmpdir do |dir|
+      bundle_path = File.join(dir, ".bundle")
+      extracted = File.join(dir, "cache", "rack-2.2.8")
+      FileUtils.mkdir_p(File.join(extracted, "lib"))
+      File.write(File.join(extracted, "lib", "rack.rb"), "module Rack; end\n")
+
+      spec = fake_spec(name: "rack", version: "2.2.8")
+      gemspec = Gem::Specification.new do |s|
+        s.name = "rack"
+        s.version = Gem::Version.new("2.2.8")
+        s.authors = ["a"]
+        s.summary = "rack"
+        s.executables = ["rackup"]
+      end
+      prepared = Prepared.new(spec: spec, extracted_path: extracted, gemspec: gemspec, from_cache: true)
+
+      Scint::Installer::Linker.link_files(prepared, bundle_path)
+      ruby_binstub = File.join(ruby_bundle_dir(bundle_path), "bin", "rackup")
+      refute File.exist?(ruby_binstub)
+
+      Scint::Installer::Linker.write_binstubs(prepared, bundle_path)
+      assert File.exist?(ruby_binstub)
+      assert_equal true, File.executable?(ruby_binstub)
+    end
+  end
 end

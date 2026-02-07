@@ -13,6 +13,13 @@ module Scint
       # prepared_gem: PreparedGem struct (spec, extracted_path, gemspec, from_cache)
       # bundle_path:  root .bundle/ directory
       def link(prepared_gem, bundle_path)
+        link_files(prepared_gem, bundle_path)
+        write_binstubs(prepared_gem, bundle_path)
+      end
+
+      # Link gem files + gemspec only (no binstubs).
+      # This allows binstubs to be scheduled as a separate DAG task.
+      def link_files(prepared_gem, bundle_path)
         ruby_dir = ruby_install_dir(bundle_path)
         spec = prepared_gem.spec
         full_name = spec_full_name(spec)
@@ -25,9 +32,18 @@ module Scint
 
         # 2. Write gemspec into specifications/
         write_gemspec(prepared_gem, ruby_dir, full_name)
+      end
+
+      # Write binstubs for one already-linked gem.
+      def write_binstubs(prepared_gem, bundle_path)
+        ruby_dir = ruby_install_dir(bundle_path)
+        spec = prepared_gem.spec
+        full_name = spec_full_name(spec)
+        gem_dest = File.join(ruby_dir, "gems", full_name)
+        return unless Dir.exist?(gem_dest)
 
         # 3. Create binstubs for executables
-        write_binstubs(prepared_gem, bundle_path, ruby_dir, gem_dest)
+        write_binstubs_impl(prepared_gem, bundle_path, ruby_dir, gem_dest)
       end
 
       # Link multiple gems. Thread-safe — each link is independent.
@@ -54,7 +70,7 @@ module Scint
         FS.atomic_write(spec_path, content)
       end
 
-      def write_binstubs(prepared_gem, bundle_path, ruby_dir, gem_dir)
+      def write_binstubs_impl(prepared_gem, bundle_path, ruby_dir, gem_dir)
         # Look for executables declared in the gemspec
         executables = extract_executables(prepared_gem, gem_dir)
         return if executables.empty?
@@ -195,7 +211,7 @@ module Scint
         File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
       end
 
-      private_class_method :write_gemspec, :write_binstubs, :write_ruby_bin_stub,
+      private_class_method :write_gemspec, :write_binstubs_impl, :write_ruby_bin_stub,
                            :write_bundle_bin_wrapper, :extract_executables,
                            :detect_executables_from_files, :augment_executable_metadata, :infer_bindir,
                            :minimal_gemspec, :spec_full_name, :platform_str, :ruby_install_dir

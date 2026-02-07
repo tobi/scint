@@ -133,4 +133,39 @@ class SchedulerTest < Minitest::Test
   ensure
     scheduler.shutdown if scheduler
   end
+
+  def test_per_type_limits_restrict_parallel_jobs_for_type
+    scheduler = Scint::Scheduler.new(
+      max_workers: 3,
+      progress: FakeProgress.new,
+      per_type_limits: { build_ext: 1 },
+    )
+    scheduler.start
+
+    started = Queue.new
+    release = Queue.new
+
+    scheduler.enqueue(:build_ext, "one", lambda {
+      started << :one
+      release.pop
+    })
+    scheduler.enqueue(:build_ext, "two", lambda {
+      started << :two
+      release.pop
+    })
+
+    assert_equal :one, started.pop
+    assert_raises(Timeout::Error) do
+      Timeout.timeout(0.1) { started.pop }
+    end
+
+    release << true
+    assert_equal :two, started.pop
+    release << true
+
+    scheduler.wait_all
+    assert_equal 2, scheduler.stats[:completed]
+  ensure
+    scheduler.shutdown if scheduler
+  end
 end

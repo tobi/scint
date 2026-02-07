@@ -54,12 +54,13 @@ module Scint
         bundle_path = @path || ENV["BUNDLER_PATH"] || ".bundle"
         bundle_path = File.expand_path(bundle_path)
         worker_count = @jobs || [Platform.cpu_count * 2, 50].min
+        per_type_limits = install_task_limits(worker_count)
 
         # 0. Build credential store from config files (~/.bundle/config, XDG scint/credentials)
         @credentials = Credentials.new
 
         # 1. Start the scheduler with 1 worker — scale up dynamically
-        scheduler = Scheduler.new(max_workers: worker_count, fail_fast: true)
+        scheduler = Scheduler.new(max_workers: worker_count, fail_fast: true, per_type_limits: per_type_limits)
         scheduler.start
 
         begin
@@ -119,39 +120,11 @@ module Scint
             return 0
           end
 
-          # 8. Enqueue downloads — each one chains into extract → link
-          build_candidates = []
-          plan.each do |entry|
-            case entry.action
-            when :download
-              build_candidates << entry
-              scheduler.enqueue(
-                :download, entry.spec.name,
-                -> { download_gem(entry, cache) },
-                follow_up: ->(_job) { enqueue_link_after_download(scheduler, entry, cache, bundle_path) }
-              )
-            when :link
-              scheduler.enqueue(:link, entry.spec.name,
-                                -> { link_gem(entry, cache, bundle_path) })
-            when :build_ext
-              build_candidates << entry
-              scheduler.enqueue(:link, entry.spec.name,
-                                -> { link_gem(entry, cache, bundle_path) })
-            when :builtin
-              install_builtin_gem(entry, bundle_path)
-            end
-          end
+          # 8. Build a dependency-aware task graph:
+          # download -> link_files -> build_ext -> binstub (where applicable).
+          compiled_gems = enqueue_install_dag(scheduler, plan, cache, bundle_path)
 
-          # 9. Build native extensions only after all links are in place, so
-          # extconf scripts can activate dependency gems from local bundle dir.
-          scheduler.wait_for(:download)
-          scheduler.wait_for(:link)
-          compiled_gems = 0
-          unless scheduler.failed? || scheduler.aborted?
-            compiled_gems = enqueue_builds(scheduler, build_candidates, cache, bundle_path)
-          end
-
-          # 10. Wait for everything
+          # 9. Wait for everything
           scheduler.wait_all
 
           errors = scheduler.errors.dup
@@ -513,9 +486,101 @@ module Scint
         end
       end
 
+      def install_task_limits(worker_count)
+        # Leave headroom for build_ext and binstub lanes so link/download
+        # throughput cannot fully starve them.
+        io_cpu_limit = [worker_count - 2, 1].max
+        {
+          download: io_cpu_limit,
+          link: io_cpu_limit,
+          build_ext: 1,
+          binstub: 1,
+        }
+      end
+
+      # Enqueue dependency-aware install tasks so compile/binstub can run
+      # concurrently with link/download once prerequisites are satisfied.
+      def enqueue_install_dag(scheduler, plan, cache, bundle_path)
+        link_job_by_key = {}
+        link_job_by_name = {}
+        build_job_by_key = {}
+
+        plan.each do |entry|
+          case entry.action
+          when :skip
+            next
+          when :builtin
+            install_builtin_gem(entry, bundle_path)
+            next
+          when :download
+            download_id = scheduler.enqueue(:download, entry.spec.name,
+                                            -> { download_gem(entry, cache) })
+            link_id = scheduler.enqueue(:link, entry.spec.name,
+                                        -> { link_gem_files(entry, cache, bundle_path) },
+                                        depends_on: [download_id])
+          when :link, :build_ext
+            link_id = scheduler.enqueue(:link, entry.spec.name,
+                                        -> { link_gem_files(entry, cache, bundle_path) })
+          else
+            next
+          end
+
+          key = spec_key(entry.spec)
+          link_job_by_key[key] = link_id
+          link_job_by_name[entry.spec.name] = link_id
+        end
+
+        plan.each do |entry|
+          next unless entry.action == :build_ext
+
+          key = spec_key(entry.spec)
+          own_link = link_job_by_key[key]
+          next unless own_link
+
+          dep_links = dependency_link_job_ids(entry.spec, link_job_by_name)
+          depends_on = ([own_link] + dep_links).uniq
+          build_id = scheduler.enqueue(:build_ext, entry.spec.name,
+                                       -> { build_extensions(entry, cache, bundle_path) },
+                                       depends_on: depends_on)
+          build_job_by_key[key] = build_id
+        end
+
+        plan.each do |entry|
+          next if entry.action == :skip || entry.action == :builtin
+
+          key = spec_key(entry.spec)
+          own_link = link_job_by_key[key]
+          next unless own_link
+
+          depends_on = [own_link]
+          build_id = build_job_by_key[key]
+          depends_on << build_id if build_id
+          scheduler.enqueue(:binstub, entry.spec.name,
+                            -> { write_binstubs(entry, cache, bundle_path) },
+                            depends_on: depends_on)
+        end
+
+        build_job_by_key.size
+      end
+
+      def spec_key(spec)
+        "#{spec.name}-#{spec.version}-#{spec.platform}"
+      end
+
+      def dependency_link_job_ids(spec, link_job_by_name)
+        names = Array(spec.dependencies).filter_map do |dep|
+          if dep.is_a?(Hash)
+            dep[:name] || dep["name"]
+          elsif dep.respond_to?(:name)
+            dep.name
+          end
+        end
+        names.filter_map { |name| link_job_by_name[name] }.uniq
+      end
+
       def enqueue_link_after_download(scheduler, entry, cache, bundle_path)
         scheduler.enqueue(:link, entry.spec.name,
-                          -> { link_gem(entry, cache, bundle_path) })
+                          -> { link_gem_files(entry, cache, bundle_path) })
       end
 
       def enqueue_builds(scheduler, entries, cache, bundle_path)
@@ -525,7 +590,7 @@ module Scint
           next unless Installer::ExtensionBuilder.buildable_source_dir?(extracted)
 
           scheduler.enqueue(:build_ext, entry.spec.name,
-                            -> { build_and_link(entry, cache, bundle_path) })
+                            -> { build_extensions(entry, cache, bundle_path) })
           enqueued += 1
         end
         enqueued
@@ -540,7 +605,7 @@ module Scint
         end
       end
 
-      def link_gem(entry, cache, bundle_path)
+      def link_gem_files(entry, cache, bundle_path)
         spec = entry.spec
         extracted = extracted_path_for_entry(entry, cache)
 
@@ -552,10 +617,10 @@ module Scint
           gemspec: gemspec,
           from_cache: true,
         )
-        Installer::Linker.link(prepared, bundle_path)
+        Installer::Linker.link_files(prepared, bundle_path)
       end
 
-      def build_and_link(entry, cache, bundle_path)
+      def build_extensions(entry, cache, bundle_path)
         extracted = entry.cached_path || cache.extracted_path(entry.spec)
         gemspec = load_gemspec(extracted, entry.spec, cache)
 
@@ -567,7 +632,18 @@ module Scint
         )
 
         Installer::ExtensionBuilder.build(prepared, bundle_path, cache)
-        Installer::Linker.link(prepared, bundle_path)
+      end
+
+      def write_binstubs(entry, cache, bundle_path)
+        extracted = extracted_path_for_entry(entry, cache)
+        gemspec = load_gemspec(extracted, entry.spec, cache)
+        prepared = PreparedGem.new(
+          spec: entry.spec,
+          extracted_path: extracted,
+          gemspec: gemspec,
+          from_cache: true,
+        )
+        Installer::Linker.write_binstubs(prepared, bundle_path)
       end
 
       def load_gemspec(extracted_path, spec, cache)
