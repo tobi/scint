@@ -2,6 +2,7 @@
 
 require_relative "../test_helper"
 require "bundler2/runtime/exec"
+require "base64"
 
 class RuntimeExecTest < Minitest::Test
   def test_exec_sets_environment_and_invokes_kernel_exec
@@ -34,13 +35,25 @@ class RuntimeExecTest < Minitest::Test
         end
 
         assert_equal ["ruby", "-v"], called
-        assert_equal true, ENV["RUBYLIB"].start_with?(existing)
+        bundler2_lib_dir = File.expand_path("../../lib", __dir__)
+        assert_equal true, ENV["RUBYLIB"].start_with?(bundler2_lib_dir)
+        assert_includes ENV["RUBYLIB"], existing
         assert_includes ENV["RUBYLIB"], "already"
+        assert_equal "-rbundler/setup", ENV["RUBYOPT"]
+        assert_equal lock_path, ENV["BUNDLER2_RUNTIME_LOCK"]
 
         ruby_dir = ruby_bundle_dir(bundle_dir)
         assert_equal ruby_dir, ENV["GEM_HOME"]
         assert_equal ruby_dir, ENV["GEM_PATH"]
+        assert_equal bundle_dir, ENV["BUNDLE_PATH"]
+        assert_equal bundle_dir, ENV["BUNDLE_APP_CONFIG"]
+        path_parts = ENV["PATH"].split(File::PATH_SEPARATOR)
+        assert_equal File.join(bundle_dir, "bin"), path_parts[0]
+        assert_equal File.join(ruby_dir, "bin"), path_parts[1]
         assert_equal File.join(project, "Gemfile"), ENV["BUNDLE_GEMFILE"]
+
+        original_env = Marshal.load(Base64.decode64(ENV["BUNDLER2_ORIGINAL_ENV"]))
+        assert_equal old_env["PATH"], original_env["PATH"]
       end
     ensure
       ENV.replace(old_env)
