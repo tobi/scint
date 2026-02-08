@@ -841,6 +841,99 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
+  def test_prepare_git_checkout_passes_submodules_flag_from_source
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      source = Scint::Source::Git.new(uri: "https://github.com/shopify/mruby-engine.git", revision: "main", submodules: true)
+      spec = fake_spec(name: "mruby_engine", version: "0.0.3", source: source)
+      captured_submodules = nil
+
+      install.stub(:clone_git_repo, ->(*_args) {}) do
+        install.stub(:fetch_git_repo, ->(*_args) {}) do
+          install.stub(:resolve_git_revision, ->(*_args) { "deadbeef" }) do
+            install.stub(:materialize_git_checkout, lambda { |_bare, _checkout, _rev, _spec, _uri, submodules: false|
+              captured_submodules = submodules
+            }) do
+              install.send(:prepare_git_checkout, spec, cache, fetch: true)
+            end
+          end
+        end
+      end
+
+      assert_equal true, captured_submodules
+    end
+  end
+
+  def test_checkout_git_tree_with_submodules_runs_submodule_update
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      bare_repo = File.join(dir, "repo.git")
+      FileUtils.mkdir_p(bare_repo)
+      destination = File.join(dir, "checkout")
+      spec = fake_spec(name: "mruby_engine", version: "0.0.3")
+      calls = []
+
+      install.stub(:git_capture3, lambda { |*args|
+        calls << args
+        if args[0..2] == ["--git-dir", bare_repo, "worktree"] && args[3] == "add"
+          worktree = args[6]
+          FileUtils.mkdir_p(worktree)
+          File.write(File.join(worktree, "mruby_engine.gemspec"), "Gem::Specification.new\n")
+          return ["", "", stub_status(true)]
+        end
+        ["", "", stub_status(true)]
+      }) do
+        install.send(
+          :checkout_git_tree_with_submodules,
+          bare_repo,
+          destination,
+          "deadbeef",
+          spec,
+          "https://github.com/shopify/mruby-engine.git",
+        )
+      end
+
+      assert Dir.exist?(destination)
+      assert calls.any? { |args| args.include?("submodule") && args.include?("update") }
+    end
+  end
+
+  def test_materialize_git_checkout_refreshes_legacy_marker_when_submodules_enabled
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      bare_repo = File.join(dir, "repo.git")
+      checkout = File.join(dir, "checkout")
+      spec = fake_spec(name: "mruby_engine", version: "0.0.3")
+
+      FileUtils.mkdir_p(checkout)
+      marker = install.send(:git_checkout_marker_path, checkout)
+      File.write(marker, "deadbeef\n")
+
+      called = false
+      install.stub(:checkout_git_tree_with_submodules, lambda { |_bare, destination, *_rest|
+        called = true
+        FileUtils.mkdir_p(destination)
+        File.write(File.join(destination, "mruby_engine.gemspec"), "Gem::Specification.new\n")
+      }) do
+        install.send(
+          :materialize_git_checkout,
+          bare_repo,
+          checkout,
+          "deadbeef",
+          spec,
+          "https://github.com/Shopify/mruby-engine.git",
+          submodules: true,
+        )
+      end
+
+      assert called
+      marker_contents = File.read(marker)
+      assert_includes marker_contents, "revision=deadbeef"
+      assert_includes marker_contents, "submodules=1"
+    end
+  end
+
   # --- parse_options ---
 
   def test_parse_options_accepts_path_flag
@@ -1114,6 +1207,27 @@ class CLIInstallTest < Minitest::Test
     assert install.send(:lockfile_dependency_graph_valid?, lockfile)
   end
 
+  def test_lockfile_dependency_graph_valid_ignores_missing_bundler_spec
+    install = Scint::CLI::Install.new([])
+    lockfile = Scint::Lockfile::LockfileData.new(
+      specs: [
+        {
+          name: "rails", version: "8.2.0.alpha", platform: "ruby",
+          dependencies: [{ name: "bundler", version_reqs: [">= 1.15.0"] }],
+          source: nil, checksum: nil,
+        },
+      ],
+      dependencies: {},
+      platforms: [],
+      sources: [],
+      bundler_version: nil,
+      ruby_version: nil,
+      checksums: nil,
+    )
+
+    assert install.send(:lockfile_dependency_graph_valid?, lockfile)
+  end
+
   def test_lockfile_git_source_mapping_valid_returns_true_when_specs_exist_in_repo
     with_tmpdir do |dir|
       repo = init_git_repo(dir, "demo.gemspec" => "Gem::Specification.new\n")
@@ -1165,7 +1279,29 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
-  def test_lockfile_git_source_mapping_valid_returns_false_when_git_runtime_dependency_missing
+  def test_lockfile_git_source_mapping_valid_returns_true_when_repo_not_cached_yet
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      source = Scint::Source::Git.new(uri: "https://github.com/example/monorepo.git", revision: "deadbeef")
+
+      lockfile = Scint::Lockfile::LockfileData.new(
+        specs: [
+          { name: "demo", version: "1.0.0", platform: "ruby", dependencies: [], source: source, checksum: nil },
+        ],
+        dependencies: {},
+        platforms: [],
+        sources: [source],
+        bundler_version: nil,
+        ruby_version: nil,
+        checksums: nil,
+      )
+
+      assert install.send(:lockfile_git_source_mapping_valid?, lockfile, cache)
+    end
+  end
+
+  def test_lockfile_git_source_mapping_valid_does_not_require_runtime_dependency_gemspec_loading
     with_tmpdir do |dir|
       repo = init_git_repo(
         dir,
@@ -1205,7 +1341,9 @@ class CLIInstallTest < Minitest::Test
         checksums: nil,
       )
 
-      refute install.send(:lockfile_git_source_mapping_valid?, lockfile, cache)
+      install.stub(:runtime_dependencies_for_git_gemspec, ->(*_args) { raise "should not load gemspec runtime deps" }) do
+        assert install.send(:lockfile_git_source_mapping_valid?, lockfile, cache)
+      end
     end
   end
 
@@ -1237,6 +1375,41 @@ class CLIInstallTest < Minitest::Test
             resolved = install.send(:resolve, gemfile, lockfile, nil)
             assert_equal fake_resolved, resolved
           end
+        end
+      end
+    end
+  end
+
+  def test_resolve_uses_lockfile_when_git_repo_not_cached
+    install = Scint::CLI::Install.new([])
+    install.instance_variable_set(:@credentials, Scint::Credentials.new)
+    gemfile = Scint::Gemfile::ParseResult.new(
+      dependencies: [Scint::Gemfile::Dependency.new("rack")],
+      sources: [{ type: :rubygems, uri: "https://rubygems.org" }],
+      ruby_version: nil,
+      platforms: [],
+    )
+    git_source = Scint::Source::Git.new(uri: "https://github.com/example/mono.git", revision: "main")
+    lockfile = Scint::Lockfile::LockfileData.new(
+      specs: [
+        { name: "rack", version: "2.2.8", platform: "ruby", dependencies: [], source: nil, checksum: nil },
+        { name: "demo", version: "1.0.0", platform: "ruby", dependencies: [], source: git_source, checksum: nil },
+      ],
+      dependencies: {},
+      platforms: [],
+      sources: [git_source],
+      bundler_version: nil,
+      ruby_version: nil,
+      checksums: nil,
+    )
+
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      from_lockfile = [fake_spec(name: "rack", version: "2.2.8")]
+      install.stub(:lockfile_to_resolved, ->(_lock) { from_lockfile }) do
+        Scint::Resolver::Resolver.stub(:new, ->(*_args) { raise "resolver should not run" }) do
+          resolved = install.send(:resolve, gemfile, lockfile, cache)
+          assert_equal from_lockfile, resolved
         end
       end
     end

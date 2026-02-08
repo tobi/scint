@@ -24,6 +24,20 @@ Latest matrix run:
   - `/tmp/forem.bundle.verify.log`
 - Conclusion: environment/toolchain + upstream gem compatibility issue, not a scint lock/runtime resolver issue.
 
+### 3) Shopify: git submodule update runs without a working tree
+- Repro:
+  - `cd /Users/tobi/world/trees/root/src/areas/core/shopify`
+  - `/Users/tobi/src/tries/2026-02-06-bundler-speedup/bundler2/bin/scint install`
+- Observed on:
+  - `main` at `0ed001b` (post-pull)
+- Current failure:
+  - `fatal: .../git-submodule cannot be used without a working tree.`
+- Context:
+  - Failure appears right after index fetch during git-source preparation.
+  - Likely cause is running submodule update against a bare repo cache path instead of a checkout/worktree path.
+- Impact:
+  - Blocks Shopify install and any git gem source with submodules in this code path.
+
 ## Fixed in scint during this pass
 
 ### 1) `scint exec` PATH precedence

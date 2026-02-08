@@ -191,8 +191,9 @@ class CLIExecTest < Minitest::Test
       rebuilt_path = File.join(root, ".bundle", Scint::CLI::Exec::RUNTIME_LOCK)
       data = Marshal.load(File.binread(rebuilt_path))
       load_paths = data.fetch("pg")[:load_paths]
-      assert_includes load_paths, ext_dir
-      assert_includes load_paths, lib_dir
+      normalized = load_paths.map { |path| File.realpath(path) rescue File.expand_path(path) }
+      assert_includes normalized, File.realpath(ext_dir)
+      assert_includes normalized, File.realpath(lib_dir)
     end
   end
 

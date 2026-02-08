@@ -514,6 +514,11 @@ module Scint
         specs.all? do |spec|
           Array(spec[:dependencies]).all? do |dep|
             dep_name = dep[:name].to_s
+            # Lockfiles generally do not include a concrete "bundler" spec
+            # entry even though many gemspecs declare a runtime dependency
+            # on bundler. Treat it as externally satisfied.
+            next true if dep_name == "bundler"
+
             dep_reqs = Array(dep[:version_reqs])
             req = Gem::Requirement.new(dep_reqs.empty? ? [">= 0"] : dep_reqs)
             by_name[dep_name].any? { |candidate| req.satisfied_by?(Gem::Version.new(candidate[:version].to_s)) }
@@ -596,12 +601,13 @@ module Scint
         git_specs = Array(lockfile.specs).select { |s| s[:source].is_a?(Source::Git) }
         return true if git_specs.empty?
 
-        lock_specs_by_name = Array(lockfile.specs).group_by { |s| s[:name].to_s }
         by_source = git_specs.group_by { |s| s[:source] }
         by_source.each do |source, specs|
           uri, revision = git_source_ref(source)
           bare_repo = cache.git_path(uri)
-          return false unless Dir.exist?(bare_repo)
+          # Do not invalidate an otherwise-usable lockfile just because this
+          # git source has not been cached yet in the current machine/session.
+          next unless Dir.exist?(bare_repo)
 
           resolved_revision = begin
             resolve_git_revision(bare_repo, revision)
@@ -616,21 +622,6 @@ module Scint
 
           specs.each do |spec|
             return false unless gemspec_names.include?(spec[:name].to_s)
-
-            runtime_deps = runtime_dependencies_for_git_gemspec(
-              bare_repo,
-              resolved_revision,
-              gemspec_paths[spec[:name].to_s],
-            )
-            return false if runtime_deps.nil?
-
-            runtime_deps.each do |dep|
-              candidates = lock_specs_by_name.fetch(dep.name.to_s, [])
-              matched = candidates.any? do |candidate|
-                dep.requirement.satisfied_by?(Gem::Version.new(candidate[:version].to_s))
-              end
-              return false unless matched
-            end
           end
         end
 
@@ -864,6 +855,7 @@ module Scint
       def prepare_git_checkout(spec, cache, fetch: false)
         source = spec.source
         uri, revision = git_source_ref(source)
+        submodules = git_source_submodules?(source)
 
         bare_repo = cache.git_path(uri)
 
@@ -879,7 +871,14 @@ module Scint
 
           resolved_revision = resolve_git_revision(bare_repo, revision)
           incoming_checkout = cache.git_checkout_path(uri, resolved_revision)
-          materialize_git_checkout(bare_repo, incoming_checkout, resolved_revision, spec, uri)
+          materialize_git_checkout(
+            bare_repo,
+            incoming_checkout,
+            resolved_revision,
+            spec,
+            uri,
+            submodules: submodules,
+          )
           [incoming_checkout, resolved_revision, uri]
         end
       end
@@ -916,33 +915,43 @@ module Scint
         false
       end
 
-      def materialize_git_checkout(bare_repo, checkout_dir, resolved_revision, spec, uri)
+      def materialize_git_checkout(bare_repo, checkout_dir, resolved_revision, spec, uri, submodules: false)
         marker = git_checkout_marker_path(checkout_dir)
         if Dir.exist?(checkout_dir) && File.exist?(marker)
-          return if File.read(marker).strip == resolved_revision
+          checkout_marker = parse_git_checkout_marker(marker)
+          marker_revision = checkout_marker[:revision]
+          marker_submodules = checkout_marker[:submodules]
+
+          # Legacy markers only recorded revision. If this source now requires
+          # submodules, force a refresh so previously incomplete checkouts are
+          # not reused.
+          return if marker_revision == resolved_revision && (!submodules || marker_submodules == true)
         end
 
         tmp = "#{checkout_dir}.#{Process.pid}.#{Thread.current.object_id}.tmp"
         begin
           FileUtils.rm_rf(tmp)
-          FileUtils.mkdir_p(tmp)
-
-          _out, err, status = git_capture3(
-            "--git-dir", bare_repo,
-            "--work-tree", tmp,
-            "checkout",
-            "-f",
-            resolved_revision,
-            "--",
-            ".",
-          )
-          unless status.success?
-            raise InstallError, "Git checkout failed for #{spec.name} (#{uri}@#{resolved_revision}): #{err.to_s.strip}"
+          if submodules
+            checkout_git_tree_with_submodules(
+              bare_repo,
+              tmp,
+              resolved_revision,
+              spec,
+              uri,
+            )
+          else
+            checkout_git_tree(
+              bare_repo,
+              tmp,
+              resolved_revision,
+              spec,
+              uri,
+            )
           end
 
           FileUtils.rm_rf(checkout_dir)
           FS.atomic_move(tmp, checkout_dir)
-          FS.atomic_write(marker, "#{resolved_revision}\n")
+          FS.atomic_write(marker, format_git_checkout_marker(resolved_revision, submodules: submodules))
         ensure
           FileUtils.rm_rf(tmp) if tmp && File.exist?(tmp)
         end
@@ -955,6 +964,68 @@ module Scint
         end
 
         [source.to_s, "HEAD"]
+      end
+
+      def git_source_submodules?(source)
+        source.respond_to?(:submodules) && !!source.submodules
+      end
+
+      def checkout_git_tree(bare_repo, destination, resolved_revision, spec, uri)
+        FileUtils.mkdir_p(destination)
+        _out, err, status = git_capture3(
+          "--git-dir", bare_repo,
+          "--work-tree", destination,
+          "checkout",
+          "-f",
+          resolved_revision,
+          "--",
+          ".",
+        )
+        unless status.success?
+          raise InstallError, "Git checkout failed for #{spec.name} (#{uri}@#{resolved_revision}): #{err.to_s.strip}"
+        end
+      end
+
+      def checkout_git_tree_with_submodules(bare_repo, destination, resolved_revision, spec, uri)
+        worktree = "#{destination}.worktree"
+        FileUtils.rm_rf(worktree)
+
+        _out, err, status = git_capture3(
+          "--git-dir", bare_repo,
+          "worktree",
+          "add",
+          "--detach",
+          "--force",
+          worktree,
+          resolved_revision,
+        )
+        unless status.success?
+          raise InstallError, "Git worktree checkout failed for #{spec.name} (#{uri}@#{resolved_revision}): #{err.to_s.strip}"
+        end
+
+        begin
+          _sub_out, sub_err, sub_status = git_capture3(
+            "-C", worktree,
+            "-c", "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+          )
+          unless sub_status.success?
+            raise InstallError, "Git submodule update failed for #{spec.name} (#{uri}@#{resolved_revision}): #{sub_err.to_s.strip}"
+          end
+
+          FS.clone_tree(worktree, destination)
+
+          # Keep cache/extracted trees deterministic and detached from git internals.
+          Dir.glob(File.join(destination, "**", ".git"), File::FNM_DOTMATCH).each do |path|
+            FileUtils.rm_rf(path)
+          end
+        ensure
+          git_capture3("--git-dir", bare_repo, "worktree", "remove", "--force", worktree)
+          FileUtils.rm_rf(worktree)
+        end
       end
 
       def git_mutex_for(repo_path)
@@ -1001,6 +1072,35 @@ module Scint
 
       def git_checkout_marker_path(dir)
         "#{dir}.scint_git_revision"
+      end
+
+      def parse_git_checkout_marker(path)
+        content = File.read(path)
+        revision = nil
+        submodules = nil
+
+        content.each_line do |line|
+          key, value = line.strip.split("=", 2)
+          case key
+          when "revision"
+            revision = value
+          when "submodules"
+            submodules = (value == "1" || value == "true")
+          end
+        end
+
+        if revision.nil?
+          # Legacy format: raw revision only.
+          revision = content.strip
+        end
+
+        { revision: revision, submodules: submodules }
+      rescue StandardError
+        { revision: nil, submodules: nil }
+      end
+
+      def format_git_checkout_marker(revision, submodules:)
+        "revision=#{revision}\nsubmodules=#{submodules ? 1 : 0}\n"
       end
 
       def compile_slots_for(worker_count)
