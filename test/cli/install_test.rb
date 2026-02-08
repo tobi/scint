@@ -936,9 +936,43 @@ class CLIInstallTest < Minitest::Test
       install.send(:prepare_git_source, entry, cache)
 
       cached = cache.cached_path(spec)
-      assert File.exist?(File.join(cached, "demo.gemspec"))
-      assert File.exist?(File.join(cached, "lib", "demo.rb"))
+      assert File.exist?(File.join(cached, "demo", "demo.gemspec"))
+      assert File.exist?(File.join(cached, "demo", "lib", "demo.rb"))
       refute File.exist?(File.join(cached, "ROOT_ONLY.txt"))
+    end
+  end
+
+  def test_prepare_git_source_copies_root_files_for_gemspec
+    with_tmpdir do |dir|
+      repo = init_git_repo(dir, "RAILS_VERSION" => "8.2.0\n")
+      with_cwd(repo) do
+        FileUtils.mkdir_p("actioncable/lib")
+      end
+      gemspec = <<~RUBY
+        version = File.read(File.expand_path("../RAILS_VERSION", __dir__)).strip
+        Gem::Specification.new do |s|
+          s.name = "actioncable"
+          s.version = version
+          s.require_paths = ["lib"]
+        end
+      RUBY
+      commit_file(repo, "actioncable/actioncable.gemspec", gemspec, "add gemspec")
+      commit_file(repo, "actioncable/lib/actioncable.rb", "module ActionCable; end\n", "add lib")
+      commit = git_commit_hash(repo)
+
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      source = Scint::Source::Git.new(uri: repo, revision: commit, glob: "{,*,*/*}.gemspec")
+      spec = fake_spec(name: "actioncable", version: "8.2.0", source: source)
+      entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
+
+      install.send(:prepare_git_source, entry, cache)
+
+      cached = cache.cached_path(spec)
+      assert File.exist?(File.join(cached, "RAILS_VERSION"))
+      extracted = install.send(:resolve_git_gem_subdir, cached, spec)
+      gemspec_loaded = install.send(:load_gemspec, extracted, spec, cache)
+      assert_equal "8.2.0", gemspec_loaded.version.to_s
     end
   end
 

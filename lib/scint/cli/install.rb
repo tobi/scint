@@ -969,7 +969,12 @@ module Scint
             end
 
             gem_root = resolve_git_gem_subdir(tmp_checkout, spec)
-            FS.clone_tree(gem_root, tmp_assembled)
+            gem_rel = git_relative_root(tmp_checkout, gem_root)
+            dest_root = tmp_assembled
+            dest_path = gem_rel.empty? ? dest_root : File.join(dest_root, gem_rel)
+
+            FS.clone_tree(gem_root, dest_path)
+            copy_gemspec_root_files(tmp_checkout, gem_root, dest_root, spec)
             FS.atomic_move(tmp_assembled, assembling)
 
             gemspec = read_gemspec_from_extracted(assembling, spec)
@@ -996,6 +1001,55 @@ module Scint
 
       def git_source_submodules?(source)
         source.respond_to?(:submodules) && !!source.submodules
+      end
+
+      def copy_gemspec_root_files(repo_root, gem_root, dest_root, spec)
+        repo_root = File.expand_path(repo_root.to_s)
+        gem_root = File.expand_path(gem_root.to_s)
+        return if repo_root == gem_root
+
+        gemspec_path = git_gemspec_path_for_root(gem_root, spec)
+        return unless gemspec_path && File.exist?(gemspec_path)
+
+        content = File.read(gemspec_path) rescue nil
+        return unless content
+
+        root_files = git_root_files_from_gemspec(content)
+        root_files.each do |file|
+          source = File.join(repo_root, file)
+          next unless File.file?(source)
+
+          dest = File.join(dest_root, file)
+          next if File.exist?(dest)
+
+          FS.clonefile(source, dest)
+        end
+      end
+
+      def git_gemspec_path_for_root(gem_root, spec)
+        if spec && spec.respond_to?(:name)
+          candidate = File.join(gem_root, "#{spec.name}.gemspec")
+          return candidate if File.exist?(candidate)
+        end
+
+        Dir.glob(File.join(gem_root, "*.gemspec")).first
+      end
+
+      def git_root_files_from_gemspec(content)
+        files = ["RAILS_VERSION", "VERSION"]
+        files.select { |file| content.include?(file) }
+      end
+
+      def git_relative_root(repo_root, gem_root)
+        repo_root = File.expand_path(repo_root.to_s)
+        gem_root = File.expand_path(gem_root.to_s)
+        return "" if repo_root == gem_root
+
+        if gem_root.start_with?("#{repo_root}/")
+          return gem_root.delete_prefix("#{repo_root}/")
+        end
+
+        File.basename(gem_root)
       end
 
       def checkout_git_tree(bare_repo, destination, resolved_revision, spec, uri)
