@@ -949,6 +949,7 @@ module Scint
 
             promoter.validate_within_root!(cache.root, assembling, label: "assembling")
             promoter.validate_within_root!(cache.root, tmp_checkout, label: "git-checkout")
+            promoter.validate_within_root!(cache.root, tmp_assembled, label: "git-assembled")
 
             if submodules
               checkout_git_tree_with_submodules(
@@ -968,10 +969,18 @@ module Scint
               )
             end
 
+            # Remove .git artifacts from checkout so assembled output is
+            # deterministic and contains no git internals.
+            Dir.glob(File.join(tmp_checkout, "**", ".git"), File::FNM_DOTMATCH).each do |path|
+              FileUtils.rm_rf(path)
+            end
+
             gem_root = resolve_git_gem_subdir(tmp_checkout, spec)
             gem_rel = git_relative_root(tmp_checkout, gem_root)
             dest_root = tmp_assembled
             dest_path = gem_rel.empty? ? dest_root : File.join(dest_root, gem_rel)
+
+            promoter.validate_within_root!(cache.root, dest_path, label: "git-dest")
 
             FS.clone_tree(gem_root, dest_path)
             copy_gemspec_root_files(tmp_checkout, gem_root, dest_root, spec)

@@ -1124,6 +1124,83 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
+  def test_assemble_git_spec_removes_dot_git_from_checkout
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      source = Scint::Source::Git.new(uri: "https://github.com/test/repo.git", revision: "abc123")
+      spec = fake_spec(name: "mygem", version: "1.0.0", source: source)
+      entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
+
+      install.stub(:clone_git_repo, ->(*_args) {}) do
+        install.stub(:fetch_git_repo, ->(*_args) {}) do
+          install.stub(:resolve_git_revision, ->(*_args) { "abc123" }) do
+            install.stub(:checkout_git_tree, lambda { |_bare, destination, *_rest|
+              FileUtils.mkdir_p(destination)
+              # Simulate .git dir and nested .git
+              FileUtils.mkdir_p(File.join(destination, ".git"))
+              File.write(File.join(destination, ".git", "HEAD"), "ref")
+              FileUtils.mkdir_p(File.join(destination, "vendor", ".git"))
+              File.write(File.join(destination, "mygem.gemspec"), "Gem::Specification.new { |s| s.name = 'mygem'; s.version = '1.0.0' }\n")
+              FileUtils.mkdir_p(File.join(destination, "lib"))
+              File.write(File.join(destination, "lib", "mygem.rb"), "")
+            }) do
+              install.send(:assemble_git_spec, entry, cache, fetch: true)
+            end
+          end
+        end
+      end
+
+      cached = cache.cached_path(spec)
+      assembling = cache.assembling_path(spec)
+
+      # One of these should exist (promoted or still assembling)
+      target = Dir.exist?(cached) ? cached : assembling
+      assert Dir.exist?(target), "cached or assembling dir should exist"
+
+      # No .git artifacts should remain
+      git_dirs = Dir.glob(File.join(target, "**", ".git"), File::FNM_DOTMATCH)
+      assert_empty git_dirs, ".git dirs should be removed from assembled output"
+    end
+  end
+
+  def test_assemble_git_spec_validates_dest_path_within_cache
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+
+      # Craft a spec whose name escapes the cache root entirely
+      source = Scint::Source::Git.new(uri: "https://github.com/test/repo.git", revision: "abc")
+      spec = fake_spec(name: "../../../../tmp/evil", version: "1.0.0", source: source)
+      entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
+
+      install.stub(:clone_git_repo, ->(*_args) {}) do
+        install.stub(:fetch_git_repo, ->(*_args) {}) do
+          install.stub(:resolve_git_revision, ->(*_args) { "abc" }) do
+            install.stub(:checkout_git_tree, lambda { |_bare, destination, *_rest|
+              FileUtils.mkdir_p(destination)
+              File.write(File.join(destination, "evil.gemspec"), "")
+            }) do
+              assert_raises(Scint::CacheError) do
+                install.send(:assemble_git_spec, entry, cache, fetch: true)
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_git_relative_root_returns_empty_for_same_dir
+    install = Scint::CLI::Install.new([])
+    assert_equal "", install.send(:git_relative_root, "/tmp/repo", "/tmp/repo")
+  end
+
+  def test_git_relative_root_returns_subdir_path
+    install = Scint::CLI::Install.new([])
+    assert_equal "gems/mygem", install.send(:git_relative_root, "/tmp/repo", "/tmp/repo/gems/mygem")
+  end
+
   # --- parse_options ---
 
   def test_parse_options_accepts_path_flag
