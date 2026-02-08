@@ -269,6 +269,58 @@ class GemfileParserTest < Minitest::Test
     end
   end
 
+  def test_ruby_version_setting_with_multiple_constraints
+    with_tmpdir do |dir|
+      gemfile = File.join(dir, "Gemfile")
+      File.write(gemfile, <<~RUBY)
+        source "https://rubygems.org"
+        ruby ">= 3.2.0", "< 4.1.0"
+        gem "rack"
+      RUBY
+
+      result = Scint::Gemfile::Parser.parse(gemfile)
+      assert_equal ">= 3.2.0, < 4.1.0", result.ruby_version
+    end
+  end
+
+  def test_gemspec_default_glob_includes_nested_component_gemspecs
+    with_tmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "components"))
+
+      File.write(File.join(dir, "root.gemspec"), <<~RUBY)
+        Gem::Specification.new do |s|
+          s.name = "root"
+          s.version = "1.0.0"
+          s.authors = ["test"]
+          s.summary = "test"
+        end
+      RUBY
+
+      File.write(File.join(dir, "components", "child.gemspec"), <<~RUBY)
+        Gem::Specification.new do |s|
+          s.name = "child"
+          s.version = "1.0.0"
+          s.authors = ["test"]
+          s.summary = "test"
+        end
+      RUBY
+
+      gemfile = File.join(dir, "Gemfile")
+      File.write(gemfile, <<~RUBY)
+        source "https://rubygems.org"
+        gemspec
+      RUBY
+
+      result = Scint::Gemfile::Parser.parse(gemfile)
+      deps = result.dependencies.each_with_object({}) { |dep, out| out[dep.name] = dep }
+
+      assert_includes deps.keys, "root"
+      assert_includes deps.keys, "child"
+      assert_equal dir, deps.fetch("root").source_options[:path]
+      assert_equal File.join(dir, "components"), deps.fetch("child").source_options[:path]
+    end
+  end
+
   def test_plugin_method_is_silently_ignored
     with_tmpdir do |dir|
       gemfile = File.join(dir, "Gemfile")

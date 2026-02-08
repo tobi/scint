@@ -86,7 +86,7 @@ module Scint
             pg = @path_gems[name]
             deps = {}
             (pg[:dependencies] || []).each do |dep_name, dep_req_str|
-              deps[dep_name] = Gem::Requirement.new(dep_req_str || ">= 0")
+              deps[dep_name] = build_requirement(dep_req_str)
             end
             deps
           else
@@ -99,7 +99,7 @@ module Scint
               next unless requirements_match?(reqs)
               dep_hash.each do |dep_name, dep_req_str|
                 # Merge constraints from all matching platform entries
-                req = Gem::Requirement.new(dep_req_str.split(", "))
+                req = build_requirement(dep_req_str)
                 deps[dep_name] = if deps[dep_name]
                   merge_requirements(deps[dep_name], req)
                 else
@@ -275,6 +275,19 @@ module Scint
         return Gem::Requirement.default if filtered.empty?
 
         Gem::Requirement.new(filtered.map { |op, version| "#{op} #{version}" })
+      end
+
+      def build_requirement(value)
+        case value
+        when Gem::Requirement
+          value
+        when Array
+          parts = value.flatten.compact.map(&:to_s).reject(&:empty?)
+          Gem::Requirement.new(*(parts.empty? ? [">= 0"] : parts))
+        else
+          parts = value.to_s.split(",").map(&:strip).reject(&:empty?)
+          Gem::Requirement.new(*(parts.empty? ? [">= 0"] : parts))
+        end
       end
     end
   end

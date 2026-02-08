@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "dependency"
+require_relative "../source/path"
 
 module Scint
   module Gemfile
@@ -213,21 +214,23 @@ module Scint
         instance_eval(contents, expanded, 1)
       end
 
-      def ruby(version, **opts)
-        @ruby_version = version.to_s
+      def ruby(*versions, **opts)
+        version_parts = versions.flatten.compact.map(&:to_s)
+        @ruby_version = version_parts.join(", ") unless version_parts.empty?
       end
 
       def gemspec(opts = {})
         path = opts[:path] || "."
         name = opts[:name]
+        glob = opts[:glob] || Scint::Source::Path::DEFAULT_GLOB
         dir = File.expand_path(path, File.dirname(@gemfile_path))
-        gemspecs = Dir.glob(File.join(dir, "{,*}.gemspec"))
+        gemspecs = Dir.glob(File.join(dir, glob)).sort
         # Just record we have a gemspec source -- full spec loading is
         # deferred to the resolver/installer.
         gemspecs.each do |gs|
           spec_name = File.basename(gs, ".gemspec")
           next if name && spec_name != name
-          gem(spec_name, path: dir)
+          gem(spec_name, path: File.dirname(gs), glob: glob)
         end
       end
 

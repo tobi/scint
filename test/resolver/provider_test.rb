@@ -225,6 +225,15 @@ class ProviderTest < Minitest::Test
     assert_equal Gem::Requirement.new(">= 0"), deps["puma"]
   end
 
+  def test_dependencies_for_path_gem_with_multiple_requirement_parts
+    client = FakeIndexClient.new({})
+    provider = Scint::Resolver::Provider.new(client,
+      path_gems: { "mygem" => { version: "1.0.0", dependencies: [["rack", [">= 2.0", "< 3"]]] } })
+
+    deps = provider.dependencies_for("mygem", Gem::Version.new("1.0.0"))
+    assert_equal Gem::Requirement.new(">= 2.0", "< 3"), deps["rack"]
+  end
+
   def test_path_or_git_gem
     client = FakeIndexClient.new({})
     provider = Scint::Resolver::Provider.new(client,

@@ -322,12 +322,15 @@ module Scint
 
           # Try to read version and deps from gemspec if it's a path gem
           if opts[:path]
-            gemspec = find_gemspec(opts[:path], dep.name)
+            gemspec = find_gemspec(opts[:path], dep.name, glob: opts[:glob])
             if gemspec
               version = gemspec.version.to_s
               deps = gemspec.dependencies
                 .select { |d| d.type == :runtime }
-                .map { |d| [d.name, d.requirement.to_s] }
+                .map do |d|
+                  requirement_parts = d.requirement.requirements.map { |op, req_version| "#{op} #{req_version}" }
+                  [d.name, requirement_parts]
+                end
             end
           end
 
@@ -361,14 +364,16 @@ module Scint
         resolver.resolve
       end
 
-      def find_gemspec(path, gem_name)
+      def find_gemspec(path, gem_name, glob: nil)
         return nil unless Dir.exist?(path)
 
+        glob_pattern = glob || Source::Path::DEFAULT_GLOB
         # Look for exact match first, then any gemspec
         candidates = [
           File.join(path, "#{gem_name}.gemspec"),
+          *Dir.glob(File.join(path, glob_pattern)),
           *Dir.glob(File.join(path, "*.gemspec")),
-        ]
+        ].uniq
 
         candidates.each do |gs|
           next unless File.exist?(gs)
@@ -386,7 +391,45 @@ module Scint
         return false unless lockfile
 
         locked_names = Set.new(lockfile.specs.map { |s| s[:name] })
-        gemfile.dependencies.all? { |d| locked_names.include?(d.name) }
+        gemfile.dependencies.all? do |dep|
+          next true unless dependency_relevant_for_local_platform?(dep)
+
+          locked_names.include?(dep.name)
+        end
+      end
+
+      def dependency_relevant_for_local_platform?(dependency)
+        platforms = Array(dependency.platforms).map(&:to_sym)
+        return true if platforms.empty?
+
+        platforms.any? { |platform| gemfile_platform_matches_local?(platform) }
+      end
+
+      def gemfile_platform_matches_local?(platform)
+        case platform
+        when :ruby
+          true
+        when :mri
+          RUBY_ENGINE == "ruby"
+        when :jruby
+          RUBY_ENGINE == "jruby"
+        when :truffleruby
+          RUBY_ENGINE == "truffleruby"
+        when :rbx
+          RUBY_ENGINE == "rbx"
+        when :windows, :mswin, :mswin64, :mingw, :x64_mingw, :x86_mingw, :x64_mingw_ucrt
+          Platform.windows?
+        when :linux
+          Platform.linux?
+        when :darwin, :macos
+          Platform.macos?
+        else
+          platform_name = platform.to_s.tr("_", "-")
+          spec_platform = Gem::Platform.new(platform_name)
+          spec_platform === Platform.local_platform
+        end
+      rescue StandardError
+        false
       end
 
       def lockfile_to_resolved(lockfile)

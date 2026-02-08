@@ -1053,6 +1053,54 @@ class CLIInstallTest < Minitest::Test
     refute install.send(:lockfile_current?, gemfile, lockfile)
   end
 
+  def test_lockfile_current_ignores_missing_dependency_for_foreign_platform
+    install = Scint::CLI::Install.new([])
+    gemfile = Scint::Gemfile::ParseResult.new(
+      dependencies: [
+        Scint::Gemfile::Dependency.new("rack"),
+        Scint::Gemfile::Dependency.new("wdm", platforms: [:mingw, :x64_mingw, :mswin]),
+      ],
+      sources: [],
+      ruby_version: nil,
+      platforms: [],
+    )
+    lockfile = Scint::Lockfile::LockfileData.new(
+      specs: [{ name: "rack", version: "2.2.8" }],
+      dependencies: {},
+      platforms: [],
+      sources: [],
+      bundler_version: nil,
+      ruby_version: nil,
+      checksums: nil,
+    )
+
+    assert install.send(:lockfile_current?, gemfile, lockfile)
+  end
+
+  def test_lockfile_current_requires_missing_dependency_for_local_platform
+    install = Scint::CLI::Install.new([])
+    gemfile = Scint::Gemfile::ParseResult.new(
+      dependencies: [
+        Scint::Gemfile::Dependency.new("rack"),
+        Scint::Gemfile::Dependency.new("tzinfo-data", platforms: [:ruby]),
+      ],
+      sources: [],
+      ruby_version: nil,
+      platforms: [],
+    )
+    lockfile = Scint::Lockfile::LockfileData.new(
+      specs: [{ name: "rack", version: "2.2.8" }],
+      dependencies: {},
+      platforms: [],
+      sources: [],
+      bundler_version: nil,
+      ruby_version: nil,
+      checksums: nil,
+    )
+
+    refute install.send(:lockfile_current?, gemfile, lockfile)
+  end
+
   # --- find_gemspec ---
 
   def test_find_gemspec_returns_nil_when_path_does_not_exist
