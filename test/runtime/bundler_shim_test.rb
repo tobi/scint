@@ -176,4 +176,88 @@ class BundlerShimTest < Minitest::Test
       assert_equal "constant", out
     end
   end
+
+  def test_bundler_require_does_not_swallow_nested_load_error
+    with_tmpdir do |dir|
+      project_dir = File.join(dir, "app")
+      bundle_dir = File.join(project_dir, ".bundle")
+      lock_path = File.join(bundle_dir, "scint.lock.marshal")
+      gem_lib = File.join(project_dir, "vendor", "railties", "lib")
+      gemfile_path = File.join(project_dir, "Gemfile")
+
+      FileUtils.mkdir_p(bundle_dir)
+      FileUtils.mkdir_p(gem_lib)
+      File.write(File.join(gem_lib, "rails.rb"), "require 'missing_dep_for_rails_test'\n")
+      File.write(File.join(gem_lib, "rails_i18n.rb"), "RAILS_I18N_FALLBACK_LOADED = true\n")
+      File.write(gemfile_path, "source 'https://rubygems.org'\ngem 'railties'\n")
+      File.binwrite(lock_path, Marshal.dump({ "railties" => { load_paths: [gem_lib] } }))
+
+      lib_dir = File.expand_path("../../lib", __dir__)
+      script = <<~RUBY
+        require "bundler/setup"
+        begin
+          Bundler.send(:require_one, "rails")
+          print "unexpected-success"
+        rescue LoadError => e
+          print e.path || e.message
+        end
+      RUBY
+
+      out, err, status = Open3.capture3(
+        {
+          "BUNDLE_GEMFILE" => gemfile_path,
+          "SCINT_RUNTIME_LOCK" => lock_path,
+          "RUBYLIB" => lib_dir,
+          "RUBYOPT" => "",
+          "BUNDLER_SETUP" => nil,
+        },
+        RbConfig.ruby,
+        "-e",
+        script,
+      )
+
+      assert status.success?, err
+      refute_equal "unexpected-success", out
+      assert_equal "missing_dep_for_rails_test", out
+    end
+  end
+
+  def test_bundler_require_falls_back_when_gem_name_has_ruby_prefix
+    with_tmpdir do |dir|
+      project_dir = File.join(dir, "app")
+      bundle_dir = File.join(project_dir, ".bundle")
+      lock_path = File.join(bundle_dir, "scint.lock.marshal")
+      gem_lib = File.join(project_dir, "vendor", "rubyzip", "lib")
+      gemfile_path = File.join(project_dir, "Gemfile")
+
+      FileUtils.mkdir_p(bundle_dir)
+      FileUtils.mkdir_p(gem_lib)
+      File.write(File.join(gem_lib, "zip.rb"), "RUBYZIP_FALLBACK_LOADED = true\n")
+      File.write(gemfile_path, "source 'https://rubygems.org'\ngem 'rubyzip'\n")
+      File.binwrite(lock_path, Marshal.dump({ "rubyzip" => { load_paths: [gem_lib] } }))
+
+      lib_dir = File.expand_path("../../lib", __dir__)
+      script = <<~RUBY
+        require "bundler/setup"
+        Bundler.require
+        print defined?(RUBYZIP_FALLBACK_LOADED)
+      RUBY
+
+      out, err, status = Open3.capture3(
+        {
+          "BUNDLE_GEMFILE" => gemfile_path,
+          "SCINT_RUNTIME_LOCK" => lock_path,
+          "RUBYLIB" => lib_dir,
+          "RUBYOPT" => "",
+          "BUNDLER_SETUP" => nil,
+        },
+        RbConfig.ruby,
+        "-e",
+        script,
+      )
+
+      assert status.success?, err
+      assert_equal "constant", out
+    end
+  end
 end

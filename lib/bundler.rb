@@ -100,6 +100,8 @@ module Bundler
           Kernel.require(candidate)
           return true
         rescue LoadError => e
+          raise e unless retryable_load_error?(e, candidate)
+
           last_error = e
         end
       end
@@ -196,7 +198,9 @@ module Bundler
         begin
           Kernel.require(candidate)
           return true
-        rescue LoadError
+        rescue LoadError => e
+          raise e unless retryable_load_error?(e, candidate)
+
           next
         end
       end
@@ -209,7 +213,9 @@ module Bundler
           begin
             Kernel.require(candidate)
             return true
-          rescue LoadError
+          rescue LoadError => e
+            raise e unless retryable_load_error?(e, candidate)
+
             next
           end
         end
@@ -221,8 +227,24 @@ module Bundler
       name.to_s.downcase.gsub(/[^a-z0-9]/, "")
     end
 
+    def retryable_load_error?(error, candidate)
+      requested = if error.respond_to?(:path)
+                    error.path
+                  else
+                    nil
+                  end
+      return true if requested.nil? || requested.empty?
+
+      variants = [
+        candidate.to_s,
+        "#{candidate}.rb",
+        "#{candidate}.so",
+      ]
+      variants.include?(requested)
+    end
+
     def compatible_basename?(target, normalized)
-      return false if target.length < 4 || normalized.length < 4
+      return false if target.length < 3 || normalized.length < 3
 
       target_variants = basename_variants(target)
       normalized_variants = basename_variants(normalized)
@@ -240,11 +262,13 @@ module Bundler
       plural_to_s = value.sub(/ties\z/, "s")
       plural_to_y = value.sub(/ies\z/, "y")
       singular = value.sub(/s\z/, "")
+      strip_ruby_prefix = value.sub(/\Aruby/, "")
 
       variants << plural_to_s unless plural_to_s == value
       variants << plural_to_y unless plural_to_y == value
       variants << singular unless singular == value
-      variants.uniq.select { |v| v.length >= 4 }
+      variants << strip_ruby_prefix unless strip_ruby_prefix == value
+      variants.uniq.select { |v| v.length >= 3 }
     end
   end
 end

@@ -33,6 +33,7 @@ require_relative "../resolver/resolver"
 require_relative "../credentials"
 require "open3"
 require "set"
+require "pathname"
 
 module Scint
   module CLI
@@ -121,6 +122,9 @@ module Scint
           scheduler.scale_workers(to_install.size)
 
           if to_install.empty?
+            # Keep lock artifacts aligned even when everything is already installed.
+            write_lockfile(resolved, gemfile, lockfile)
+            write_runtime_config(resolved, bundle_path)
             elapsed_ms = elapsed_ms_since(start_time)
             worker_count = scheduler.stats[:workers]
             warn_missing_bundle_gitignore_entry
@@ -279,7 +283,10 @@ module Scint
 
       def resolve(gemfile, lockfile, cache)
         # If lockfile is up-to-date, use its specs directly
-        if lockfile && lockfile_current?(gemfile, lockfile) && lockfile_git_source_mapping_valid?(lockfile, cache)
+        if lockfile &&
+           lockfile_current?(gemfile, lockfile) &&
+           lockfile_dependency_graph_valid?(lockfile) &&
+           lockfile_git_source_mapping_valid?(lockfile, cache)
           return lockfile_to_resolved(lockfile)
         end
 
@@ -314,6 +321,7 @@ module Scint
         # Build path_gems: gem_name => { version:, dependencies:, source: }
         # for gems with path: or git: sources (skip compact index for these)
         path_gems = {}
+        git_source_metadata_cache = {}
         gemfile.dependencies.each do |dep|
           opts = dep.source_options
           next unless opts[:path] || opts[:git]
@@ -335,10 +343,45 @@ module Scint
             end
           end
 
-          # For git gems, try lockfile for version
-          if opts[:git] && lockfile
-            locked_spec = lockfile.specs.find { |s| s[:name] == dep.name }
-            version = locked_spec[:version] if locked_spec
+          # For git gems, read version and dependencies from the available revision when possible.
+          if opts[:git]
+            git_source = find_matching_git_source(Array(lockfile&.sources), opts) || find_matching_git_source(gemfile.sources, opts)
+            revision_hint = git_source&.revision || git_source&.ref || opts[:ref] || opts[:branch] || opts[:tag] || "HEAD"
+            bare_repo = cache&.git_path(opts[:git])
+            if bare_repo && !Dir.exist?(bare_repo)
+              clone_git_repo(opts[:git], bare_repo)
+            elsif bare_repo && Dir.exist?(bare_repo)
+              fetch_git_repo(bare_repo)
+            end
+            if bare_repo && Dir.exist?(bare_repo)
+              begin
+                resolved_revision = resolve_git_revision(bare_repo, revision_hint)
+                cache_key = "#{opts[:git]}@#{resolved_revision}"
+                git_metadata = git_source_metadata_cache[cache_key]
+                unless git_metadata
+                  git_metadata = build_git_path_gems_for_revision(
+                    bare_repo,
+                    resolved_revision,
+                    glob: opts[:glob],
+                    source_desc: opts[:git],
+                  )
+                  git_source_metadata_cache[cache_key] = git_metadata
+                end
+                path_gems.merge!(git_metadata)
+                current = git_metadata[dep.name]
+                if current
+                  version = current[:version]
+                  deps = current[:dependencies]
+                end
+              rescue StandardError
+                # Fall back to lockfile version below.
+              end
+            end
+
+            if lockfile && version == "0"
+              locked_spec = lockfile.specs.find { |s| s[:name] == dep.name }
+              version = locked_spec[:version] if locked_spec
+            end
           end
 
           source_desc = opts[:path] || opts[:git] || "local"
@@ -388,6 +431,66 @@ module Scint
         nil
       end
 
+      def find_git_gemspec(bare_repo, revision, gem_name, glob: nil)
+        gemspec_paths = gemspec_paths_in_git_revision(bare_repo, revision)
+        return nil if gemspec_paths.empty?
+
+        path = gemspec_paths[gem_name.to_s]
+        if path.nil? && glob
+          glob_regex = git_glob_to_regex(glob)
+          path = gemspec_paths.values.find { |candidate| candidate.match?(glob_regex) }
+        end
+        path ||= gemspec_paths.values.first
+        return nil if path.nil?
+
+        load_git_gemspec(bare_repo, revision, path)
+      rescue StandardError
+        nil
+      end
+
+      def build_git_path_gems_for_revision(bare_repo, revision, glob: nil, source_desc: nil)
+        gemspec_paths = gemspec_paths_in_git_revision(bare_repo, revision)
+        return {} if gemspec_paths.empty?
+
+        glob_regex = glob ? git_glob_to_regex(glob) : nil
+        data = {}
+
+        with_git_worktree(bare_repo, revision) do |worktree|
+          gemspec_paths.each_value do |path|
+            next if glob_regex && !path.match?(glob_regex)
+
+            gemspec = load_gemspec_from_worktree(worktree, path)
+            next unless gemspec
+
+            deps = gemspec.dependencies
+              .select { |d| d.type == :runtime }
+              .map do |d|
+                requirement_parts = d.requirement.requirements.map { |op, req_version| "#{op} #{req_version}" }
+                [d.name, requirement_parts]
+              end
+
+            data[gemspec.name] = {
+              version: gemspec.version.to_s,
+              dependencies: deps,
+              source: source_desc || "local",
+            }
+          end
+        end
+
+        data
+      rescue StandardError
+        {}
+      end
+
+      def git_glob_to_regex(glob)
+        pattern = glob.to_s
+        escaped = Regexp.escape(pattern)
+        escaped = escaped.gsub("\\*\\*", ".*")
+        escaped = escaped.gsub("\\*", "[^/]*")
+        escaped = escaped.gsub("\\?", ".")
+        /\A#{escaped}\z/
+      end
+
       def lockfile_current?(gemfile, lockfile)
         return false unless lockfile
 
@@ -397,6 +500,27 @@ module Scint
 
           locked_names.include?(dep.name)
         end
+      end
+
+      def lockfile_dependency_graph_valid?(lockfile)
+        return false unless lockfile
+
+        specs = Array(lockfile.specs)
+        return false if specs.empty?
+
+        by_name = Hash.new { |h, k| h[k] = [] }
+        specs.each { |spec| by_name[spec[:name].to_s] << spec }
+
+        specs.all? do |spec|
+          Array(spec[:dependencies]).all? do |dep|
+            dep_name = dep[:name].to_s
+            dep_reqs = Array(dep[:version_reqs])
+            req = Gem::Requirement.new(dep_reqs.empty? ? [">= 0"] : dep_reqs)
+            by_name[dep_name].any? { |candidate| req.satisfied_by?(Gem::Version.new(candidate[:version].to_s)) }
+          end
+        end
+      rescue StandardError
+        false
       end
 
       def dependency_relevant_for_local_platform?(dependency)
@@ -472,6 +596,7 @@ module Scint
         git_specs = Array(lockfile.specs).select { |s| s[:source].is_a?(Source::Git) }
         return true if git_specs.empty?
 
+        lock_specs_by_name = Array(lockfile.specs).group_by { |s| s[:name].to_s }
         by_source = git_specs.group_by { |s| s[:source] }
         by_source.each do |source, specs|
           uri, revision = git_source_ref(source)
@@ -485,18 +610,34 @@ module Scint
           end
           return false unless resolved_revision
 
-          gemspec_names = gemspec_names_in_git_revision(bare_repo, resolved_revision)
+          gemspec_paths = gemspec_paths_in_git_revision(bare_repo, resolved_revision)
+          gemspec_names = gemspec_paths.keys.to_set
           return false if gemspec_names.empty?
 
           specs.each do |spec|
             return false unless gemspec_names.include?(spec[:name].to_s)
+
+            runtime_deps = runtime_dependencies_for_git_gemspec(
+              bare_repo,
+              resolved_revision,
+              gemspec_paths[spec[:name].to_s],
+            )
+            return false if runtime_deps.nil?
+
+            runtime_deps.each do |dep|
+              candidates = lock_specs_by_name.fetch(dep.name.to_s, [])
+              matched = candidates.any? do |candidate|
+                dep.requirement.satisfied_by?(Gem::Version.new(candidate[:version].to_s))
+              end
+              return false unless matched
+            end
           end
         end
 
         true
       end
 
-      def gemspec_names_in_git_revision(bare_repo, revision)
+      def gemspec_paths_in_git_revision(bare_repo, revision)
         out, err, status = git_capture3(
           "--git-dir", bare_repo,
           "ls-tree",
@@ -504,17 +645,65 @@ module Scint
           "--name-only",
           revision,
         )
-        return Set.new unless status.success?
+        return {} unless status.success?
 
-        names = Set.new
+        paths = {}
         out.each_line do |line|
           path = line.strip
           next unless path.end_with?(".gemspec")
-          names << File.basename(path, ".gemspec")
+          name = File.basename(path, ".gemspec")
+          paths[name] ||= path
         end
-        names
+        paths
       rescue StandardError
-        Set.new
+        {}
+      end
+
+      def runtime_dependencies_for_git_gemspec(bare_repo, revision, gemspec_path)
+        spec = load_git_gemspec(bare_repo, revision, gemspec_path)
+        return nil unless spec
+
+        spec.dependencies.select { |dep| dep.type == :runtime }
+      rescue StandardError
+        nil
+      end
+
+      def load_git_gemspec(bare_repo, revision, gemspec_path)
+        return nil if gemspec_path.to_s.empty?
+
+        with_git_worktree(bare_repo, revision) do |worktree|
+          load_gemspec_from_worktree(worktree, gemspec_path)
+        end
+      rescue StandardError
+        nil
+      end
+
+      def with_git_worktree(bare_repo, revision)
+        worktree = Dir.mktmpdir("scint-gemspec")
+        out, err, status = git_capture3(
+          "--git-dir", bare_repo,
+          "--work-tree", worktree,
+          "checkout",
+          "--force",
+          revision,
+        )
+        return nil unless status.success?
+
+        File.write(File.join(worktree, ".git"), "gitdir: #{bare_repo}\n")
+        yield worktree if block_given?
+      ensure
+        FileUtils.rm_rf(worktree) if worktree && !worktree.empty?
+      end
+
+      def load_gemspec_from_worktree(worktree, gemspec_path)
+        absolute_gemspec = File.join(worktree, gemspec_path)
+        return nil unless File.exist?(absolute_gemspec)
+
+        Dir.chdir(File.dirname(absolute_gemspec)) do
+          Gem::Specification.load(absolute_gemspec)
+        end
+      rescue StandardError
+        nil
       end
 
       # Preference: exact platform match > compatible match > ruby > first.
@@ -701,7 +890,10 @@ module Scint
         gem_root = resolve_git_gem_subdir(checkout_dir, spec)
         extracted = cache.extracted_path(spec)
         marker = git_checkout_marker_path(extracted)
-        if Dir.exist?(extracted) && File.exist?(marker) && File.read(marker).strip == resolved_revision
+        if Dir.exist?(extracted) &&
+           File.exist?(marker) &&
+           File.read(marker).strip == resolved_revision &&
+           git_spec_layout_current?(extracted, spec)
           return
         end
 
@@ -716,6 +908,12 @@ module Scint
         ensure
           FileUtils.rm_rf(tmp) if tmp && File.exist?(tmp)
         end
+      end
+
+      def git_spec_layout_current?(extracted_path, spec)
+        File.exist?(File.join(extracted_path, "#{spec.name}.gemspec"))
+      rescue StandardError
+        false
       end
 
       def materialize_git_checkout(bare_repo, checkout_dir, resolved_revision, spec, uri)
@@ -964,7 +1162,11 @@ module Scint
       def extracted_path_for_entry(entry, cache)
         source_str = entry.spec.source.to_s
         if source_str.start_with?("/") && Dir.exist?(source_str)
-          source_str
+          begin
+            resolve_git_gem_subdir(source_str, entry.spec)
+          rescue InstallError
+            source_str
+          end
         else
           base = entry.cached_path || cache.extracted_path(entry.spec)
           if git_source?(entry.spec.source) && Dir.exist?(base)
@@ -1532,18 +1734,23 @@ module Scint
           spec_file = File.join(ruby_dir, "specifications", "#{full}.gemspec")
           require_paths = read_require_paths(spec_file)
           load_paths = require_paths
-            .map { |rp| File.join(gem_dir, rp) }
+            .map { |rp| expand_require_path(gem_dir, rp) }
             .select { |path| Dir.exist?(path) }
 
           default_lib = File.join(gem_dir, "lib")
           load_paths << default_lib if load_paths.empty? && Dir.exist?(default_lib)
-          load_paths.concat(detect_nested_lib_paths(gem_dir))
           load_paths.uniq!
 
           # Add ext load path if extensions exist
           ext_dir = File.join(ruby_dir, "extensions",
                               Platform.gem_arch, Platform.extension_api_version, full)
           load_paths << ext_dir if Dir.exist?(ext_dir)
+
+          if load_paths.empty?
+            source_paths = runtime_source_load_paths(spec)
+            load_paths.concat(source_paths)
+            load_paths.uniq!
+          end
 
           data[spec.name] = {
             version: spec.version.to_s,
@@ -1565,20 +1772,36 @@ module Scint
         ["lib"]
       end
 
-      def detect_nested_lib_paths(gem_dir)
-        lib_dir = File.join(gem_dir, "lib")
-        return [] unless Dir.exist?(lib_dir)
+      def expand_require_path(gem_dir, require_path)
+        value = require_path.to_s
+        return value if Pathname.new(value).absolute?
 
-        children = Dir.children(lib_dir)
-        top_level_rb = children.any? do |entry|
-          path = File.join(lib_dir, entry)
-          File.file?(path) && entry.end_with?(".rb")
+        File.join(gem_dir, value)
+      rescue StandardError
+        File.join(gem_dir, require_path.to_s)
+      end
+
+      def runtime_source_load_paths(spec)
+        source_root = spec.source.to_s
+        return [] unless source_root.start_with?("/") && Dir.exist?(source_root)
+
+        source_dir = begin
+          resolve_git_gem_subdir(source_root, spec)
+        rescue InstallError
+          source_root
         end
-        return [] if top_level_rb
 
-        children
-          .map { |entry| File.join(lib_dir, entry) }
-          .select { |path| File.directory?(path) }
+        gemspec_file = File.join(source_dir, "#{spec.name}.gemspec")
+        require_paths = read_require_paths(gemspec_file)
+        paths = require_paths
+          .map { |rp| expand_require_path(source_dir, rp) }
+          .select { |path| Dir.exist?(path) }
+
+        default_lib = File.join(source_dir, "lib")
+        paths << default_lib if paths.empty? && Dir.exist?(default_lib)
+        paths.uniq
+      rescue StandardError
+        []
       end
 
       def spec_full_name(spec)

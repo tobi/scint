@@ -4,6 +4,7 @@ require_relative "../runtime/exec"
 require_relative "../fs"
 require_relative "../platform"
 require_relative "../lockfile/parser"
+require "pathname"
 
 module Scint
   module CLI
@@ -75,12 +76,11 @@ module Scint
           spec_file = File.join(ruby_dir, "specifications", "#{full}.gemspec")
           require_paths = read_require_paths(spec_file)
           load_paths = require_paths
-            .map { |rp| File.join(gem_dir, rp) }
+            .map { |rp| expand_require_path(gem_dir, rp) }
             .select { |path| Dir.exist?(path) }
 
           lib_path = File.join(gem_dir, "lib")
           load_paths << lib_path if load_paths.empty? && Dir.exist?(lib_path)
-          load_paths.concat(detect_nested_lib_paths(gem_dir))
           load_paths.uniq!
 
           ext_path = File.join(ruby_dir, "extensions",
@@ -130,20 +130,13 @@ module Scint
         ["lib"]
       end
 
-      def detect_nested_lib_paths(gem_dir)
-        lib_dir = File.join(gem_dir, "lib")
-        return [] unless Dir.exist?(lib_dir)
+      def expand_require_path(gem_dir, require_path)
+        value = require_path.to_s
+        return value if Pathname.new(value).absolute?
 
-        children = Dir.children(lib_dir)
-        top_level_rb = children.any? do |entry|
-          path = File.join(lib_dir, entry)
-          File.file?(path) && entry.end_with?(".rb")
-        end
-        return [] if top_level_rb
-
-        children
-          .map { |entry| File.join(lib_dir, entry) }
-          .select { |path| File.directory?(path) }
+        File.join(gem_dir, value)
+      rescue StandardError
+        File.join(gem_dir, require_path.to_s)
       end
     end
   end

@@ -144,6 +144,58 @@ class CLIExecTest < Minitest::Test
     end
   end
 
+  def test_run_rebuild_keeps_absolute_require_paths_from_installed_gemspec
+    with_tmpdir do |dir|
+      root = File.join(dir, "project")
+      nested = File.join(root, "a", "b")
+      bundle_dir = File.join(root, ".bundle")
+      ruby_dir = ruby_bundle_dir(bundle_dir)
+      specs_dir = File.join(ruby_dir, "specifications")
+      gems_dir = File.join(ruby_dir, "gems")
+      gem_dir = File.join(gems_dir, "pg-1.5.3")
+      lib_dir = File.join(gem_dir, "lib")
+      ext_dir = File.join(ruby_dir, "extensions", Scint::Platform.gem_arch, Scint::Platform.extension_api_version, "pg-1.5.3")
+      spec_file = File.join(specs_dir, "pg-1.5.3.gemspec")
+
+      FileUtils.mkdir_p(nested)
+      FileUtils.mkdir_p(lib_dir)
+      FileUtils.mkdir_p(ext_dir)
+      FileUtils.mkdir_p(specs_dir)
+      File.write(File.join(root, "Gemfile.lock"), <<~LOCK)
+        GEM
+          remote: https://rubygems.org/
+          specs:
+            pg (1.5.3)
+
+        DEPENDENCIES
+          pg
+      LOCK
+
+      gemspec = Gem::Specification.new do |s|
+        s.name = "pg"
+        s.version = Gem::Version.new("1.5.3")
+        s.summary = "test"
+        s.authors = ["scint-test"]
+        s.files = []
+        s.require_paths = [ext_dir, "lib"]
+      end
+      File.write(spec_file, gemspec.to_ruby)
+
+      Scint::Runtime::Exec.stub(:exec, ->(_cmd, _args, _path) { 0 }) do
+        with_cwd(nested) do
+          status = Scint::CLI::Exec.new(["ruby", "-v"]).run
+          assert_equal 0, status
+        end
+      end
+
+      rebuilt_path = File.join(root, ".bundle", Scint::CLI::Exec::RUNTIME_LOCK)
+      data = Marshal.load(File.binread(rebuilt_path))
+      load_paths = data.fetch("pg")[:load_paths]
+      assert_includes load_paths, ext_dir
+      assert_includes load_paths, lib_dir
+    end
+  end
+
   def test_run_returns_error_when_no_lockfile_found
     with_tmpdir do |dir|
       with_cwd(dir) do
@@ -241,7 +293,7 @@ class CLIExecTest < Minitest::Test
     assert_equal "ffi-1.17.0-x86_64-linux", result
   end
 
-  def test_run_rebuild_adds_nested_lib_dir_when_only_subdirs_exist
+  def test_run_rebuild_keeps_only_declared_lib_dir_when_only_subdirs_exist
     with_tmpdir do |dir|
       root = File.join(dir, "project")
       nested = File.join(root, "a", "b")
@@ -289,7 +341,7 @@ class CLIExecTest < Minitest::Test
       load_paths = data.fetch("concurrent-ruby")[:load_paths].map { |p| File.realpath(p) }
 
       assert_includes load_paths, File.realpath(lib_dir)
-      assert_includes load_paths, File.realpath(nested_lib_dir)
+      refute_includes load_paths, File.realpath(nested_lib_dir)
     end
   end
 end

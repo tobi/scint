@@ -233,9 +233,21 @@ module Scint
         ext_install_dir = File.join(ruby_dir, "extensions",
                                     Platform.gem_arch, Platform.extension_api_version,
                                     spec_full_name(spec))
-        return if Dir.exist?(ext_install_dir)
+        FS.clone_tree(cached_ext, ext_install_dir) unless Dir.exist?(ext_install_dir)
+        sync_extension_artifacts_into_gem(ext_install_dir, ruby_dir, spec)
+      end
 
-        FS.clone_tree(cached_ext, ext_install_dir)
+      def sync_extension_artifacts_into_gem(ext_install_dir, ruby_dir, spec)
+        gem_dir = File.join(ruby_dir, "gems", spec_full_name(spec))
+        lib_dir = File.join(gem_dir, "lib")
+        return unless Dir.exist?(lib_dir)
+
+        Dir.glob(File.join(ext_install_dir, "**", "*.{so,bundle,dll,dylib}")).each do |artifact|
+          rel = artifact.delete_prefix("#{ext_install_dir}/")
+          dest = File.join(lib_dir, rel)
+          FS.mkdir_p(File.dirname(dest))
+          FS.clonefile(artifact, dest)
+        end
       end
 
       def build_env(gem_dir, build_ruby_dir, make_jobs)
@@ -317,7 +329,8 @@ module Scint
 
       private_class_method :find_extension_dirs, :compile_extension,
                            :compile_extconf, :compile_cmake, :compile_rake,
-                           :find_rake_executable, :link_extensions, :build_env, :run_cmd,
+                           :find_rake_executable, :link_extensions, :sync_extension_artifacts_into_gem,
+                           :build_env, :run_cmd,
                            :spec_full_name, :ruby_install_dir, :prebuilt_missing_for_ruby?
     end
   end

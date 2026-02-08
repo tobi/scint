@@ -923,38 +923,6 @@ class CLIInstallTest < Minitest::Test
     assert_includes result, "2 failed"
   end
 
-  # --- detect_nested_lib_paths ---
-
-  def test_detect_nested_lib_paths_returns_empty_when_no_lib
-    with_tmpdir do |dir|
-      install = Scint::CLI::Install.new([])
-      result = install.send(:detect_nested_lib_paths, dir)
-      assert_equal [], result
-    end
-  end
-
-  def test_detect_nested_lib_paths_returns_empty_when_top_level_rb_files_exist
-    with_tmpdir do |dir|
-      install = Scint::CLI::Install.new([])
-      lib = File.join(dir, "lib")
-      FileUtils.mkdir_p(lib)
-      File.write(File.join(lib, "foo.rb"), "")
-      result = install.send(:detect_nested_lib_paths, dir)
-      assert_equal [], result
-    end
-  end
-
-  def test_detect_nested_lib_paths_returns_nested_dirs_when_no_top_level_rb
-    with_tmpdir do |dir|
-      install = Scint::CLI::Install.new([])
-      lib = File.join(dir, "lib")
-      nested = File.join(lib, "concurrent-ruby")
-      FileUtils.mkdir_p(nested)
-      result = install.send(:detect_nested_lib_paths, dir)
-      assert_equal [nested], result
-    end
-  end
-
   # --- install_builtin_gem ---
 
   def test_install_builtin_gem_creates_gem_dir_and_gemspec
@@ -1102,6 +1070,50 @@ class CLIInstallTest < Minitest::Test
     refute install.send(:lockfile_current?, gemfile, lockfile)
   end
 
+  def test_lockfile_dependency_graph_valid_returns_false_for_version_mismatch
+    install = Scint::CLI::Install.new([])
+    lockfile = Scint::Lockfile::LockfileData.new(
+      specs: [
+        {
+          name: "rails", version: "8.2.0.alpha", platform: "ruby",
+          dependencies: [{ name: "actionpack", version_reqs: ["= 8.2.0.alpha"] }],
+          source: nil, checksum: nil,
+        },
+        { name: "actionpack", version: "8.1.2", platform: "ruby", dependencies: [], source: nil, checksum: nil },
+      ],
+      dependencies: {},
+      platforms: [],
+      sources: [],
+      bundler_version: nil,
+      ruby_version: nil,
+      checksums: nil,
+    )
+
+    refute install.send(:lockfile_dependency_graph_valid?, lockfile)
+  end
+
+  def test_lockfile_dependency_graph_valid_returns_true_for_consistent_lock
+    install = Scint::CLI::Install.new([])
+    lockfile = Scint::Lockfile::LockfileData.new(
+      specs: [
+        {
+          name: "rails", version: "8.2.0.alpha", platform: "ruby",
+          dependencies: [{ name: "actionpack", version_reqs: ["= 8.2.0.alpha"] }],
+          source: nil, checksum: nil,
+        },
+        { name: "actionpack", version: "8.2.0.alpha", platform: "ruby", dependencies: [], source: nil, checksum: nil },
+      ],
+      dependencies: {},
+      platforms: [],
+      sources: [],
+      bundler_version: nil,
+      ruby_version: nil,
+      checksums: nil,
+    )
+
+    assert install.send(:lockfile_dependency_graph_valid?, lockfile)
+  end
+
   def test_lockfile_git_source_mapping_valid_returns_true_when_specs_exist_in_repo
     with_tmpdir do |dir|
       repo = init_git_repo(dir, "demo.gemspec" => "Gem::Specification.new\n")
@@ -1153,6 +1165,50 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
+  def test_lockfile_git_source_mapping_valid_returns_false_when_git_runtime_dependency_missing
+    with_tmpdir do |dir|
+      repo = init_git_repo(
+        dir,
+        "demo.gemspec" => <<~RUBY,
+          Gem::Specification.new do |s|
+            s.name = "demo"
+            s.version = "1.0.0"
+            s.summary = "demo"
+            s.authors = ["test"]
+            s.add_runtime_dependency "dep", "= 1.0.0"
+          end
+        RUBY
+        "dep.gemspec" => <<~RUBY,
+          Gem::Specification.new do |s|
+            s.name = "dep"
+            s.version = "1.0.0"
+            s.summary = "dep"
+            s.authors = ["test"]
+          end
+        RUBY
+      )
+      commit = git_commit_hash(repo)
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      source = Scint::Source::Git.new(uri: repo, revision: commit)
+      install.send(:clone_git_source, source, cache)
+
+      lockfile = Scint::Lockfile::LockfileData.new(
+        specs: [
+          { name: "demo", version: "1.0.0", platform: "ruby", dependencies: [], source: source, checksum: nil },
+        ],
+        dependencies: {},
+        platforms: [],
+        sources: [source],
+        bundler_version: nil,
+        ruby_version: nil,
+        checksums: nil,
+      )
+
+      refute install.send(:lockfile_git_source_mapping_valid?, lockfile, cache)
+    end
+  end
+
   def test_resolve_falls_back_to_full_resolution_when_git_source_mapping_is_invalid
     install = Scint::CLI::Install.new([])
     gemfile = Scint::Gemfile::ParseResult.new(
@@ -1177,6 +1233,39 @@ class CLIInstallTest < Minitest::Test
     Scint::Resolver::Resolver.stub(:new, fake_resolver) do
       install.stub(:lockfile_current?, true) do
         install.stub(:lockfile_git_source_mapping_valid?, false) do
+          install.stub(:lockfile_to_resolved, ->(_lockfile) { raise "lockfile path should not be used" }) do
+            resolved = install.send(:resolve, gemfile, lockfile, nil)
+            assert_equal fake_resolved, resolved
+          end
+        end
+      end
+    end
+  end
+
+  def test_resolve_falls_back_to_full_resolution_when_lockfile_dependency_graph_is_invalid
+    install = Scint::CLI::Install.new([])
+    gemfile = Scint::Gemfile::ParseResult.new(
+      dependencies: [Scint::Gemfile::Dependency.new("rack")],
+      sources: [{ type: :rubygems, uri: "https://rubygems.org" }],
+      ruby_version: nil,
+      platforms: [],
+    )
+    lockfile = Scint::Lockfile::LockfileData.new(
+      specs: [{ name: "rack", version: "2.2.8" }],
+      dependencies: {},
+      platforms: [],
+      sources: [],
+      bundler_version: nil,
+      ruby_version: nil,
+      checksums: nil,
+    )
+    fake_resolved = [fake_spec(name: "rack", version: "2.2.8")]
+    fake_resolver = Object.new
+    fake_resolver.define_singleton_method(:resolve) { fake_resolved }
+
+    Scint::Resolver::Resolver.stub(:new, fake_resolver) do
+      install.stub(:lockfile_current?, true) do
+        install.stub(:lockfile_dependency_graph_valid?, false) do
           install.stub(:lockfile_to_resolved, ->(_lockfile) { raise "lockfile path should not be used" }) do
             resolved = install.send(:resolve, gemfile, lockfile, nil)
             assert_equal fake_resolved, resolved
@@ -1214,6 +1303,103 @@ class CLIInstallTest < Minitest::Test
     with_tmpdir do |dir|
       install = Scint::CLI::Install.new([])
       assert_nil install.send(:find_gemspec, dir, "missing")
+    end
+  end
+
+  def test_find_git_gemspec_loads_named_gemspec_from_revision
+    with_tmpdir do |dir|
+      repo = init_git_repo(
+        dir,
+        "demo.gemspec" => <<~RUBY,
+          Gem::Specification.new do |s|
+            s.name = "demo"
+            s.version = "1.2.3"
+            s.summary = "demo"
+            s.authors = ["test"]
+            s.add_runtime_dependency "dep", "~> 2.0"
+          end
+        RUBY
+        "dep.gemspec" => <<~RUBY,
+          Gem::Specification.new do |s|
+            s.name = "dep"
+            s.version = "2.1.0"
+            s.summary = "dep"
+            s.authors = ["test"]
+          end
+        RUBY
+      )
+      commit = git_commit_hash(repo)
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      source = Scint::Source::Git.new(uri: repo, revision: commit)
+      install.send(:clone_git_source, source, cache)
+
+      bare_repo = cache.git_path(repo)
+      gemspec = install.send(:find_git_gemspec, bare_repo, commit, "demo")
+      assert_equal "demo", gemspec.name
+      assert_equal Gem::Version.new("1.2.3"), gemspec.version
+      dep = gemspec.dependencies.find { |d| d.name == "dep" }
+      refute_nil dep
+      assert dep.requirement.satisfied_by?(Gem::Version.new("2.1.0"))
+    end
+  end
+
+  def test_resolve_builds_git_path_gem_metadata_from_git_gemspec
+    with_tmpdir do |dir|
+      repo = init_git_repo(
+        dir,
+        "demo.gemspec" => <<~RUBY,
+          Gem::Specification.new do |s|
+            s.name = "demo"
+            s.version = "1.2.3"
+            s.summary = "demo"
+            s.authors = ["test"]
+            s.add_runtime_dependency "dep", "= 2.1.0"
+          end
+        RUBY
+        "dep.gemspec" => <<~RUBY,
+          Gem::Specification.new do |s|
+            s.name = "dep"
+            s.version = "2.1.0"
+            s.summary = "dep"
+            s.authors = ["test"]
+          end
+        RUBY
+      )
+      commit = git_commit_hash(repo)
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      source = Scint::Source::Git.new(uri: repo, revision: commit)
+      install.send(:clone_git_source, source, cache)
+
+      gemfile = Scint::Gemfile::ParseResult.new(
+        dependencies: [
+          Scint::Gemfile::Dependency.new("demo", source_options: { git: repo }),
+        ],
+        sources: [{ type: :rubygems, uri: "https://rubygems.org" }],
+        ruby_version: nil,
+        platforms: [],
+      )
+
+      captured_path_gems = nil
+      fake_provider = Object.new
+      fake_resolver = Object.new
+      fake_resolver.define_singleton_method(:resolve) { [] }
+
+      provider_stub = lambda do |_default_client, **kwargs|
+        captured_path_gems = kwargs[:path_gems]
+        fake_provider
+      end
+
+      Scint::Resolver::Provider.stub(:new, provider_stub) do
+        Scint::Resolver::Resolver.stub(:new, fake_resolver) do
+          install.send(:resolve, gemfile, nil, cache)
+        end
+      end
+
+      assert_equal "1.2.3", captured_path_gems.dig("demo", :version)
+      assert_equal [["dep", ["= 2.1.0"]]], captured_path_gems.dig("demo", :dependencies)
+      assert_equal "2.1.0", captured_path_gems.dig("dep", :version)
     end
   end
 
@@ -1638,7 +1824,7 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
-  def test_write_runtime_config_detects_nested_lib_paths
+  def test_write_runtime_config_keeps_only_declared_require_paths
     with_tmpdir do |dir|
       install = Scint::CLI::Install.new([])
       bundle_path = File.join(dir, ".bundle")
@@ -1666,7 +1852,8 @@ class CLIInstallTest < Minitest::Test
       lock_path = File.join(bundle_path, Scint::CLI::Install::RUNTIME_LOCK)
       data = Marshal.load(File.binread(lock_path))
       load_paths = data["concurrent-ruby"][:load_paths]
-      assert load_paths.any? { |p| p.include?("concurrent-ruby") }
+      assert_includes load_paths, File.join(ruby_dir, "gems", full, "lib")
+      refute_includes load_paths, nested_dir
     end
   end
 
@@ -1701,6 +1888,74 @@ class CLIInstallTest < Minitest::Test
       lock_path = File.join(bundle_path, Scint::CLI::Install::RUNTIME_LOCK)
       data = Marshal.load(File.binread(lock_path))
       assert data["ffi"][:load_paths].any? { |p| p.include?("extensions") }
+    end
+  end
+
+  def test_write_runtime_config_keeps_absolute_require_path_entries
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      bundle_path = File.join(dir, ".bundle")
+      ruby_dir = ruby_bundle_dir(bundle_path)
+
+      spec = fake_spec(name: "pg", version: "1.5.3")
+      full = "pg-1.5.3"
+      gem_lib = File.join(ruby_dir, "gems", full, "lib")
+      abs_ext = File.join(ruby_dir, "extensions", Scint::Platform.gem_arch, Scint::Platform.extension_api_version, full)
+      FileUtils.mkdir_p(gem_lib)
+      FileUtils.mkdir_p(abs_ext)
+      File.write(File.join(gem_lib, "pg.rb"), "")
+
+      spec_dir = File.join(ruby_dir, "specifications")
+      FileUtils.mkdir_p(spec_dir)
+      gemspec = Gem::Specification.new do |s|
+        s.name = "pg"
+        s.version = "1.5.3"
+        s.summary = "test"
+        s.authors = ["test"]
+        s.require_paths = [abs_ext, "lib"]
+      end
+      File.write(File.join(spec_dir, "#{full}.gemspec"), gemspec.to_ruby)
+
+      install.send(:write_runtime_config, [spec], bundle_path)
+
+      lock_path = File.join(bundle_path, Scint::CLI::Install::RUNTIME_LOCK)
+      data = Marshal.load(File.binread(lock_path))
+      assert_includes data["pg"][:load_paths], abs_ext
+      assert_includes data["pg"][:load_paths], gem_lib
+    end
+  end
+
+  def test_write_runtime_config_falls_back_to_local_source_paths_when_installed_paths_missing
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      bundle_path = File.join(dir, ".bundle")
+      ruby_dir = ruby_bundle_dir(bundle_path)
+
+      monorepo = File.join(dir, "rails")
+      source_subdir = File.join(monorepo, "actionpack")
+      source_lib = File.join(source_subdir, "lib")
+      FileUtils.mkdir_p(source_lib)
+      File.write(File.join(source_subdir, "actionpack.gemspec"), <<~RUBY)
+        Gem::Specification.new do |s|
+          s.name = "actionpack"
+          s.version = "8.2.0.alpha"
+          s.summary = "test"
+          s.authors = ["test"]
+          s.require_paths = ["lib"]
+        end
+      RUBY
+
+      spec = fake_spec(name: "actionpack", version: "8.2.0.alpha", source: monorepo)
+
+      # Intentionally omit installed gem files/spec to force source-path fallback.
+      FileUtils.mkdir_p(File.join(ruby_dir, "gems", "actionpack-8.2.0.alpha"))
+      FileUtils.mkdir_p(File.join(ruby_dir, "specifications"))
+
+      install.send(:write_runtime_config, [spec], bundle_path)
+
+      lock_path = File.join(bundle_path, Scint::CLI::Install::RUNTIME_LOCK)
+      data = Marshal.load(File.binread(lock_path))
+      assert_includes data["actionpack"][:load_paths], source_lib
     end
   end
 
@@ -1843,6 +2098,23 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
+  def test_extracted_path_for_entry_resolves_local_monorepo_subdir
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      monorepo = File.join(dir, "repo")
+      subdir = File.join(monorepo, "actionpack")
+      FileUtils.mkdir_p(subdir)
+      File.write(File.join(subdir, "actionpack.gemspec"), "Gem::Specification.new\n")
+
+      spec = fake_spec(name: "actionpack", version: "8.2.0.alpha", source: monorepo)
+      entry = Scint::PlanEntry.new(spec: spec, action: :link, cached_path: nil, gem_path: nil)
+
+      result = install.send(:extracted_path_for_entry, entry, cache)
+      assert_equal subdir, result
+    end
+  end
+
   def test_extracted_path_for_entry_uses_cached_path_when_provided
     with_tmpdir do |dir|
       install = Scint::CLI::Install.new([])
@@ -1885,6 +2157,27 @@ class CLIInstallTest < Minitest::Test
         install.send(:resolve_git_gem_subdir, dir, spec)
       end
       assert_includes error.message, "does not contain missing.gemspec"
+    end
+  end
+
+  def test_git_spec_layout_current_true_when_matching_root_gemspec_exists
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      spec = fake_spec(name: "actionpack", version: "8.2.0.alpha", source: "https://github.com/rails/rails.git")
+      File.write(File.join(dir, "actionpack.gemspec"), "")
+
+      assert install.send(:git_spec_layout_current?, dir, spec)
+    end
+  end
+
+  def test_git_spec_layout_current_false_for_repo_root_layout_without_matching_root_gemspec
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      spec = fake_spec(name: "actionpack", version: "8.2.0.alpha", source: "https://github.com/rails/rails.git")
+      FileUtils.mkdir_p(File.join(dir, "actionpack"))
+      File.write(File.join(dir, "actionpack", "actionpack.gemspec"), "")
+
+      refute install.send(:git_spec_layout_current?, dir, spec)
     end
   end
 
@@ -2882,6 +3175,78 @@ class CLIInstallTest < Minitest::Test
             end
           end
         end
+      end
+    end
+  end
+
+  def test_run_writes_lock_and_runtime_config_when_everything_is_cached
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        install = Scint::CLI::Install.new(["--path", File.join(dir, ".bundle")])
+
+        File.write("Gemfile", 'source "https://rubygems.org"\ngem "rack"\n')
+        File.write("Gemfile.lock", <<~LOCK)
+          GEM
+            remote: https://rubygems.org/
+            specs:
+              rack (2.2.8)
+
+          DEPENDENCIES
+            rack
+        LOCK
+
+        gemfile = Scint::Gemfile::ParseResult.new(
+          dependencies: [Scint::Gemfile::Dependency.new("rack")],
+          sources: [{ type: :rubygems, uri: "https://rubygems.org" }],
+          ruby_version: nil,
+          platforms: [],
+        )
+
+        lockfile = Scint::Lockfile::LockfileData.new(
+          specs: [{ name: "rack", version: "2.2.8", platform: "ruby", dependencies: [],
+                    source: Scint::Source::Rubygems.new(remotes: ["https://rubygems.org/"]), checksum: nil }],
+          dependencies: {},
+          platforms: ["ruby"],
+          sources: [Scint::Source::Rubygems.new(remotes: ["https://rubygems.org/"])],
+          bundler_version: nil,
+          ruby_version: nil,
+          checksums: nil,
+        )
+
+        resolved = [fake_spec(name: "rack", version: "2.2.8")]
+        adjusted = [fake_spec(name: "scint", version: Scint::VERSION, source: "scint (built-in)")] + resolved
+        plan = adjusted.map { |s| Scint::PlanEntry.new(spec: s, action: :skip, cached_path: nil, gem_path: nil) }
+
+        wrote_lock = false
+        wrote_runtime = false
+
+        Scint::Gemfile::Parser.stub(:parse, gemfile) do
+          Scint::Lockfile::Parser.stub(:parse, lockfile) do
+            install.stub(:resolve, resolved) do
+              install.stub(:adjust_meta_gems, adjusted) do
+                install.stub(:dedupe_resolved_specs, adjusted) do
+                  Scint::Installer::Planner.stub(:plan, plan) do
+                    install.stub(:write_lockfile, ->(*_args) { wrote_lock = true }) do
+                      install.stub(:write_runtime_config, ->(*_args) { wrote_runtime = true }) do
+                        old_stdout = $stdout
+                        $stdout = StringIO.new
+                        begin
+                          result = install.run
+                          assert_equal 0, result
+                        ensure
+                          $stdout = old_stdout
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+
+        assert_equal true, wrote_lock
+        assert_equal true, wrote_runtime
       end
     end
   end

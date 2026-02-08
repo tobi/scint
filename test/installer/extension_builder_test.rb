@@ -598,6 +598,32 @@ class ExtensionBuilderTest < Minitest::Test
     end
   end
 
+  def test_link_extensions_copies_shared_objects_into_gem_lib
+    with_tmpdir do |dir|
+      bundle_path = File.join(dir, ".bundle")
+      spec = fake_spec(name: "ox", version: "2.14.23")
+      ruby_dir = File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
+      gem_lib_dir = File.join(ruby_dir, "gems", "ox-2.14.23", "lib")
+      FileUtils.mkdir_p(gem_lib_dir)
+
+      cached_ext = File.join(dir, "cached_ext")
+      FileUtils.mkdir_p(cached_ext)
+      File.write(File.join(cached_ext, "ox.so"), "binary")
+
+      Scint::Installer::ExtensionBuilder.send(:link_extensions, cached_ext, ruby_dir, spec, "ruby-test")
+
+      ext_install_dir = File.join(
+        ruby_dir,
+        "extensions",
+        Scint::Platform.gem_arch,
+        Scint::Platform.extension_api_version,
+        "ox-2.14.23",
+      )
+      assert File.exist?(File.join(ext_install_dir, "ox.so"))
+      assert File.exist?(File.join(gem_lib_dir, "ox.so"))
+    end
+  end
+
   def test_spec_full_name_with_ruby_platform
     spec = fake_spec(name: "rack", version: "2.2.8", platform: "ruby")
     result = Scint::Installer::ExtensionBuilder.send(:spec_full_name, spec)

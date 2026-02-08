@@ -4,6 +4,7 @@ require_relative "setup"
 require_relative "../fs"
 require "base64"
 require "pathname"
+require "rbconfig"
 
 module Scint
   module Runtime
@@ -19,40 +20,41 @@ module Scint
       # lock_path: path to .bundle/scint.lock.marshal
       def exec(command, args, lock_path)
         original_env = ENV.to_hash
-        lock_data = Setup.load_lock(lock_path)
+        Setup.load_lock(lock_path)
+        command, args = rewrite_bundle_exec(command, args)
+        passthrough_bundle = bundle_command?(command)
 
         bundle_dir = File.dirname(lock_path)
         scint_lib_dir = File.expand_path("../..", __dir__)
         ruby_dir = File.join(bundle_dir, "ruby",
                              RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
 
-        # Collect all load paths from the runtime config
-        paths = []
-        lock_data.each_value do |info|
-          Array(info[:load_paths]).each do |p|
-            paths << p if File.directory?(p)
-          end
+        # Set RUBYLIB to make our Bundler shim loadable. We intentionally avoid
+        # injecting all gem load paths here because large apps can exceed exec
+        # argument/environment limits when RUBYLIB gets too long.
+        # Gem load paths are still activated via Scint::Runtime::Setup from
+        # `-rbundler/setup`.
+        unless passthrough_bundle
+          existing = ENV["RUBYLIB"]
+          rubylib = scint_lib_dir
+          rubylib = "#{rubylib}#{File::PATH_SEPARATOR}#{existing}" if existing && !existing.empty?
+          ENV["RUBYLIB"] = rubylib
         end
-
-        # Ensure our bundler shim wins over global bundler.
-        # Order matters: scint lib first, then gem load paths.
-        paths.unshift(scint_lib_dir)
-
-        # Set RUBYLIB so the child process inherits load paths.
-        existing = ENV["RUBYLIB"]
-        rubylib = paths.join(File::PATH_SEPARATOR)
-        rubylib = "#{rubylib}#{File::PATH_SEPARATOR}#{existing}" if existing && !existing.empty?
-        ENV["RUBYLIB"] = rubylib
 
         ENV["SCINT_RUNTIME_LOCK"] = lock_path
         ENV["GEM_HOME"] = ruby_dir
-        ENV["GEM_PATH"] = ruby_dir
+        ENV["GEM_PATH"] = build_gem_path(ruby_dir, original_env["GEM_PATH"])
         ENV["BUNDLE_PATH"] = bundle_dir
         ENV["BUNDLE_APP_CONFIG"] = bundle_dir
         ENV["BUNDLE_GEMFILE"] = find_gemfile(bundle_dir)
-        ENV["PATH"] = prepend_path(File.join(ruby_dir, "bin"), ENV["PATH"])
+        ruby_interpreter_bin = File.dirname(RbConfig.ruby)
+
+        # Keep interpreter/bin ahead of .bundle/bin so `#!/usr/bin/env ruby`
+        # resolves to the interpreter, not a gem-provided "ruby" executable.
         ENV["PATH"] = prepend_path(File.join(bundle_dir, "bin"), ENV["PATH"])
-        prepend_rubyopt("-rbundler/setup")
+        ENV["PATH"] = prepend_path(File.join(ruby_dir, "bin"), ENV["PATH"])
+        ENV["PATH"] = prepend_path(ruby_interpreter_bin, ENV["PATH"])
+        prepend_rubyopt("-rbundler/setup") unless passthrough_bundle
         export_original_env(original_env)
 
         command = resolve_command(command, bundle_dir, ruby_dir)
@@ -76,15 +78,38 @@ module Scint
 
       def prepend_path(prefix, current_path)
         return prefix unless current_path && !current_path.empty?
-        return current_path if current_path.split(File::PATH_SEPARATOR).include?(prefix)
-
-        "#{prefix}#{File::PATH_SEPARATOR}#{current_path}"
+        parts = current_path.split(File::PATH_SEPARATOR).reject(&:empty?)
+        parts.delete(prefix)
+        ([prefix] + parts).join(File::PATH_SEPARATOR)
       end
 
       def export_original_env(original_env)
         ENV["SCINT_ORIGINAL_ENV"] ||= Base64.strict_encode64(Marshal.dump(original_env))
       rescue StandardError
         # Non-fatal: shim can fallback to current ENV.
+      end
+
+      def build_gem_path(bundle_ruby_dir, original_gem_path)
+        paths = [bundle_ruby_dir]
+        if defined?(Gem) && Gem.respond_to?(:default_path)
+          paths.concat(Array(Gem.default_path))
+        end
+        if original_gem_path && !original_gem_path.empty?
+          paths.concat(original_gem_path.split(File::PATH_SEPARATOR))
+        end
+        paths.reject(&:empty?).uniq.join(File::PATH_SEPARATOR)
+      end
+
+      def bundle_command?(command)
+        File.basename(command.to_s) == "bundle"
+      end
+
+      def rewrite_bundle_exec(command, args)
+        return [command, args] unless bundle_command?(command)
+        return [command, args] unless args.first == "exec"
+        return [command, args] if args.length < 2
+
+        [args[1], args[2..] || []]
       end
 
       def resolve_command(command, bundle_dir, ruby_dir)
@@ -135,6 +160,7 @@ module Scint
       end
 
       private_class_method :find_gemfile, :prepend_rubyopt, :prepend_path, :export_original_env,
+                           :bundle_command?, :rewrite_bundle_exec, :build_gem_path,
                            :resolve_command, :find_gem_executable, :write_bundle_exec_wrapper
     end
   end

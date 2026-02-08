@@ -38,19 +38,21 @@ class RuntimeExecTest < Minitest::Test
         assert_equal ["ruby", "-v"], called
         scint_lib_dir = File.expand_path("../../lib", __dir__)
         assert_equal true, ENV["RUBYLIB"].start_with?(scint_lib_dir)
-        assert_includes ENV["RUBYLIB"], existing
         assert_includes ENV["RUBYLIB"], "already"
         assert_equal "-rbundler/setup", ENV["RUBYOPT"]
         assert_equal lock_path, ENV["SCINT_RUNTIME_LOCK"]
 
         ruby_dir = ruby_bundle_dir(bundle_dir)
         assert_equal ruby_dir, ENV["GEM_HOME"]
-        assert_equal ruby_dir, ENV["GEM_PATH"]
+        gem_path_parts = ENV["GEM_PATH"].split(File::PATH_SEPARATOR)
+        assert_equal ruby_dir, gem_path_parts.first
+        assert_includes gem_path_parts, ruby_dir
         assert_equal bundle_dir, ENV["BUNDLE_PATH"]
         assert_equal bundle_dir, ENV["BUNDLE_APP_CONFIG"]
         path_parts = ENV["PATH"].split(File::PATH_SEPARATOR)
-        assert_equal File.join(bundle_dir, "bin"), path_parts[0]
+        assert_equal File.dirname(RbConfig.ruby), path_parts[0]
         assert_equal File.join(ruby_dir, "bin"), path_parts[1]
+        assert_equal File.join(bundle_dir, "bin"), path_parts[2]
         assert_equal File.join(project, "Gemfile"), ENV["BUNDLE_GEMFILE"]
 
         original_env = Marshal.load(Base64.decode64(ENV["SCINT_ORIGINAL_ENV"]))
@@ -167,6 +169,125 @@ class RuntimeExecTest < Minitest::Test
       end
 
       assert_nil ENV["BUNDLE_GEMFILE"]
+    ensure
+      ENV.replace(old_env)
+    end
+  end
+
+  def test_exec_does_not_preload_shim_for_bundle_command
+    with_tmpdir do |dir|
+      project = File.join(dir, "app")
+      bundle_dir = File.join(project, ".bundle")
+      lock_path = File.join(bundle_dir, "scint.lock.marshal")
+      gem_lib = File.join(project, "vendor", "rack", "lib")
+      FileUtils.mkdir_p(bundle_dir)
+      FileUtils.mkdir_p(gem_lib)
+      File.write(File.join(project, "Gemfile"), "source 'https://rubygems.org'\n")
+      File.binwrite(lock_path, Marshal.dump({ "rack" => { load_paths: [gem_lib] } }))
+
+      old_env = ENV.to_hash
+      called = nil
+      rubylib_after = nil
+      rubyopt_after = nil
+      with_env("RUBYOPT", nil) do
+        with_env("RUBYLIB", nil) do
+          Kernel.stub(:exec, lambda { |*args|
+            called = args
+            rubylib_after = ENV["RUBYLIB"]
+            rubyopt_after = ENV["RUBYOPT"]
+            :exec_stubbed
+          }) do
+            result = Scint::Runtime::Exec.exec("bundle", ["-v"], lock_path)
+            assert_equal :exec_stubbed, result
+          end
+        end
+      end
+
+      assert_equal ["bundle", "-v"], called
+      scint_lib_dir = File.expand_path("../../lib", __dir__)
+      refute_includes rubylib_after.to_s, scint_lib_dir
+      assert_equal "", rubylib_after.to_s
+      refute_includes rubyopt_after.to_s, "-rbundler/setup"
+    ensure
+      ENV.replace(old_env)
+    end
+  end
+
+  def test_exec_rewrites_bundle_exec_to_direct_command
+    with_tmpdir do |dir|
+      project = File.join(dir, "app")
+      bundle_dir = File.join(project, ".bundle")
+      lock_path = File.join(bundle_dir, "scint.lock.marshal")
+      gem_lib = File.join(project, "vendor", "rack", "lib")
+      FileUtils.mkdir_p(bundle_dir)
+      FileUtils.mkdir_p(gem_lib)
+      File.write(File.join(project, "Gemfile"), "source 'https://rubygems.org'\n")
+      File.binwrite(lock_path, Marshal.dump({ "rack" => { load_paths: [gem_lib] } }))
+
+      old_env = ENV.to_hash
+      called = nil
+      rubylib_after = nil
+      rubyopt_after = nil
+      with_env("RUBYOPT", nil) do
+        with_env("RUBYLIB", nil) do
+          Kernel.stub(:exec, lambda { |*args|
+            called = args
+            rubylib_after = ENV["RUBYLIB"]
+            rubyopt_after = ENV["RUBYOPT"]
+            :exec_stubbed
+          }) do
+            result = Scint::Runtime::Exec.exec("bundle", ["exec", "rake", "-T"], lock_path)
+            assert_equal :exec_stubbed, result
+          end
+        end
+      end
+
+      assert_equal ["rake", "-T"], called
+      scint_lib_dir = File.expand_path("../../lib", __dir__)
+      assert_includes rubylib_after.to_s, scint_lib_dir
+      assert_includes rubyopt_after.to_s, "-rbundler/setup"
+    ensure
+      ENV.replace(old_env)
+    end
+  end
+
+  def test_exec_keeps_ruby_bin_before_bundle_bin_for_env_ruby_scripts
+    with_tmpdir do |dir|
+      project = File.join(dir, "app")
+      bundle_dir = File.join(project, ".bundle")
+      lock_path = File.join(bundle_dir, "scint.lock.marshal")
+      ruby_dir = ruby_bundle_dir(bundle_dir)
+      FileUtils.mkdir_p(File.join(bundle_dir, "bin"))
+      FileUtils.mkdir_p(File.join(ruby_dir, "bin"))
+      FileUtils.mkdir_p(File.join(project, "bin"))
+      File.write(File.join(project, "Gemfile"), "source 'https://rubygems.org'\n")
+      File.binwrite(lock_path, Marshal.dump({}))
+
+      # Simulate a gem-provided executable named "ruby" in .bundle/bin.
+      File.write(File.join(bundle_dir, "bin", "ruby"), "#!/usr/bin/env ruby\n")
+      FileUtils.chmod(0o755, File.join(bundle_dir, "bin", "ruby"))
+      File.write(File.join(project, "bin", "rails"), "#!/usr/bin/env ruby\nputs 'ok'\n")
+      FileUtils.chmod(0o755, File.join(project, "bin", "rails"))
+
+      old_env = ENV.to_hash
+      path_after = nil
+      called = nil
+      Dir.chdir(project) do
+        Kernel.stub(:exec, lambda { |*args|
+          called = args
+          path_after = ENV["PATH"]
+          :exec_stubbed
+        }) do
+          result = Scint::Runtime::Exec.exec("bin/rails", ["--help"], lock_path)
+          assert_equal :exec_stubbed, result
+        end
+      end
+
+      assert_equal ["bin/rails", "--help"], called
+      path_parts = path_after.split(File::PATH_SEPARATOR)
+      assert_equal File.dirname(RbConfig.ruby), path_parts[0]
+      assert_equal File.join(ruby_dir, "bin"), path_parts[1]
+      assert_equal File.join(bundle_dir, "bin"), path_parts[2]
     ensure
       ENV.replace(old_env)
     end
