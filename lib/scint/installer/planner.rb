@@ -2,6 +2,7 @@
 
 require_relative "extension_builder"
 require_relative "../platform"
+require_relative "../cache/validity"
 
 module Scint
   module Installer
@@ -12,16 +13,16 @@ module Scint
       # Compare resolved specs against what's already installed.
       # Returns an Array of PlanEntry with action set to one of:
       #   :skip      — already installed in bundle_path
-      #   :link      — extracted in global cache, just needs linking
+      #   :link      — cached in global cache, just needs linking
       #   :download  — needs downloading from remote
       #   :build_ext — has native extensions that need compiling
       #
       # Download entries are sorted largest-first so big gems start early,
       # keeping the pipeline saturated while small gems fill in gaps.
-      def plan(resolved_specs, bundle_path, cache_layout)
+      def plan(resolved_specs, bundle_path, cache_layout, telemetry: nil)
         ruby_dir = Platform.ruby_install_dir(bundle_path)
         entries = resolved_specs.map do |spec|
-          plan_one(spec, ruby_dir, cache_layout)
+          plan_one(spec, ruby_dir, cache_layout, telemetry: telemetry)
         end
 
         # Keep built-ins first, then downloads (big->small), then the rest.
@@ -32,7 +33,7 @@ module Scint
         builtins + downloads + rest
       end
 
-      def plan_one(spec, ruby_dir, cache_layout)
+      def plan_one(spec, ruby_dir, cache_layout, telemetry: nil)
         full = cache_layout.full_name(spec)
         gem_path = File.join(ruby_dir, "gems", full)
         spec_path = File.join(ruby_dir, "specifications", "#{full}.gemspec")
@@ -48,10 +49,12 @@ module Scint
 
         # Already installed? Require both gem files and specification.
         if Dir.exist?(gem_path) && File.exist?(spec_path)
-          if extension_link_missing?(spec, ruby_dir, cache_layout)
-            extracted = cache_layout.extracted_path(spec)
+          cache_source = Cache::Validity.source_path_for(spec, cache_layout, telemetry: telemetry)
+          if extension_link_missing?(spec, ruby_dir, cache_layout, cache_source)
             action = ExtensionBuilder.cached_build_available?(spec, cache_layout) ? :link : :build_ext
-            return PlanEntry.new(spec: spec, action: action, cached_path: extracted, gem_path: gem_path)
+            return PlanEntry.new(spec: spec, action: action, cached_path: cache_source, gem_path: gem_path) if cache_source
+
+            return PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: gem_path)
           end
 
           return PlanEntry.new(spec: spec, action: :skip, cached_path: nil, gem_path: gem_path)
@@ -64,28 +67,26 @@ module Scint
           return PlanEntry.new(spec: spec, action: action, cached_path: local_source, gem_path: gem_path)
         end
 
-        # Extracted in global cache?
-        extracted = cache_layout.extracted_path(spec)
-        if Dir.exist?(extracted)
-          action = needs_ext_build?(spec, cache_layout) ? :build_ext : :link
-          return PlanEntry.new(spec: spec, action: action, cached_path: extracted, gem_path: gem_path)
+        cache_source = Cache::Validity.source_path_for(spec, cache_layout, telemetry: telemetry)
+        if cache_source
+          action = needs_ext_build?(spec, cache_layout, cache_source) ? :build_ext : :link
+          return PlanEntry.new(spec: spec, action: action, cached_path: cache_source, gem_path: gem_path)
         end
 
         # Needs downloading
         PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: gem_path)
       end
 
-      def needs_ext_build?(spec, cache_layout)
-        extracted = cache_layout.extracted_path(spec)
-        return false unless ExtensionBuilder.needs_build?(spec, extracted)
+      def needs_ext_build?(spec, cache_layout, source_dir)
+        return false unless source_dir
+        return false unless ExtensionBuilder.needs_build?(spec, source_dir)
 
         !ExtensionBuilder.cached_build_available?(spec, cache_layout)
       end
 
-      def extension_link_missing?(spec, ruby_dir, cache_layout)
-        extracted = cache_layout.extracted_path(spec)
-        return false unless Dir.exist?(extracted)
-        return false unless ExtensionBuilder.needs_build?(spec, extracted)
+      def extension_link_missing?(spec, ruby_dir, cache_layout, source_dir)
+        return false unless source_dir
+        return false unless ExtensionBuilder.needs_build?(spec, source_dir)
 
         full = cache_layout.full_name(spec)
         ext_install_dir = File.join(
