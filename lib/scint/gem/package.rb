@@ -17,7 +17,9 @@ module Scint
           tar.each do |entry|
             if entry.full_name == "metadata.gz"
               gz = Zlib::GzipReader.new(StringIO.new(entry.read))
-              return ::Gem::Specification.from_yaml(gz.read)
+              yaml = gz.read
+              yaml.force_encoding("UTF-8") if yaml.encoding == Encoding::US_ASCII
+              return ::Gem::Specification.from_yaml(yaml)
             end
           end
         end
@@ -38,7 +40,9 @@ module Scint
             case entry.full_name
             when "metadata.gz"
               gz = Zlib::GzipReader.new(StringIO.new(entry.read))
-              gemspec = ::Gem::Specification.from_yaml(gz.read)
+              yaml = gz.read
+              yaml.force_encoding("UTF-8") if yaml.encoding == Encoding::US_ASCII
+              gemspec = ::Gem::Specification.from_yaml(yaml)
             when "data.tar.gz"
               # Write data.tar.gz to a temp file for extraction
               tmp = File.join(dest_dir, ".data.tar.gz.tmp")

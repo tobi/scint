@@ -1,0 +1,298 @@
+#!/usr/bin/env bash
+# scint-test-and-report — run scint install on a project, optionally run
+# setup/test scripts, and append structured timing results to a JSONL log.
+#
+# Run data is APPEND-ONLY. Never rm -rf /tmp/scint-runs — logs and timing
+# history accumulate across runs so you can compare cold vs warm, before
+# vs after, etc. Each invocation creates a new log file and appends one
+# JSONL line; nothing is overwritten.
+#
+# Cache behaviour:
+#   --clean-bundle   Remove .bundle before install (default: on)
+#   --no-clean-bundle Keep existing .bundle
+#   --clean-cache    Remove the global scint cache before install (default: off)
+#   --clean-all      Equivalent to --clean-bundle --clean-cache
+#
+# When the global cache is reused the run is labelled "warm"; when it is
+# rebuilt from scratch it is labelled "cold".
+#
+# Hooks (looked up one directory above the target):
+#   ../<basename>-setup.sh   — run before scint install
+#   ../<basename>-test.sh    — run after  scint install
+#
+# Outputs:
+#   Per-run log:   /tmp/scint-runs/<project>/<run-id>-{cold|warm}.log
+#   Timing JSONL:  /tmp/scint-runs/timings.jsonl   (appended)
+
+set -euo pipefail
+
+# ── defaults ─────────────────────────────────────────────────────
+CLEAN_BUNDLE=1
+CLEAN_CACHE=0
+TARGET=""
+usage() {
+  cat <<'USAGE'
+Usage: bin/scint-test-and-report [options] /path/to/project
+
+Options:
+  --clean-bundle       Remove .bundle before install (default)
+  --no-clean-bundle    Keep existing .bundle
+  --clean-cache        Remove global scint cache before install
+  --clean-all          Remove both .bundle and cache
+  -h, --help           Show this help
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --clean-bundle)   CLEAN_BUNDLE=1; shift ;;
+    --no-clean-bundle) CLEAN_BUNDLE=0; shift ;;
+    --clean-cache)    CLEAN_CACHE=1; shift ;;
+    --clean-all)      CLEAN_BUNDLE=1; CLEAN_CACHE=1; shift ;;
+
+    -h|--help)        usage; exit 0 ;;
+    -*)               echo "Unknown option: $1" >&2; usage; exit 2 ;;
+    *)
+      if [[ -n "$TARGET" ]]; then
+        echo "Unexpected argument: $1" >&2; usage; exit 2
+      fi
+      TARGET="$1"; shift ;;
+  esac
+done
+
+TARGET="${TARGET:-$PWD}"
+TARGET="$(cd "$TARGET" && pwd)"
+BASENAME="$(basename "$TARGET")"
+
+# ── locate repo / scint binary ───────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCINT_BIN="$REPO_ROOT/bin/scint"
+
+if [[ ! -x "$SCINT_BIN" ]]; then
+  echo "scint binary not found: $SCINT_BIN" >&2
+  exit 1
+fi
+
+# ── validate target ──────────────────────────────────────────────
+if [[ ! -f "$TARGET/Gemfile" ]]; then
+  echo "No Gemfile in $TARGET" >&2; exit 1
+fi
+if [[ ! -f "$TARGET/Gemfile.lock" ]]; then
+  echo "No Gemfile.lock in $TARGET" >&2; exit 1
+fi
+
+# ── deterministic paths ──────────────────────────────────────────
+RUNS_ROOT="/tmp/scint-runs"
+PROJECT_SLUG="$(echo "$BASENAME" | tr -c 'A-Za-z0-9._-' '_')"
+PROJECT_DIR="$RUNS_ROOT/$PROJECT_SLUG"
+XDG_CACHE="$PROJECT_DIR/cache"
+BUNDLE_PATH="$TARGET/.bundle"
+TIMINGS_FILE="$RUNS_ROOT/timings.jsonl"
+
+RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
+
+# Determine run kind (cold/warm) based on cache state
+if [[ "$CLEAN_CACHE" -eq 1 ]] || [[ ! -d "$XDG_CACHE" ]]; then
+  RUN_KIND="cold"
+else
+  RUN_KIND="warm"
+fi
+
+LOG_FILE="$PROJECT_DIR/${RUN_ID}-${RUN_KIND}.log"
+mkdir -p "$PROJECT_DIR"
+
+# ── hook scripts ─────────────────────────────────────────────────
+PARENT_DIR="$(dirname "$TARGET")"
+SETUP_SCRIPT="$PARENT_DIR/${BASENAME}-setup.sh"
+TEST_SCRIPT="$PARENT_DIR/${BASENAME}-test.sh"
+
+SETUP_EXISTS=0
+TEST_EXISTS=0
+[[ -f "$SETUP_SCRIPT" ]] && SETUP_EXISTS=1
+[[ -f "$TEST_SCRIPT" ]]  && TEST_EXISTS=1
+
+# ── print plan ───────────────────────────────────────────────────
+echo "╔══════════════════════════════════════════╗"
+echo "║  scint-test-and-report                   ║"
+echo "╚══════════════════════════════════════════╝"
+echo ""
+echo "  Target:          $TARGET"
+echo "  Basename:        $BASENAME"
+echo "  Run ID:          $RUN_ID"
+echo "  Run kind:        $RUN_KIND"
+echo "  Clean bundle:    $CLEAN_BUNDLE"
+echo "  Clean cache:     $CLEAN_CACHE"
+echo "  Cache dir:       $XDG_CACHE"
+echo "  Bundle path:     $BUNDLE_PATH"
+echo "  Log file:        $LOG_FILE"
+echo "  Timings file:    $TIMINGS_FILE"
+echo ""
+echo "  Setup script:    $(if [[ $SETUP_EXISTS -eq 1 ]]; then echo "$SETUP_SCRIPT ✓"; else echo "(not found)"; fi)"
+echo "  Test script:     $(if [[ $TEST_EXISTS -eq 1 ]]; then echo "$TEST_SCRIPT ✓"; else echo "(not found)"; fi)"
+echo ""
+echo "  scint binary:    $SCINT_BIN"
+echo "  Ruby:            $(ruby --version)"
+echo ""
+
+# ── apply clean flags ────────────────────────────────────────────
+if [[ "$CLEAN_CACHE" -eq 1 && -d "$XDG_CACHE" ]]; then
+  echo "Removing cache: $XDG_CACHE"
+  rm -rf "$XDG_CACHE"
+fi
+
+if [[ "$CLEAN_BUNDLE" -eq 1 && -d "$BUNDLE_PATH" ]]; then
+  echo "Removing .bundle: $BUNDLE_PATH"
+  rm -rf "$BUNDLE_PATH"
+fi
+
+SYSTEM_GEM_DIR="$(ruby -e 'puts Gem.default_dir')"
+
+# ── helper: run a phase, capture time ────────────────────────────
+phase_seconds=""
+phase_rc=""
+run_phase() {
+  local label="$1"; shift
+  echo ""
+  echo "── $label ──"
+  local start end_t
+  start=$(ruby -e 'puts Process.clock_gettime(Process::CLOCK_MONOTONIC)')
+  set +e
+  "$@" 2>&1 | tee -a "$LOG_FILE"
+  phase_rc=${PIPESTATUS[0]}
+  set -e
+  end_t=$(ruby -e 'puts Process.clock_gettime(Process::CLOCK_MONOTONIC)')
+  phase_seconds=$(ruby -e "puts (($end_t - $start)).round(3)")
+  echo "  → $label finished in ${phase_seconds}s (rc=$phase_rc)"
+}
+
+# ── 1. setup ─────────────────────────────────────────────────────
+setup_seconds="0"
+setup_rc="0"
+if [[ "$SETUP_EXISTS" -eq 1 ]]; then
+  chmod +x "$SETUP_SCRIPT" 2>/dev/null || true
+  run_phase "setup" bash -c "cd '$TARGET' && '$SETUP_SCRIPT'"
+  setup_seconds="$phase_seconds"
+  setup_rc="$phase_rc"
+  if [[ "$phase_rc" -ne 0 ]]; then
+    echo "Setup failed (rc=$phase_rc). Aborting." >&2
+    exit "$phase_rc"
+  fi
+fi
+
+# ── 2. scint install ────────────────────────────────────────────
+INSTALL_ARGS=("--path" "$BUNDLE_PATH")
+
+run_phase "scint install ($RUN_KIND)" \
+  env BUNDLE_PATH="$BUNDLE_PATH" \
+      GEM_HOME="$PROJECT_DIR/gem-home" \
+      GEM_PATH="$PROJECT_DIR/gem-home:$SYSTEM_GEM_DIR" \
+      XDG_CACHE_HOME="$XDG_CACHE" \
+  "$SCINT_BIN" install "${INSTALL_ARGS[@]}"
+
+install_seconds="$phase_seconds"
+install_rc="$phase_rc"
+
+# ── parse gem counts from scint output ───────────────────────────
+gems_total=0
+gems_compiled=0
+# Last summary line looks like: "N gems installed total (M updated, K compiled)."
+# or: "N gems installed total (M updated). ..."
+summary_line="$(grep -oE '[0-9]+ gems installed total[^)]*\)' "$LOG_FILE" | tail -1 || true)"
+if [[ -n "$summary_line" ]]; then
+  gems_total="$(echo "$summary_line" | grep -oE '^[0-9]+' || echo 0)"
+  gems_compiled="$(echo "$summary_line" | grep -oE '[0-9]+ compiled' | grep -oE '[0-9]+' || echo 0)"
+fi
+
+# ── 3. test ──────────────────────────────────────────────────────
+test_seconds="0"
+test_rc="0"
+if [[ "$TEST_EXISTS" -eq 1 && "$install_rc" -eq 0 ]]; then
+  chmod +x "$TEST_SCRIPT" 2>/dev/null || true
+  run_phase "test" \
+    env BUNDLE_PATH="$BUNDLE_PATH" \
+        GEM_HOME="$PROJECT_DIR/gem-home" \
+        GEM_PATH="$PROJECT_DIR/gem-home:$SYSTEM_GEM_DIR" \
+        XDG_CACHE_HOME="$XDG_CACHE" \
+    bash -c "cd '$TARGET' && '$SCINT_BIN' exec '$TEST_SCRIPT'"
+  test_seconds="$phase_seconds"
+  test_rc="$phase_rc"
+fi
+
+# ── summary ──────────────────────────────────────────────────────
+echo ""
+echo "╔══════════════════════════════════════════╗"
+echo "║  Summary                                 ║"
+echo "╚══════════════════════════════════════════╝"
+echo ""
+printf "  %-18s %10s  rc=%s\n" "Setup:" "${setup_seconds}s" "$setup_rc"
+printf "  %-18s %10s  rc=%s\n" "Install ($RUN_KIND):" "${install_seconds}s" "$install_rc"
+printf "  %-18s %10s  rc=%s\n" "Test:" "${test_seconds}s" "$test_rc"
+echo ""
+echo "  Gems installed:  $gems_total"
+echo "  Gems compiled:   $gems_compiled"
+echo "  Log:             $LOG_FILE"
+echo ""
+
+# ── append JSONL timing ──────────────────────────────────────────
+ruby -rjson -e '
+  record = {
+    "timestamp"       => Time.now.utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "project"         => ARGV[0],
+    "project_path"    => ARGV[1],
+    "run_id"          => ARGV[2],
+    "run_kind"        => ARGV[3],
+    "clean_bundle"    => ARGV[4] == "1",
+    "clean_cache"     => ARGV[5] == "1",
+    "ruby_version"    => RUBY_VERSION,
+    "ruby_platform"   => RUBY_PLATFORM,
+    "gems_total"      => ARGV[6].to_i,
+    "gems_compiled"   => ARGV[7].to_i,
+    "setup_seconds"   => ARGV[8].to_f,
+    "setup_rc"        => ARGV[9].to_i,
+    "install_seconds" => ARGV[10].to_f,
+    "install_rc"      => ARGV[11].to_i,
+    "test_seconds"    => ARGV[12].to_f,
+    "test_rc"         => ARGV[13].to_i,
+    "log_file"        => ARGV[14],
+  }
+  File.open(ARGV[15], "a") { |f| f.puts(JSON.generate(record)) }
+' "$BASENAME" "$TARGET" "$RUN_ID" "$RUN_KIND" \
+  "$CLEAN_BUNDLE" "$CLEAN_CACHE" \
+  "$gems_total" "$gems_compiled" \
+  "$setup_seconds" "$setup_rc" \
+  "$install_seconds" "$install_rc" \
+  "$test_seconds" "$test_rc" \
+  "$LOG_FILE" "$TIMINGS_FILE"
+
+echo ""
+echo "╔══════════════════════════════════════════╗"
+echo "║  Files                                   ║"
+echo "╚══════════════════════════════════════════╝"
+echo ""
+echo "  Run log (full output):"
+echo "    $LOG_FILE"
+echo "    cat $LOG_FILE"
+echo ""
+echo "  Timing history (all runs, JSONL):"
+echo "    $TIMINGS_FILE"
+echo "    tail -n1 $TIMINGS_FILE                     # latest run"
+echo "    tail -n1 $TIMINGS_FILE | ruby -rjson -e 'puts JSON.pretty_generate(JSON.parse(STDIN.read))'"
+echo "    cat $TIMINGS_FILE | ruby -rjson -e 'STDIN.each_line{|l| r=JSON.parse(l); printf \"%-12s %-6s %6.1fs  gems=%-3d compiled=%-3d  setup=%d install=%d test=%d\n\", r[\"project\"], r[\"run_kind\"], r[\"install_seconds\"], r[\"gems_total\"], r[\"gems_compiled\"], r[\"setup_rc\"], r[\"install_rc\"], r[\"test_rc\"]}'"
+echo ""
+echo "  Cache directory:"
+echo "    $XDG_CACHE"
+echo "    du -sh $XDG_CACHE/scint/*                  # cache breakdown"
+echo ""
+echo "  Bundle directory:"
+echo "    $BUNDLE_PATH"
+echo "    ls $BUNDLE_PATH/ruby/*/gems | head          # installed gems"
+echo ""
+
+# ── exit code ────────────────────────────────────────────────────
+if [[ "$install_rc" -ne 0 ]]; then
+  exit "$install_rc"
+elif [[ "$test_rc" -ne 0 && "$TEST_EXISTS" -eq 1 ]]; then
+  exit "$test_rc"
+fi
+exit 0
