@@ -118,7 +118,7 @@ module Scint
       def read_require_paths(spec_file)
         return ["lib"] unless File.exist?(spec_file)
 
-        gemspec = Gem::Specification.load(spec_file)
+        gemspec = SpecUtils.load_gemspec(spec_file)
         paths = Array(gemspec&.require_paths).reject(&:empty?)
         paths.empty? ? ["lib"] : paths
       rescue StandardError

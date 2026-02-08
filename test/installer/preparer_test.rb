@@ -365,10 +365,10 @@ class PreparerTest < Minitest::Test
       FileUtils.mkdir_p(extracted)
       File.write(File.join(extracted, "erroring.gemspec"), "# valid gemspec file")
 
-      # Stub Gem::Specification.load to raise StandardError (line 177-178)
-      Gem::Specification.stub(:load, ->(_path) { raise StandardError, "load failed" }) do
+      # Stub SpecUtils loader to raise StandardError (line 177-178)
+      Scint::SpecUtils.stub(:load_gemspec, ->(*_args, **_kwargs) { raise StandardError, "load failed" }) do
         result = preparer.send(:read_gemspec_from_extracted, extracted, spec)
-        assert_nil result, "should return nil when Gem::Specification.load raises StandardError"
+        assert_nil result, "should return nil when gemspec loader raises StandardError"
       end
     end
   end
@@ -390,10 +390,7 @@ class PreparerTest < Minitest::Test
       begin
         ENV.delete("VERSION")
         result = preparer.send(:read_gemspec_from_extracted, extracted, spec)
-        # Should set VERSION from spec and load successfully, or return nil — not crash
-        if result
-          assert_equal "kgio", result.name
-        end
+        assert_nil result
         assert_nil ENV["VERSION"], "VERSION env should be restored"
       ensure
         ENV["VERSION"] = old_version
@@ -430,6 +427,64 @@ class PreparerTest < Minitest::Test
       ensure
         ENV["VERSION"] = old_version
       end
+    end
+  end
+
+  def test_read_gemspec_from_extracted_handles_relative_readme
+    with_tmpdir do |dir|
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      pool = FakeDownloadPool.new
+      package = FakePackage.new(gemspec: {})
+      preparer = new_preparer(layout, pool: pool, package: package)
+      spec = fake_spec(name: "readme_demo", version: "1.0.0")
+
+      extracted = File.join(dir, "extracted")
+      FileUtils.mkdir_p(extracted)
+      File.write(File.join(extracted, "README"), "demo")
+      File.write(File.join(extracted, "readme_demo.gemspec"), <<~RUBY)
+        File.read("README")
+        Gem::Specification.new do |s|
+          s.name = "readme_demo"
+          s.version = "1.0.0"
+          s.summary = "demo"
+          s.authors = ["test"]
+        end
+      RUBY
+
+      result = preparer.send(:read_gemspec_from_extracted, extracted, spec)
+      refute_nil result
+      assert_equal "readme_demo", result.name
+      assert_equal Gem::Version.new("1.0.0"), result.version
+    end
+  end
+
+  def test_read_gemspec_from_extracted_uses_isolated_loader
+    with_tmpdir do |dir|
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      pool = FakeDownloadPool.new
+      package = FakePackage.new(gemspec: {})
+      preparer = new_preparer(layout, pool: pool, package: package)
+      spec = fake_spec(name: "isolated", version: "1.0.0")
+
+      extracted = File.join(dir, "extracted")
+      FileUtils.mkdir_p(extracted)
+      gemspec_path = File.join(extracted, "isolated.gemspec")
+      File.write(gemspec_path, "Gem::Specification.new do |s| s.name = 'isolated'; s.version = '1.0.0'; s.summary = 'x'; s.authors = ['a']; end\n")
+
+      fake = Gem::Specification.new do |s|
+        s.name = "isolated"
+        s.version = Gem::Version.new("1.0.0")
+        s.summary = "demo"
+        s.authors = ["test"]
+      end
+
+      calls = []
+      Scint::SpecUtils.stub(:load_gemspec, ->(path, isolate: false) { calls << [path, isolate]; fake }) do
+        result = preparer.send(:read_gemspec_from_extracted, extracted, spec)
+        assert_equal fake, result
+      end
+
+      assert_equal [[gemspec_path, true]], calls
     end
   end
 end

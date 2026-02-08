@@ -278,6 +278,7 @@ class CLIInstallTest < Minitest::Test
     assert_equal 5, limits[:download]
     assert_equal 5, limits[:extract]
     assert_equal 5, limits[:link]
+    assert_equal 8, limits[:git_clone]
     assert_equal 2, limits[:build_ext]
     assert_equal 1, limits[:binstub]
   end
@@ -291,6 +292,37 @@ class CLIInstallTest < Minitest::Test
     assert_equal 1, install.send(:compile_slots_for, 6)
     assert_equal 2, install.send(:compile_slots_for, 7)
     assert_equal 2, install.send(:compile_slots_for, 20)
+  end
+
+  def test_compile_slots_for_honors_env_override
+    install = Scint::CLI::Install.new([])
+
+    with_env("SCINT_COMPILE_CONCURRENCY", "1") do
+      assert_equal 1, install.send(:compile_slots_for, 20)
+    end
+
+    with_env("SCINT_COMPILE_CONCURRENCY", "99") do
+      assert_equal 4, install.send(:compile_slots_for, 4)
+    end
+  end
+
+  def test_git_slots_for_defaults_to_worker_count
+    install = Scint::CLI::Install.new([])
+
+    assert_equal 1, install.send(:git_slots_for, 1)
+    assert_equal 8, install.send(:git_slots_for, 8)
+  end
+
+  def test_git_slots_for_honors_env_override
+    install = Scint::CLI::Install.new([])
+
+    with_env("SCINT_GIT_CONCURRENCY", "1") do
+      assert_equal 1, install.send(:git_slots_for, 12)
+    end
+
+    with_env("SCINT_GIT_CONCURRENCY", "99") do
+      assert_equal 6, install.send(:git_slots_for, 6)
+    end
   end
 
   def test_enqueue_install_dag_download_entry_schedules_build_after_extract
@@ -363,6 +395,32 @@ class CLIInstallTest < Minitest::Test
 
       install = Scint::CLI::Install.new([])
       assert_equal ["lib/concurrent-ruby"], install.send(:read_require_paths, spec_file)
+    end
+  end
+
+  def test_read_gemspec_from_extracted_uses_isolated_loader
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      extracted = File.join(dir, "extracted")
+      FileUtils.mkdir_p(extracted)
+      gemspec_path = File.join(extracted, "demo.gemspec")
+      File.write(gemspec_path, "Gem::Specification.new do |s| s.name = 'demo'; s.version = '1.0.0'; s.summary = 'x'; s.authors = ['a']; end\n")
+
+      fake_spec_obj = Gem::Specification.new do |s|
+        s.name = "demo"
+        s.version = Gem::Version.new("1.0.0")
+        s.summary = "demo"
+        s.authors = ["test"]
+      end
+
+      calls = []
+      spec = fake_spec(name: "demo", version: "1.0.0")
+      Scint::SpecUtils.stub(:load_gemspec, ->(path, isolate: false) { calls << [path, isolate]; fake_spec_obj }) do
+        result = install.send(:read_gemspec_from_extracted, extracted, spec)
+        assert_equal fake_spec_obj, result
+      end
+
+      assert_equal [[gemspec_path, true]], calls
     end
   end
 
@@ -1739,10 +1797,84 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
+  def test_find_gemspec_loads_relative_require_gemspec
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      FileUtils.mkdir_p(File.join(dir, "lib", "dalli"))
+      File.write(File.join(dir, "lib", "dalli", "version.rb"), <<~RUBY)
+        module Dalli
+          VERSION = "3.2.0"
+        end
+      RUBY
+      File.write(File.join(dir, "dalli.gemspec"), <<~RUBY)
+        require "./lib/dalli/version"
+        Gem::Specification.new do |s|
+          s.name = "dalli"
+          s.version = Dalli::VERSION
+          s.summary = "test"
+          s.authors = ["test"]
+        end
+      RUBY
+
+      result = install.send(:find_gemspec, dir, "dalli")
+      assert_equal "dalli", result.name
+      assert_equal Gem::Version.new("3.2.0"), result.version
+    end
+  end
+
+  def test_find_gemspec_uses_isolated_loader
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      gemspec_path = File.join(dir, "demo.gemspec")
+      File.write(gemspec_path, "Gem::Specification.new do |s| s.name = 'demo'; s.version = '1.0.0'; s.summary = 'x'; s.authors = ['a']; end\n")
+
+      fake = Gem::Specification.new do |s|
+        s.name = "demo"
+        s.version = Gem::Version.new("1.0.0")
+        s.summary = "demo"
+        s.authors = ["test"]
+      end
+
+      calls = []
+      Scint::SpecUtils.stub(:load_gemspec, ->(path, isolate: false) { calls << [path, isolate]; fake }) do
+        result = install.send(:find_gemspec, dir, "demo")
+        assert_equal fake, result
+      end
+
+      assert calls.any? { |path, isolate| path == gemspec_path && isolate == true }
+    end
+  end
+
   def test_find_gemspec_returns_nil_when_no_gemspec
     with_tmpdir do |dir|
       install = Scint::CLI::Install.new([])
       assert_nil install.send(:find_gemspec, dir, "missing")
+    end
+  end
+
+  def test_load_gemspec_from_worktree_uses_isolated_loader
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      worktree = File.join(dir, "worktree")
+      FileUtils.mkdir_p(worktree)
+      rel = "demo.gemspec"
+      absolute = File.join(worktree, rel)
+      File.write(absolute, "Gem::Specification.new do |s| s.name = 'demo'; s.version = '1.0.0'; s.summary = 'x'; s.authors = ['a']; end\n")
+
+      fake = Gem::Specification.new do |s|
+        s.name = "demo"
+        s.version = Gem::Version.new("1.0.0")
+        s.summary = "demo"
+        s.authors = ["test"]
+      end
+
+      calls = []
+      Scint::SpecUtils.stub(:load_gemspec, ->(path, isolate: false) { calls << [path, isolate]; fake }) do
+        result = install.send(:load_gemspec_from_worktree, worktree, rel)
+        assert_equal fake, result
+      end
+
+      assert_equal [[absolute, true]], calls
     end
   end
 
@@ -1781,6 +1913,34 @@ class CLIInstallTest < Minitest::Test
       dep = gemspec.dependencies.find { |d| d.name == "dep" }
       refute_nil dep
       assert dep.requirement.satisfied_by?(Gem::Version.new("2.1.0"))
+    end
+  end
+
+  def test_find_git_gemspec_loads_relative_readme
+    with_tmpdir do |dir|
+      repo = init_git_repo(
+        dir,
+        "README" => "demo",
+        "demo.gemspec" => <<~RUBY,
+          File.read("README")
+          Gem::Specification.new do |s|
+            s.name = "demo"
+            s.version = "1.2.3"
+            s.summary = "demo"
+            s.authors = ["test"]
+          end
+        RUBY
+      )
+      commit = git_commit_hash(repo)
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      source = Scint::Source::Git.new(uri: repo, revision: commit)
+      install.send(:clone_git_source, source, cache)
+
+      bare_repo = cache.git_path(repo)
+      gemspec = install.send(:find_git_gemspec, bare_repo, commit, "demo")
+      assert_equal "demo", gemspec.name
+      assert_equal Gem::Version.new("1.2.3"), gemspec.version
     end
   end
 

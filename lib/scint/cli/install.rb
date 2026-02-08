@@ -71,9 +71,10 @@ module Scint
         bundle_path = @path || ENV["BUNDLER_PATH"] || ".bundle"
         bundle_display = display_bundle_path(bundle_path)
         bundle_path = File.expand_path(bundle_path)
-        worker_count = @jobs || [Platform.cpu_count * 2, 50].min
+        worker_count = [(@jobs || [Platform.cpu_count * 2, 50].min).to_i, 1].max
         compile_slots = compile_slots_for(worker_count)
-        per_type_limits = install_task_limits(worker_count, compile_slots)
+        git_slots = git_slots_for(worker_count)
+        per_type_limits = install_task_limits(worker_count, compile_slots, git_slots)
         $stdout.puts "#{GREEN}💎#{RESET} Scintellating Gemfile into #{BOLD}#{bundle_display}#{RESET} #{DIM}(scint #{VERSION}, ruby #{RUBY_VERSION})#{RESET}"
         $stdout.puts
 
@@ -451,7 +452,7 @@ module Scint
         candidates.each do |gs|
           next unless File.exist?(gs)
           begin
-            spec = Gem::Specification.load(gs)
+            spec = SpecUtils.load_gemspec(gs, isolate: true)
             return spec if spec
           rescue SystemExit, StandardError
             nil
@@ -719,9 +720,7 @@ module Scint
         absolute_gemspec = File.join(worktree, gemspec_path)
         return nil unless File.exist?(absolute_gemspec)
 
-        Dir.chdir(File.dirname(absolute_gemspec)) do
-          Gem::Specification.load(absolute_gemspec)
-        end
+        SpecUtils.load_gemspec(absolute_gemspec, isolate: true)
       rescue SystemExit, StandardError
         nil
       end
@@ -1184,26 +1183,50 @@ module Scint
       def compile_slots_for(worker_count)
         # Keep compile parallelism conservative: at most 2 native builds.
         # Small pools stay single-lane; larger pools can run two builds.
-        workers = worker_count.to_i
+        workers = [worker_count.to_i, 1].max
+        override = positive_integer_env("SCINT_COMPILE_CONCURRENCY")
+        return [override, workers].min if override
+
         return 1 if workers <= 6
 
         2
       end
 
-      def install_task_limits(worker_count, compile_slots)
+      def git_slots_for(worker_count)
+        workers = [worker_count.to_i, 1].max
+        override = positive_integer_env("SCINT_GIT_CONCURRENCY")
+        slots = override || workers
+        [[slots, workers].min, 1].max
+      end
+
+      def install_task_limits(worker_count, compile_slots, git_slots = worker_count)
         # Leave headroom for compile and binstub lanes so link/download
         # throughput cannot fully starve them.
-        io_cpu_limit = [worker_count - compile_slots - 1, 1].max
+        workers = [worker_count.to_i, 1].max
+        io_cpu_limit = [workers - compile_slots - 1, 1].max
         # Keep download in-flight set bounded so fail-fast exits quickly on
         # auth/source errors instead of queueing a large burst.
         download_limit = [io_cpu_limit, 8].min
+        git_limit = [[git_slots.to_i, 1].max, workers].min
         {
           download: download_limit,
           extract: io_cpu_limit,
           link: io_cpu_limit,
+          git_clone: git_limit,
           build_ext: compile_slots,
           binstub: 1,
         }
+      end
+
+      def positive_integer_env(key)
+        raw = ENV[key]
+        return nil if raw.nil? || raw.empty?
+
+        value = Integer(raw, exception: false)
+        return nil unless value
+        return nil if value <= 0
+
+        value
       end
 
       def display_bundle_path(path)
@@ -1577,7 +1600,7 @@ module Scint
         old_version = ENV["VERSION"]
         begin
           ENV["VERSION"] = version if version && !ENV["VERSION"]
-          Gem::Specification.load(path)
+          SpecUtils.load_gemspec(path, isolate: true)
         rescue SystemExit, StandardError
           nil
         ensure
@@ -2187,7 +2210,7 @@ module Scint
       def read_require_paths(spec_file)
         return ["lib"] unless File.exist?(spec_file)
 
-        gemspec = Gem::Specification.load(spec_file)
+        gemspec = SpecUtils.load_gemspec(spec_file)
         paths = Array(gemspec&.require_paths).reject(&:empty?)
         paths.empty? ? ["lib"] : paths
       rescue SystemExit, StandardError

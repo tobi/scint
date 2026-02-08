@@ -226,7 +226,7 @@ module Scint
           old_version = ENV["VERSION"]
           begin
             ENV["VERSION"] = version if version && !ENV["VERSION"]
-            ::Gem::Specification.load(candidates.first)
+            SpecUtils.load_gemspec(candidates.first, isolate: true)
           rescue SystemExit, StandardError
             nil
           ensure
