@@ -270,11 +270,11 @@ class ExtensionBuilderTest < Minitest::Test
       end
 
       assert_equal 3, calls.size
-      assert_equal ["make", "-j5", "-C", build_dir], calls[1][:cmd]
+      assert_equal ["make", "-j5", "-C", ext_dir], calls[1][:cmd]
     end
   end
 
-  def test_compile_extconf_runs_from_cloned_build_tree
+  def test_compile_extconf_runs_from_staged_extension_dir
     with_tmpdir do |dir|
       ext_dir = File.join(dir, "ext")
       build_dir = File.join(dir, "build")
@@ -298,12 +298,12 @@ class ExtensionBuilderTest < Minitest::Test
         )
       end
 
-      assert File.exist?(File.join(build_dir, "extconf.rb"))
-      assert_equal File.join(build_dir, "extconf.rb"), calls[0][1]
+      assert File.exist?(File.join(ext_dir, "extconf.rb"))
+      assert_equal File.join(ext_dir, "extconf.rb"), calls[0][1]
     end
   end
 
-  def test_compile_extconf_clones_full_gem_tree_for_nested_ext
+  def test_compile_extconf_runs_nested_ext_in_place
     with_tmpdir do |dir|
       gem_dir = File.join(dir, "debug-gem")
       ext_dir = File.join(gem_dir, "ext", "debug")
@@ -327,11 +327,10 @@ class ExtensionBuilderTest < Minitest::Test
         )
       end
 
-      mirrored_ext = File.join(build_dir, "ext", "debug")
-      assert File.exist?(File.join(build_dir, "lib", "debug", "version.rb"))
-      assert_equal File.join(mirrored_ext, "extconf.rb"), calls[0][:cmd][1]
-      assert_equal mirrored_ext, calls[0][:opts][:chdir]
-      assert_equal ["make", "-j2", "-C", mirrored_ext], calls[1][:cmd]
+      assert File.exist?(File.join(gem_dir, "lib", "debug", "version.rb"))
+      assert_equal File.join(ext_dir, "extconf.rb"), calls[0][:cmd][1]
+      assert_equal ext_dir, calls[0][:opts][:chdir]
+      assert_equal ["make", "-j2", "-C", ext_dir], calls[1][:cmd]
     end
   end
 
@@ -413,6 +412,32 @@ class ExtensionBuilderTest < Minitest::Test
 
       assert_equal 2, build_dirs.size
       assert_equal 2, build_dirs.uniq.size
+    end
+  end
+
+  def test_build_stages_full_source_tree_for_extconf_relative_paths
+    with_tmpdir do |dir|
+      bundle_path = File.join(dir, ".bundle")
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      spec = fake_spec(name: "brotli-like", version: "1.0.0")
+      extracted = File.join(dir, "src")
+      ext_dir = File.join(extracted, "ext", "brotli")
+      vendor_dir = File.join(extracted, "vendor", "brotli", "c", "enc")
+      FileUtils.mkdir_p(ext_dir)
+      FileUtils.mkdir_p(vendor_dir)
+      File.write(File.join(ext_dir, "extconf.rb"), "")
+      File.write(File.join(vendor_dir, "README"), "ok")
+      prepared = Prepared.new(spec: spec, extracted_path: extracted, gemspec: nil, from_cache: false)
+
+      staged_vendor_checks = []
+      Scint::Installer::ExtensionBuilder.stub(:compile_extension, lambda { |ext, _build, install, gem_root, *_rest|
+        staged_vendor_checks << File.exist?(File.join(gem_root, "vendor", "brotli", "c", "enc", "README"))
+        File.write(File.join(install, "brotli_like.bundle"), "binary")
+      }) do
+        assert Scint::Installer::ExtensionBuilder.build(prepared, bundle_path, layout, abi_key: "ruby-test-arch")
+      end
+
+      assert_equal [true], staged_vendor_checks
     end
   end
 
