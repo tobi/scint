@@ -117,13 +117,13 @@ module Scint
 
       def git_path(uri)
         slug = git_slug(uri)
-        File.join(git_dir, "repos", slug)
+        File.join(git_dir, slug)
       end
 
       def git_checkout_path(uri, revision)
         slug = git_slug(uri)
         rev = revision.to_s.gsub(/[^0-9A-Za-z._-]/, "_")
-        File.join(git_dir, "checkouts", slug, rev)
+        File.join(git_dir, slug, "checkouts", rev)
       end
 
       # -- Helpers -------------------------------------------------------------
