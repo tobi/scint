@@ -68,7 +68,7 @@ class CacheValidityTest < Minitest::Test
     end
   end
 
-  def test_source_path_for_uses_legacy_extracted_with_telemetry
+  def test_source_path_for_ignores_legacy_extracted_by_default
     with_tmpdir do |dir|
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = fake_spec(name: "demo", version: "1.0.0", platform: "ruby", source: "https://rubygems.org")
@@ -78,8 +78,8 @@ class CacheValidityTest < Minitest::Test
 
       telemetry = Scint::Cache::Telemetry.new
       path = Scint::Cache::Validity.source_path_for(spec, layout, telemetry: telemetry)
-      assert_equal legacy, path
-      assert_equal 1, telemetry.counts["cache.legacy.extracted"]
+      assert_nil path
+      assert_equal({}, telemetry.counts)
     end
   end
 end

@@ -43,17 +43,17 @@ class CLIInstallTest < Minitest::Test
         s.version = Gem::Version.new("2.2.8")
         s.authors = ["a"]
         s.summary = "rack"
+        s.require_paths = ["lib"]
       end
-      FileUtils.mkdir_p(File.dirname(cache.spec_cache_path(spec)))
-      File.binwrite(cache.spec_cache_path(spec), Marshal.dump(cached))
+      FileUtils.mkdir_p(File.dirname(cache.cached_spec_path(spec)))
+      File.binwrite(cache.cached_spec_path(spec), Marshal.dump(cached))
 
-      extracted = cache.extracted_path(spec)
-      FileUtils.mkdir_p(extracted)
-      FileUtils.mkdir_p(File.join(extracted, "lib"))
-      File.write(File.join(extracted, "lib", "rack.rb"), "")
-      File.write(File.join(extracted, "rack.gemspec"), "raise 'should not evaluate'\n")
+      cached_dir = cache.cached_path(spec)
+      FileUtils.mkdir_p(File.join(cached_dir, "lib"))
+      File.write(File.join(cached_dir, "lib", "rack.rb"), "")
+      File.write(File.join(cached_dir, "rack.gemspec"), "raise 'should not evaluate'\n")
 
-      gemspec = install.send(:load_gemspec, extracted, spec, cache)
+      gemspec = install.send(:load_gemspec, cached_dir, spec, cache)
       assert_equal "rack", gemspec.name
       assert_equal Gem::Version.new("2.2.8"), gemspec.version
     end
@@ -72,21 +72,21 @@ class CLIInstallTest < Minitest::Test
         s.summary = "rack"
         s.require_paths = ["lib"]
       end
-      FileUtils.mkdir_p(File.dirname(cache.spec_cache_path(spec)))
-      File.binwrite(cache.spec_cache_path(spec), Marshal.dump(cached))
+      FileUtils.mkdir_p(File.dirname(cache.cached_spec_path(spec)))
+      File.binwrite(cache.cached_spec_path(spec), Marshal.dump(cached))
 
-      extracted = cache.extracted_path(spec)
-      FileUtils.mkdir_p(File.join(extracted, "lib"))
-      File.write(File.join(extracted, "lib", "rack.rb"), "")
+      cached_dir = cache.cached_path(spec)
+      FileUtils.mkdir_p(File.join(cached_dir, "lib"))
+      File.write(File.join(cached_dir, "lib", "rack.rb"), "")
 
       reads = 0
       original = File.method(:binread)
       File.stub(:binread, lambda { |path, *args|
-        reads += 1 if path == cache.spec_cache_path(spec)
+        reads += 1 if path == cache.cached_spec_path(spec)
         original.call(path, *args)
       }) do
-        first = install.send(:load_gemspec, extracted, spec, cache)
-        second = install.send(:load_gemspec, extracted, spec, cache)
+        first = install.send(:load_gemspec, cached_dir, spec, cache)
+        second = install.send(:load_gemspec, cached_dir, spec, cache)
         assert_equal "rack", first.name
         assert_equal "rack", second.name
       end
@@ -105,7 +105,7 @@ class CLIInstallTest < Minitest::Test
       FileUtils.mkdir_p(File.dirname(inbound))
       create_fake_gem(inbound, name: "demo", version: "1.0.0", files: { "lib/demo.rb" => "module Demo; end\n" })
 
-      gemspec = install.send(:load_gemspec, cache.extracted_path(spec), spec, cache)
+      gemspec = install.send(:load_gemspec, cache.cached_path(spec), spec, cache)
       assert_equal "demo", gemspec.name
       assert_equal Gem::Version.new("1.0.0"), gemspec.version
     end
@@ -117,8 +117,8 @@ class CLIInstallTest < Minitest::Test
       install = Scint::CLI::Install.new([])
       spec = fake_spec(name: "concurrent-ruby", version: "1.3.6")
 
-      extracted = cache.extracted_path(spec)
-      FileUtils.mkdir_p(File.join(extracted, "lib", "concurrent-ruby"))
+      cached_dir = cache.cached_path(spec)
+      FileUtils.mkdir_p(File.join(cached_dir, "lib", "concurrent-ruby"))
 
       stale = Gem::Specification.new do |s|
         s.name = "concurrent-ruby"
@@ -127,8 +127,8 @@ class CLIInstallTest < Minitest::Test
         s.summary = "stale"
         s.require_paths = ["lib"]
       end
-      FileUtils.mkdir_p(File.dirname(cache.spec_cache_path(spec)))
-      File.binwrite(cache.spec_cache_path(spec), Marshal.dump(stale))
+      FileUtils.mkdir_p(File.dirname(cache.cached_spec_path(spec)))
+      File.binwrite(cache.cached_spec_path(spec), Marshal.dump(stale))
 
       inbound = cache.inbound_path(spec)
       FileUtils.mkdir_p(File.dirname(inbound))
@@ -140,10 +140,10 @@ class CLIInstallTest < Minitest::Test
         files: { "lib/concurrent-ruby/concurrent.rb" => "module Concurrent; end\n" },
       )
 
-      gemspec = install.send(:load_gemspec, extracted, spec, cache)
+      gemspec = install.send(:load_gemspec, cached_dir, spec, cache)
       assert_equal ["lib/concurrent-ruby"], gemspec.require_paths
 
-      refreshed = install.send(:load_cached_gemspec, spec, cache, extracted)
+      refreshed = install.send(:load_cached_gemspec, spec, cache, cached_dir)
       assert_equal ["lib/concurrent-ruby"], refreshed.require_paths
     end
   end
@@ -171,16 +171,16 @@ class CLIInstallTest < Minitest::Test
       link_a = fake_spec(name: "rack", version: "2.2.8")
       link_b = fake_spec(name: "i18n", version: "1.14.7")
 
-      FileUtils.mkdir_p(cache.extracted_path(link_a))
-      FileUtils.mkdir_p(cache.extracted_path(link_b))
+      FileUtils.mkdir_p(cache.cached_path(link_a))
+      FileUtils.mkdir_p(cache.cached_path(link_b))
 
       entries = []
       31.times do |i|
         spec = fake_spec(name: "skip-#{i}", version: "1.0.0")
         entries << Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
       end
-      entries << Scint::PlanEntry.new(spec: link_a, action: :link, cached_path: cache.extracted_path(link_a), gem_path: nil)
-      entries << Scint::PlanEntry.new(spec: link_b, action: :build_ext, cached_path: cache.extracted_path(link_b), gem_path: nil)
+      entries << Scint::PlanEntry.new(spec: link_a, action: :link, cached_path: cache.cached_path(link_a), gem_path: nil)
+      entries << Scint::PlanEntry.new(spec: link_b, action: :build_ext, cached_path: cache.cached_path(link_b), gem_path: nil)
 
       calls = []
       Scint::FS.stub(:clone_many_trees, lambda { |sources, dst_parent, chunk_size: 64|
@@ -191,7 +191,7 @@ class CLIInstallTest < Minitest::Test
       end
 
       assert_equal 1, calls.length
-      assert_equal [cache.extracted_path(link_a), cache.extracted_path(link_b)].sort, calls.first[:sources].sort
+      assert_equal [cache.cached_path(link_a), cache.cached_path(link_b)].sort, calls.first[:sources].sort
       assert_equal File.join(bundle_path, "ruby", "#{RUBY_VERSION.split(".")[0, 2].join(".")}.0", "gems"), calls.first[:dst_parent]
     end
   end
@@ -208,11 +208,11 @@ class CLIInstallTest < Minitest::Test
       native_entry = Scint::PlanEntry.new(spec: native, action: :build_ext, cached_path: nil, gem_path: nil)
       java_entry = Scint::PlanEntry.new(spec: java_only, action: :build_ext, cached_path: nil, gem_path: nil)
 
-      ext_dir = File.join(cache.extracted_path(native), "ext", "ffi_c")
+      ext_dir = File.join(cache.cached_path(native), "ext", "ffi_c")
       FileUtils.mkdir_p(ext_dir)
       File.write(File.join(ext_dir, "extconf.rb"), "")
 
-      java_ext = File.join(cache.extracted_path(java_only), "ext", "concurrent-ruby")
+      java_ext = File.join(cache.cached_path(java_only), "ext", "concurrent-ruby")
       FileUtils.mkdir_p(java_ext)
       File.write(File.join(java_ext, "ConcurrentRubyService.java"), "")
 
@@ -239,15 +239,15 @@ class CLIInstallTest < Minitest::Test
         dependencies: [{ name: "dep", version_reqs: [">= 0"] }],
       )
 
-      dep_ext = File.join(cache.extracted_path(dep_spec), "lib")
-      main_ext = File.join(cache.extracted_path(main_spec), "ext", "main")
+      dep_ext = File.join(cache.cached_path(dep_spec), "lib")
+      main_ext = File.join(cache.cached_path(main_spec), "ext", "main")
       FileUtils.mkdir_p(dep_ext)
       FileUtils.mkdir_p(main_ext)
       File.write(File.join(main_ext, "extconf.rb"), "")
 
       plan = [
-        Scint::PlanEntry.new(spec: dep_spec, action: :link, cached_path: cache.extracted_path(dep_spec), gem_path: nil),
-        Scint::PlanEntry.new(spec: main_spec, action: :build_ext, cached_path: cache.extracted_path(main_spec), gem_path: nil),
+        Scint::PlanEntry.new(spec: dep_spec, action: :link, cached_path: cache.cached_path(dep_spec), gem_path: nil),
+        Scint::PlanEntry.new(spec: main_spec, action: :build_ext, cached_path: cache.cached_path(main_spec), gem_path: nil),
       ]
 
       compiled = install.send(:enqueue_install_dag, scheduler, plan, cache, bundle_path)
@@ -309,7 +309,7 @@ class CLIInstallTest < Minitest::Test
       refute_nil extract_job
       refute_nil extract_job[:follow_up]
 
-      ext_dir = File.join(cache.extracted_path(spec), "ext", "ffi_c")
+      ext_dir = File.join(cache.assembling_path(spec), "ext", "ffi_c")
       FileUtils.mkdir_p(ext_dir)
       File.write(File.join(ext_dir, "extconf.rb"), "")
 
@@ -457,12 +457,12 @@ class CLIInstallTest < Minitest::Test
       nokogiri = fake_spec(name: "nokogiri", version: "1.18.10", platform: "arm64-darwin", has_extensions: true)
       plan = [Scint::PlanEntry.new(spec: nokogiri, action: :download, cached_path: nil, gem_path: nil)]
 
-      extracted = cache.extracted_path(nokogiri)
-      ext_dir = File.join(extracted, "ext", "nokogiri")
+      assembling = cache.assembling_path(nokogiri)
+      ext_dir = File.join(assembling, "ext", "nokogiri")
       FileUtils.mkdir_p(ext_dir)
       File.write(File.join(ext_dir, "extconf.rb"), "")
       ruby_minor = RUBY_VERSION[/\d+\.\d+/]
-      prebuilt_dir = File.join(extracted, "lib", "nokogiri", ruby_minor)
+      prebuilt_dir = File.join(assembling, "lib", "nokogiri", ruby_minor)
       FileUtils.mkdir_p(prebuilt_dir)
       File.write(File.join(prebuilt_dir, "nokogiri.bundle"), "")
 
@@ -521,9 +521,30 @@ class CLIInstallTest < Minitest::Test
       install.stub(:preferred_platforms_for_locked_specs, {}) do
         resolved = install.send(:lockfile_to_resolved, lockfile)
         spec = resolved.first
-        ext_src = File.join(cache.extracted_path(spec), "ext", "ffi_c")
+        cached_dir = cache.cached_path(spec)
+        ext_src = File.join(cached_dir, "ext", "ffi_c")
         FileUtils.mkdir_p(ext_src)
         File.write(File.join(ext_src, "extconf.rb"), "")
+        FileUtils.mkdir_p(File.join(cached_dir, "lib"))
+        File.write(File.join(cached_dir, "lib", "ffi.rb"), "")
+
+        gemspec = Gem::Specification.new do |s|
+          s.name = "ffi"
+          s.version = Gem::Version.new("1.17.0")
+          s.summary = "ffi"
+          s.require_paths = ["lib"]
+        end
+        FileUtils.mkdir_p(File.dirname(cache.cached_spec_path(spec)))
+        File.binwrite(cache.cached_spec_path(spec), Marshal.dump(gemspec))
+        manifest = Scint::Cache::Manifest.build(
+          spec: spec,
+          gem_dir: cached_dir,
+          abi_key: Scint::Platform.abi_key,
+          source: { "type" => "rubygems", "uri" => "https://rubygems.org" },
+          extensions: true,
+        )
+        Scint::Cache::Manifest.write(cache.cached_manifest_path(spec), manifest)
+
         FileUtils.mkdir_p(cache.ext_path(spec))
         File.write(File.join(cache.ext_path(spec), "gem.build_complete"), "")
 
@@ -555,9 +576,30 @@ class CLIInstallTest < Minitest::Test
         spec = resolved.first
         assert_equal "arm64-darwin", spec.platform
 
-        ext_src = File.join(cache.extracted_path(spec), "ext", "ffi_c")
+        cached_dir = cache.cached_path(spec)
+        ext_src = File.join(cached_dir, "ext", "ffi_c")
         FileUtils.mkdir_p(ext_src)
         File.write(File.join(ext_src, "extconf.rb"), "")
+        FileUtils.mkdir_p(File.join(cached_dir, "lib"))
+        File.write(File.join(cached_dir, "lib", "ffi.rb"), "")
+
+        gemspec = Gem::Specification.new do |s|
+          s.name = "ffi"
+          s.version = Gem::Version.new("1.17.0")
+          s.summary = "ffi"
+          s.require_paths = ["lib"]
+        end
+        FileUtils.mkdir_p(File.dirname(cache.cached_spec_path(spec)))
+        File.binwrite(cache.cached_spec_path(spec), Marshal.dump(gemspec))
+        manifest = Scint::Cache::Manifest.build(
+          spec: spec,
+          gem_dir: cached_dir,
+          abi_key: Scint::Platform.abi_key,
+          source: { "type" => "rubygems", "uri" => "https://rubygems.org" },
+          extensions: true,
+        )
+        Scint::Cache::Manifest.write(cache.cached_manifest_path(spec), manifest)
+
         FileUtils.mkdir_p(cache.ext_path(spec))
         File.write(File.join(cache.ext_path(spec), "gem.build_complete"), "")
 
@@ -589,9 +631,30 @@ class CLIInstallTest < Minitest::Test
         spec = resolved.first
         assert_equal "arm64-darwin", spec.platform
 
-        ext_src = File.join(cache.extracted_path(spec), "ext", "ffi_c")
+        cached_dir = cache.cached_path(spec)
+        ext_src = File.join(cached_dir, "ext", "ffi_c")
         FileUtils.mkdir_p(ext_src)
         File.write(File.join(ext_src, "extconf.rb"), "")
+        FileUtils.mkdir_p(File.join(cached_dir, "lib"))
+        File.write(File.join(cached_dir, "lib", "ffi.rb"), "")
+
+        gemspec = Gem::Specification.new do |s|
+          s.name = "ffi"
+          s.version = Gem::Version.new("1.17.0")
+          s.summary = "ffi"
+          s.require_paths = ["lib"]
+        end
+        FileUtils.mkdir_p(File.dirname(cache.cached_spec_path(spec)))
+        File.binwrite(cache.cached_spec_path(spec), Marshal.dump(gemspec))
+        manifest = Scint::Cache::Manifest.build(
+          spec: spec,
+          gem_dir: cached_dir,
+          abi_key: Scint::Platform.abi_key,
+          source: { "type" => "rubygems", "uri" => "https://rubygems.org" },
+          extensions: true,
+        )
+        Scint::Cache::Manifest.write(cache.cached_manifest_path(spec), manifest)
+
         FileUtils.mkdir_p(cache.ext_path(spec))
         File.write(File.join(cache.ext_path(spec), "gem.build_complete"), "")
 
@@ -695,8 +758,12 @@ class CLIInstallTest < Minitest::Test
       full = cache.full_name(spec)
 
       inbound = cache.inbound_path(spec)
-      extracted = cache.extracted_path(spec)
+      assembling = cache.assembling_path(spec)
+      cached = cache.cached_path(spec)
+      cached_spec = cache.cached_spec_path(spec)
+      cached_manifest = cache.cached_manifest_path(spec)
       spec_cache = cache.spec_cache_path(spec)
+      extracted = cache.extracted_path(spec)
       global_ext = cache.ext_path(spec)
       local_gem = File.join(ruby_dir, "gems", full)
       local_spec = File.join(ruby_dir, "specifications", "#{full}.gemspec")
@@ -708,10 +775,18 @@ class CLIInstallTest < Minitest::Test
 
       FileUtils.mkdir_p(File.dirname(inbound))
       File.write(inbound, "gem-bytes")
-      FileUtils.mkdir_p(extracted)
-      File.write(File.join(extracted, "x"), "x")
+      FileUtils.mkdir_p(assembling)
+      File.write(File.join(assembling, "x"), "x")
+      FileUtils.mkdir_p(cached)
+      File.write(File.join(cached, "y"), "y")
+      FileUtils.mkdir_p(File.dirname(cached_spec))
+      File.write(cached_spec, "meta")
+      FileUtils.mkdir_p(File.dirname(cached_manifest))
+      File.write(cached_manifest, "{}")
       FileUtils.mkdir_p(File.dirname(spec_cache))
       File.write(spec_cache, "meta")
+      FileUtils.mkdir_p(extracted)
+      File.write(File.join(extracted, "x"), "x")
       FileUtils.mkdir_p(global_ext)
       File.write(File.join(global_ext, "gem.build_complete"), "")
       FileUtils.mkdir_p(local_gem)
@@ -730,8 +805,12 @@ class CLIInstallTest < Minitest::Test
       install.send(:force_purge_artifacts, [spec], bundle_path, cache)
 
       refute File.exist?(inbound)
-      refute Dir.exist?(extracted)
+      refute Dir.exist?(assembling)
+      refute Dir.exist?(cached)
+      refute File.exist?(cached_spec)
+      refute File.exist?(cached_manifest)
       refute File.exist?(spec_cache)
+      refute Dir.exist?(extracted)
       refute Dir.exist?(global_ext)
       refute Dir.exist?(local_gem)
       refute File.exist?(local_spec)
@@ -750,9 +829,9 @@ class CLIInstallTest < Minitest::Test
       ruby_dir = ruby_bundle_dir(bundle_path)
 
       spec = fake_spec(name: "ffi", version: "1.17.0")
-      extracted = cache.extracted_path(spec)
-      FileUtils.mkdir_p(File.join(extracted, "lib"))
-      File.write(File.join(extracted, "lib", "ffi.rb"), "module FFI; end\n")
+      cached = cache.cached_path(spec)
+      FileUtils.mkdir_p(File.join(cached, "lib"))
+      File.write(File.join(cached, "lib", "ffi.rb"), "module FFI; end\n")
 
       gemspec = Gem::Specification.new do |s|
         s.name = "ffi"
@@ -761,15 +840,15 @@ class CLIInstallTest < Minitest::Test
         s.authors = ["test"]
         s.require_paths = ["lib"]
       end
-      FileUtils.mkdir_p(File.dirname(cache.spec_cache_path(spec)))
-      File.binwrite(cache.spec_cache_path(spec), Marshal.dump(gemspec))
+      FileUtils.mkdir_p(File.dirname(cache.cached_spec_path(spec)))
+      File.binwrite(cache.cached_spec_path(spec), Marshal.dump(gemspec))
 
       global_ext = cache.ext_path(spec)
       FileUtils.mkdir_p(global_ext)
       File.write(File.join(global_ext, "ffi_ext.so"), "bin")
       File.write(File.join(global_ext, "gem.build_complete"), "")
 
-      entry = Scint::PlanEntry.new(spec: spec, action: :link, cached_path: extracted, gem_path: nil)
+      entry = Scint::PlanEntry.new(spec: spec, action: :link, cached_path: cached, gem_path: nil)
       install.send(:link_gem_files, entry, cache, bundle_path)
 
       local_ext = File.join(
@@ -2563,14 +2642,14 @@ class CLIInstallTest < Minitest::Test
         s.authors = ["test"]
       end
 
-      extracted = cache.extracted_path(spec)
-      FileUtils.mkdir_p(File.join(extracted, "lib"))
-      File.write(File.join(extracted, "lib", "rack.rb"), "")
+      cached_dir = cache.cached_path(spec)
+      FileUtils.mkdir_p(File.join(cached_dir, "lib"))
+      File.write(File.join(cached_dir, "lib", "rack.rb"), "")
 
-      FileUtils.mkdir_p(File.dirname(cache.spec_cache_path(spec)))
-      File.binwrite(cache.spec_cache_path(spec), gemspec.to_yaml)
+      FileUtils.mkdir_p(File.dirname(cache.cached_spec_path(spec)))
+      File.binwrite(cache.cached_spec_path(spec), gemspec.to_yaml)
 
-      result = install.send(:load_cached_gemspec, spec, cache, extracted)
+      result = install.send(:load_cached_gemspec, spec, cache, cached_dir)
       assert_equal "rack", result.name
     end
   end
@@ -2588,21 +2667,21 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
-  def test_load_gemspec_reads_extracted_gemspec_when_available
+  def test_load_gemspec_reads_cached_gemspec_when_available
     with_tmpdir do |dir|
       cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       install = Scint::CLI::Install.new([])
       spec = fake_spec(name: "demo", version: "1.0.0")
-      extracted = File.join(dir, "extracted")
+      cached_dir = cache.cached_path(spec)
 
-      FileUtils.mkdir_p(File.join(extracted, "lib"))
-      File.write(File.join(extracted, "lib", "demo.rb"), "")
+      FileUtils.mkdir_p(File.join(cached_dir, "lib"))
+      File.write(File.join(cached_dir, "lib", "demo.rb"), "")
       File.write(
-        File.join(extracted, "demo.gemspec"),
+        File.join(cached_dir, "demo.gemspec"),
         "Gem::Specification.new do |s| s.name='demo'; s.version='1.0.0'; s.require_paths=['lib']; end\n",
       )
 
-      gemspec = install.send(:load_gemspec, extracted, spec, cache)
+      gemspec = install.send(:load_gemspec, cached_dir, spec, cache)
       assert_equal "demo", gemspec.name
     end
   end
@@ -2809,7 +2888,7 @@ class CLIInstallTest < Minitest::Test
       bundle_path = File.join(dir, ".bundle")
 
       spec = fake_spec(name: "rack", version: "2.2.8")
-      plan = [Scint::PlanEntry.new(spec: spec, action: :link, cached_path: cache.extracted_path(spec), gem_path: nil)]
+      plan = [Scint::PlanEntry.new(spec: spec, action: :link, cached_path: cache.cached_path(spec), gem_path: nil)]
 
       compiled = install.send(:enqueue_install_dag, scheduler, plan, cache, bundle_path)
 
@@ -2830,7 +2909,7 @@ class CLIInstallTest < Minitest::Test
       bundle_path = File.join(dir, ".bundle")
 
       spec = fake_spec(name: "ffi", version: "1.17.0", has_extensions: true)
-      cached = cache.extracted_path(spec)
+      cached = cache.cached_path(spec)
       ext_dir = File.join(cached, "ext", "ffi_c")
       FileUtils.mkdir_p(ext_dir)
       File.write(File.join(ext_dir, "extconf.rb"), "")
@@ -2910,18 +2989,17 @@ class CLIInstallTest < Minitest::Test
       bundle_path = File.join(dir, ".bundle")
 
       spec = fake_spec(name: "ffi", version: "1.17.0")
-      extracted = cache.extracted_path(spec)
-      FileUtils.mkdir_p(File.join(extracted, "lib"))
-      File.write(File.join(extracted, "lib", "ffi.rb"), "")
-
-      gemspec = Gem::Specification.new do |s|
-        s.name = "ffi"
-        s.version = "1.17.0"
-        s.summary = "test"
-        s.authors = ["test"]
-      end
-      FileUtils.mkdir_p(File.dirname(cache.spec_cache_path(spec)))
-      File.binwrite(cache.spec_cache_path(spec), Marshal.dump(gemspec))
+      assembling = cache.assembling_path(spec)
+      FileUtils.mkdir_p(File.join(assembling, "lib"))
+      File.write(File.join(assembling, "lib", "ffi.rb"), "")
+      File.write(File.join(assembling, "ffi.gemspec"), <<~RUBY)
+        Gem::Specification.new do |s|
+          s.name = "ffi"
+          s.version = "1.17.0"
+          s.summary = "test"
+          s.authors = ["test"]
+        end
+      RUBY
 
       entry = Scint::PlanEntry.new(spec: spec, action: :build_ext, cached_path: nil, gem_path: nil)
 
@@ -2940,18 +3018,17 @@ class CLIInstallTest < Minitest::Test
       bundle_path = File.join(dir, ".bundle")
 
       spec = fake_spec(name: "rake", version: "13.2.1")
-      extracted = cache.extracted_path(spec)
-      FileUtils.mkdir_p(File.join(extracted, "lib"))
-      File.write(File.join(extracted, "lib", "rake.rb"), "")
-
-      gemspec = Gem::Specification.new do |s|
-        s.name = "rake"
-        s.version = "13.2.1"
-        s.summary = "test"
-        s.authors = ["test"]
-      end
-      FileUtils.mkdir_p(File.dirname(cache.spec_cache_path(spec)))
-      File.binwrite(cache.spec_cache_path(spec), Marshal.dump(gemspec))
+      assembling = cache.assembling_path(spec)
+      FileUtils.mkdir_p(File.join(assembling, "lib"))
+      File.write(File.join(assembling, "lib", "rake.rb"), "")
+      File.write(File.join(assembling, "rake.gemspec"), <<~RUBY)
+        Gem::Specification.new do |s|
+          s.name = "rake"
+          s.version = "13.2.1"
+          s.summary = "test"
+          s.authors = ["test"]
+        end
+      RUBY
 
       entry = Scint::PlanEntry.new(spec: spec, action: :link, cached_path: nil, gem_path: nil)
 
@@ -3028,8 +3105,8 @@ class CLIInstallTest < Minitest::Test
       install = Scint::CLI::Install.new([])
       spec = fake_spec(name: "broken", version: "1.0.0")
 
-      FileUtils.mkdir_p(File.dirname(cache.spec_cache_path(spec)))
-      File.binwrite(cache.spec_cache_path(spec), "garbage-data-not-yaml-or-marshal")
+      FileUtils.mkdir_p(File.dirname(cache.cached_spec_path(spec)))
+      File.binwrite(cache.cached_spec_path(spec), "garbage-data-not-yaml-or-marshal")
 
       result = install.send(:load_cached_gemspec, spec, cache, "/nonexistent")
       assert_nil result
@@ -3309,8 +3386,8 @@ class CLIInstallTest < Minitest::Test
       git_source = Scint::Source::Git.new(uri: "https://github.com/rails/rails.git")
       spec = fake_spec(name: "actionpack", version: "7.2.0", source: git_source)
 
-      extracted = cache.extracted_path(spec)
-      sub = File.join(extracted, "actionpack")
+      assembling = cache.assembling_path(spec)
+      sub = File.join(assembling, "actionpack")
       FileUtils.mkdir_p(sub)
       File.write(File.join(sub, "actionpack.gemspec"), "")
 
@@ -3328,9 +3405,9 @@ class CLIInstallTest < Minitest::Test
       git_source = Scint::Source::Git.new(uri: "https://github.com/rails/rails.git")
       spec = fake_spec(name: "missing", version: "1.0.0", source: git_source)
 
-      extracted = cache.extracted_path(spec)
-      FileUtils.mkdir_p(extracted)
-      File.write(File.join(extracted, "other.gemspec"), "")
+      assembling = cache.assembling_path(spec)
+      FileUtils.mkdir_p(assembling)
+      File.write(File.join(assembling, "other.gemspec"), "")
 
       entry = Scint::PlanEntry.new(spec: spec, action: :link, cached_path: nil, gem_path: nil)
       error = assert_raises(Scint::InstallError) do
@@ -3353,12 +3430,12 @@ class CLIInstallTest < Minitest::Test
       spec2 = fake_spec(name: "pure", version: "1.0.0", has_extensions: false)
 
       # ffi has buildable extensions
-      ext_dir = File.join(cache.extracted_path(spec1), "ext", "ffi_c")
+      ext_dir = File.join(cache.assembling_path(spec1), "ext", "ffi_c")
       FileUtils.mkdir_p(ext_dir)
       File.write(File.join(ext_dir, "extconf.rb"), "")
 
       # pure has no extensions
-      FileUtils.mkdir_p(cache.extracted_path(spec2))
+      FileUtils.mkdir_p(cache.assembling_path(spec2))
 
       entries = [
         Scint::PlanEntry.new(spec: spec1, action: :build_ext, cached_path: nil, gem_path: nil),
@@ -3837,7 +3914,7 @@ class CLIInstallTest < Minitest::Test
       compiled = install.send(:enqueue_install_dag, scheduler, plan, cache, bundle_path)
 
       # Set up native extension directory before calling follow_up
-      ext_dir = File.join(cache.extracted_path(spec), "ext", "nio4r")
+      ext_dir = File.join(cache.assembling_path(spec), "ext", "nio4r")
       FileUtils.mkdir_p(ext_dir)
       File.write(File.join(ext_dir, "extconf.rb"), "")
 
@@ -3877,7 +3954,7 @@ class CLIInstallTest < Minitest::Test
       bundle_path = File.join(dir, ".bundle")
 
       spec = fake_spec(name: "puma", version: "6.0.0")
-      plan = [Scint::PlanEntry.new(spec: spec, action: :link, cached_path: cache.extracted_path(spec), gem_path: nil)]
+      plan = [Scint::PlanEntry.new(spec: spec, action: :link, cached_path: cache.cached_path(spec), gem_path: nil)]
 
       install.send(:enqueue_install_dag, scheduler, plan, cache, bundle_path)
 
@@ -3900,7 +3977,7 @@ class CLIInstallTest < Minitest::Test
       bundle_path = File.join(dir, ".bundle")
 
       spec = fake_spec(name: "sassc", version: "2.4.0", has_extensions: true)
-      cached = cache.extracted_path(spec)
+      cached = cache.cached_path(spec)
       ext_dir = File.join(cached, "ext", "sassc")
       FileUtils.mkdir_p(ext_dir)
       File.write(File.join(ext_dir, "extconf.rb"), "")
@@ -3961,7 +4038,7 @@ class CLIInstallTest < Minitest::Test
       bundle_path = File.join(dir, ".bundle")
 
       spec = fake_spec(name: "bcrypt", version: "3.1.20", has_extensions: true)
-      ext_dir = File.join(cache.extracted_path(spec), "ext", "mri")
+      ext_dir = File.join(cache.assembling_path(spec), "ext", "mri")
       FileUtils.mkdir_p(ext_dir)
       File.write(File.join(ext_dir, "extconf.rb"), "")
 
@@ -3983,7 +4060,7 @@ class CLIInstallTest < Minitest::Test
       bundle_path = File.join(dir, ".bundle")
 
       spec = fake_spec(name: "pure-ruby", version: "1.0.0")
-      FileUtils.mkdir_p(cache.extracted_path(spec))
+      FileUtils.mkdir_p(cache.assembling_path(spec))
 
       entries = [Scint::PlanEntry.new(spec: spec, action: :build_ext, cached_path: nil, gem_path: nil)]
 
@@ -4002,18 +4079,17 @@ class CLIInstallTest < Minitest::Test
       bundle_path = File.join(dir, ".bundle")
 
       spec = fake_spec(name: "racc", version: "1.8.0")
-      extracted = cache.extracted_path(spec)
-      FileUtils.mkdir_p(File.join(extracted, "lib"))
-      File.write(File.join(extracted, "lib", "racc.rb"), "")
-
-      gemspec = Gem::Specification.new do |s|
-        s.name = "racc"
-        s.version = "1.8.0"
-        s.summary = "test"
-        s.authors = ["test"]
-      end
-      FileUtils.mkdir_p(File.dirname(cache.spec_cache_path(spec)))
-      File.binwrite(cache.spec_cache_path(spec), Marshal.dump(gemspec))
+      assembling = cache.assembling_path(spec)
+      FileUtils.mkdir_p(File.join(assembling, "lib"))
+      File.write(File.join(assembling, "lib", "racc.rb"), "")
+      File.write(File.join(assembling, "racc.gemspec"), <<~RUBY)
+        Gem::Specification.new do |s|
+          s.name = "racc"
+          s.version = "1.8.0"
+          s.summary = "test"
+          s.authors = ["test"]
+        end
+      RUBY
 
       entry = Scint::PlanEntry.new(spec: spec, action: :build_ext, cached_path: nil, gem_path: nil)
 
@@ -4038,18 +4114,17 @@ class CLIInstallTest < Minitest::Test
       bundle_path = File.join(dir, ".bundle")
 
       spec = fake_spec(name: "racc", version: "1.8.0")
-      extracted = cache.extracted_path(spec)
-      FileUtils.mkdir_p(File.join(extracted, "lib"))
-      File.write(File.join(extracted, "lib", "racc.rb"), "")
-
-      gemspec = Gem::Specification.new do |s|
-        s.name = "racc"
-        s.version = "1.8.0"
-        s.summary = "test"
-        s.authors = ["test"]
-      end
-      FileUtils.mkdir_p(File.dirname(cache.spec_cache_path(spec)))
-      File.binwrite(cache.spec_cache_path(spec), Marshal.dump(gemspec))
+      assembling = cache.assembling_path(spec)
+      FileUtils.mkdir_p(File.join(assembling, "lib"))
+      File.write(File.join(assembling, "lib", "racc.rb"), "")
+      File.write(File.join(assembling, "racc.gemspec"), <<~RUBY)
+        Gem::Specification.new do |s|
+          s.name = "racc"
+          s.version = "1.8.0"
+          s.summary = "test"
+          s.authors = ["test"]
+        end
+      RUBY
 
       entry = Scint::PlanEntry.new(spec: spec, action: :build_ext, cached_path: nil, gem_path: nil)
 

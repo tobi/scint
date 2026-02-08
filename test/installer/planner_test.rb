@@ -74,9 +74,7 @@ class PlannerTest < Minitest::Test
       FileUtils.mkdir_p(spec_dir)
       File.write(File.join(spec_dir, "bootsnap-1.22.0.gemspec"), "Gem::Specification.new do |s| end\n")
 
-      ext_src = File.join(layout.extracted_path(spec), "ext", "bootsnap")
-      FileUtils.mkdir_p(ext_src)
-      File.write(File.join(ext_src, "extconf.rb"), "")
+      write_cached_entry(layout, spec, ext_name: "bootsnap")
 
       entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
       assert_equal :build_ext, entry.action
@@ -96,9 +94,7 @@ class PlannerTest < Minitest::Test
       FileUtils.mkdir_p(spec_dir)
       File.write(File.join(spec_dir, "bootsnap-1.22.0.gemspec"), "Gem::Specification.new do |s| end\n")
 
-      ext_src = File.join(layout.extracted_path(spec), "ext", "bootsnap")
-      FileUtils.mkdir_p(ext_src)
-      File.write(File.join(ext_src, "extconf.rb"), "")
+      write_cached_entry(layout, spec, ext_name: "bootsnap")
 
       cached_ext = layout.ext_path(spec)
       FileUtils.mkdir_p(cached_ext)
@@ -173,9 +169,7 @@ class PlannerTest < Minitest::Test
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = Spec.new(name: "ffi", version: "1.17.0", platform: "ruby", has_extensions: true)
 
-      ext_dir = File.join(layout.extracted_path(spec), "ext", "ffi_c")
-      FileUtils.mkdir_p(ext_dir)
-      File.write(File.join(ext_dir, "extconf.rb"), "")
+      write_cached_entry(layout, spec, ext_name: "ffi_c")
 
       entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
       assert_equal :build_ext, entry.action
@@ -188,9 +182,7 @@ class PlannerTest < Minitest::Test
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = Spec.new(name: "ffi", version: "1.17.0", platform: "ruby", has_extensions: true)
 
-      ext_dir = File.join(layout.extracted_path(spec), "ext", "ffi_c")
-      FileUtils.mkdir_p(ext_dir)
-      File.write(File.join(ext_dir, "extconf.rb"), "")
+      write_cached_entry(layout, spec, ext_name: "ffi_c")
       FileUtils.mkdir_p(layout.ext_path(spec))
       File.write(File.join(layout.ext_path(spec), "gem.build_complete"), "")
 
@@ -205,9 +197,7 @@ class PlannerTest < Minitest::Test
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = Spec.new(name: "bootsnap", version: "1.22.0", platform: "ruby", has_extensions: false)
 
-      ext_dir = File.join(layout.extracted_path(spec), "ext", "bootsnap")
-      FileUtils.mkdir_p(ext_dir)
-      File.write(File.join(ext_dir, "extconf.rb"), "")
+      write_cached_entry(layout, spec, ext_name: "bootsnap")
 
       entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
       assert_equal :build_ext, entry.action
@@ -221,10 +211,8 @@ class PlannerTest < Minitest::Test
       spec = Spec.new(name: "sqlite3", version: "2.0.0", platform: "x86_64-linux", has_extensions: true)
 
       ruby_minor = RUBY_VERSION[/\d+\.\d+/]
-      ext_dir = File.join(layout.extracted_path(spec), "ext", "sqlite3")
-      prebuilt_dir = File.join(layout.extracted_path(spec), "lib", "sqlite3", ruby_minor)
-      FileUtils.mkdir_p(ext_dir)
-      File.write(File.join(ext_dir, "extconf.rb"), "")
+      cached_dir = write_cached_entry(layout, spec, ext_name: "sqlite3")
+      prebuilt_dir = File.join(cached_dir, "lib", "sqlite3", ruby_minor)
       FileUtils.mkdir_p(prebuilt_dir)
 
       entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
