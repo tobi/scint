@@ -318,7 +318,6 @@ module Scint
             assembling = @cache.assembling_path(spec)
             tmp_checkout = "#{assembling}.checkout.#{Process.pid}.#{Thread.current.object_id}.tmp"
             tmp_assembled = "#{assembling}.#{Process.pid}.#{Thread.current.object_id}.tmp"
-            promoter = Installer::Promoter.new(root: @cache.root)
 
             FileUtils.rm_rf(assembling)
             FileUtils.rm_rf(tmp_checkout)
