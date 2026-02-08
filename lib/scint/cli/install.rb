@@ -986,7 +986,12 @@ module Scint
             copy_gemspec_root_files(tmp_checkout, gem_root, dest_root, spec)
             FS.atomic_move(tmp_assembled, assembling)
 
-            gemspec = read_gemspec_from_extracted(assembling, spec)
+            gem_subdir = begin
+              resolve_git_gem_subdir(assembling, spec)
+            rescue InstallError
+              assembling
+            end
+            gemspec = read_gemspec_from_extracted(gem_subdir, spec)
             cache_gemspec(spec, gemspec, cache) if gemspec
 
             unless Installer::ExtensionBuilder.needs_build?(spec, assembling)
@@ -1344,9 +1349,9 @@ module Scint
             nil
           end
 
-          if git_source?(entry.spec.source) && Dir.exist?(base)
+          if git_source?(entry.spec.source) && base && Dir.exist?(base)
             resolve_git_gem_subdir(base, entry.spec)
-          elsif path_source?(entry.spec.source) && Dir.exist?(base)
+          elsif path_source?(entry.spec.source) && base && Dir.exist?(base)
             begin
               resolve_path_gem_subdir(base, entry.spec)
             rescue InstallError
