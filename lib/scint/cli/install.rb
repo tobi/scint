@@ -1622,11 +1622,13 @@ module Scint
 
           data = File.binread(path)
           gemspec = if data.start_with?("---")
+            data.force_encoding("UTF-8") if data.encoding != Encoding::UTF_8
             Gem::Specification.from_yaml(data)
           else
             begin
               Marshal.load(data)
             rescue StandardError
+              data.force_encoding("UTF-8") if data.encoding != Encoding::UTF_8
               Gem::Specification.from_yaml(data)
             end
           end

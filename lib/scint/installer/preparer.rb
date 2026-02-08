@@ -201,7 +201,10 @@ module Scint
         return nil unless File.exist?(path)
 
         data = File.binread(path)
-        return Gem::Specification.from_yaml(data) if data.start_with?("---")
+        if data.start_with?("---")
+          data.force_encoding("UTF-8") if data.encoding != Encoding::UTF_8
+          return Gem::Specification.from_yaml(data)
+        end
 
         Marshal.load(data)
       rescue ArgumentError, TypeError, EOFError, StandardError
