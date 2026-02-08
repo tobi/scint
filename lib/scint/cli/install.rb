@@ -23,6 +23,7 @@ require_relative "../downloader/pool"
 require_relative "../gem/package"
 require_relative "../gem/extractor"
 require_relative "../cache/layout"
+require_relative "../cache/manifest"
 require_relative "../cache/metadata_store"
 require_relative "../cache/validity"
 require_relative "../installer/planner"
@@ -838,16 +839,29 @@ module Scint
         end
         return if source_uri.start_with?("/") || !source_uri.start_with?("http")
 
-        extracted = cache.extracted_path(spec)
-        return if Dir.exist?(extracted)
+        return if Cache::Validity.cached_valid?(spec, cache)
 
         dest_path = cache.inbound_path(spec)
         raise InstallError, "Missing cached gem file for #{spec.name}: #{dest_path}" unless File.exist?(dest_path)
 
-        FS.mkdir_p(extracted)
-        pkg = GemPkg::Package.new
-        result = pkg.extract(dest_path, extracted)
-        cache_gemspec(spec, result[:gemspec], cache)
+        assembling = cache.assembling_path(spec)
+        tmp = "#{assembling}.#{Process.pid}.#{Thread.current.object_id}.tmp"
+        begin
+          FileUtils.rm_rf(assembling)
+          FileUtils.rm_rf(tmp)
+          FS.mkdir_p(File.dirname(assembling))
+
+          pkg = GemPkg::Package.new
+          result = pkg.extract(dest_path, tmp)
+          FS.atomic_move(tmp, assembling)
+          cache_gemspec(spec, result[:gemspec], cache)
+
+          unless Installer::ExtensionBuilder.needs_build?(spec, assembling)
+            promote_assembled_gem(spec, cache, assembling, result[:gemspec], extensions: false)
+          end
+        ensure
+          FileUtils.rm_rf(tmp) if tmp && File.exist?(tmp)
+        end
       end
 
       def git_source?(source)
@@ -1303,7 +1317,18 @@ module Scint
             source_str
           end
         else
-          base = entry.cached_path || cache.extracted_path(entry.spec)
+          cached_dir = cache.cached_path(entry.spec)
+          assembling = cache.assembling_path(entry.spec)
+          base = if entry.cached_path
+            entry.cached_path
+          elsif Cache::Validity.cached_valid?(entry.spec, cache)
+            cached_dir
+          elsif Dir.exist?(assembling)
+            assembling
+          else
+            cache.extracted_path(entry.spec)
+          end
+
           if git_source?(entry.spec.source) && Dir.exist?(base)
             resolve_git_gem_subdir(base, entry.spec)
           elsif path_source?(entry.spec.source) && Dir.exist?(base)
@@ -1383,13 +1408,15 @@ module Scint
       end
 
       def build_extensions(entry, cache, bundle_path, progress = nil, compile_slots: 1)
+        spec = entry.spec
         extracted = extracted_path_for_entry(entry, cache)
-        gemspec = load_gemspec(extracted, entry.spec, cache)
+        gemspec = load_gemspec(extracted, spec, cache)
+        promote_after_build = assembling_path?(extracted, cache)
 
-        sync_build_env_dependencies(entry.spec, bundle_path, cache)
+        sync_build_env_dependencies(spec, bundle_path, cache)
 
         prepared = PreparedGem.new(
-          spec: entry.spec,
+          spec: spec,
           extracted_path: extracted,
           gemspec: gemspec,
           from_cache: true,
@@ -1400,8 +1427,21 @@ module Scint
           bundle_path,
           cache,
           compile_slots: compile_slots,
-          output_tail: ->(lines) { progress&.on_build_tail(entry.spec.name, lines) },
+          output_tail: ->(lines) { progress&.on_build_tail(spec.name, lines) },
         )
+
+        return unless promote_after_build
+
+        cached_ext = cache.ext_path(spec)
+        if Dir.exist?(cached_ext)
+          Installer::ExtensionBuilder.sync_extensions_into_gem(cached_ext, extracted)
+        end
+        promote_assembled_gem(spec, cache, extracted, gemspec, extensions: true)
+      rescue StandardError
+        if promote_after_build && extracted && Dir.exist?(extracted)
+          FileUtils.rm_rf(extracted)
+        end
+        raise
       end
 
       def sync_build_env_dependencies(spec, bundle_path, cache)
@@ -1564,6 +1604,96 @@ module Scint
         FS.atomic_write(path, gemspec.to_yaml)
       rescue StandardError
         # Non-fatal: we'll read metadata from .gem next time.
+      end
+
+      def cache_promoter(cache)
+        @cache_promoter ||= Installer::Promoter.new(root: cache.root)
+      end
+
+      def assembling_path?(path, cache)
+        return false if path.nil? || path.empty?
+
+        root = File.expand_path(cache.assembling_dir)
+        candidate = File.expand_path(path)
+        candidate == root || candidate.start_with?("#{root}/")
+      end
+
+      def promote_assembled_gem(spec, cache, assembling_path, gemspec, extensions:)
+        return unless assembling_path && Dir.exist?(assembling_path)
+
+        cached_dir = cache.cached_path(spec)
+        promoter = cache_promoter(cache)
+        lock_key = "#{Platform.abi_key}-#{cache.full_name(spec)}"
+
+        promoter.validate_within_root!(cache.root, assembling_path, label: "assembling")
+        promoter.validate_within_root!(cache.root, cached_dir, label: "cached")
+
+        begin
+          result = nil
+          promoter.with_staging_dir(prefix: "cached") do |staging|
+            FS.clone_tree(assembling_path, staging)
+            manifest = build_cached_manifest(spec, cache, staging, extensions: extensions)
+            spec_payload = gemspec ? Marshal.dump(gemspec) : nil
+            result = promoter.promote_tree(
+              staging_path: staging,
+              target_path: cached_dir,
+              lock_key: lock_key,
+            )
+            if result == :promoted
+              write_cached_metadata(spec, cache, spec_payload, manifest)
+            end
+            FileUtils.rm_rf(assembling_path) if Dir.exist?(assembling_path)
+          end
+          result
+        rescue StandardError
+          FileUtils.rm_rf(cached_dir) if Dir.exist?(cached_dir)
+          raise
+        end
+      end
+
+      def write_cached_metadata(spec, cache, spec_payload, manifest)
+        spec_path = cache.cached_spec_path(spec)
+        manifest_path = cache.cached_manifest_path(spec)
+        FS.mkdir_p(File.dirname(spec_path))
+
+        FS.atomic_write(spec_path, spec_payload) if spec_payload
+        Cache::Manifest.write(manifest_path, manifest)
+      end
+
+      def build_cached_manifest(spec, cache, gem_dir, extensions:)
+        Cache::Manifest.build(
+          spec: spec,
+          gem_dir: gem_dir,
+          abi_key: Platform.abi_key,
+          source: manifest_source_for(spec),
+          extensions: extensions,
+        )
+      end
+
+      def manifest_source_for(spec)
+        source = spec.source
+        if source.is_a?(Source::Git)
+          {
+            "type" => "git",
+            "uri" => source.uri.to_s,
+            "revision" => source.revision || source.ref || source.branch || source.tag,
+          }.compact
+        elsif source.is_a?(Source::Path)
+          {
+            "type" => "path",
+            "path" => File.expand_path(source.path.to_s),
+            "uri" => source.path.to_s,
+          }
+        else
+          source_str = source.to_s
+          if source_str.start_with?("http://", "https://")
+            { "type" => "rubygems", "uri" => source_str }
+          elsif path_source?(source)
+            { "type" => "path", "path" => File.expand_path(source_str), "uri" => source_str }
+          else
+            { "type" => "rubygems", "uri" => source_str }
+          end
+        end
       end
 
       # --- Lockfile + runtime config ---

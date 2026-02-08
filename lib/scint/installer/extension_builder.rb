@@ -235,16 +235,18 @@ module Scint
                                     Platform.gem_arch, Platform.extension_api_version,
                                     spec_full_name(spec))
         FS.clone_tree(cached_ext, ext_install_dir) unless Dir.exist?(ext_install_dir)
-        sync_extension_artifacts_into_gem(ext_install_dir, ruby_dir, spec)
+        gem_dir = File.join(ruby_dir, "gems", spec_full_name(spec))
+        sync_extensions_into_gem(cached_ext, gem_dir)
       end
 
-      def sync_extension_artifacts_into_gem(ext_install_dir, ruby_dir, spec)
-        gem_dir = File.join(ruby_dir, "gems", spec_full_name(spec))
+      # Sync compiled extension artifacts into a gem's lib directory.
+      # cached_ext is the cache/ext directory produced by builds.
+      def sync_extensions_into_gem(cached_ext, gem_dir)
         lib_dir = File.join(gem_dir, "lib")
         return unless Dir.exist?(lib_dir)
 
-        Dir.glob(File.join(ext_install_dir, "**", "*.{so,bundle,dll,dylib}")).each do |artifact|
-          rel = artifact.delete_prefix("#{ext_install_dir}/")
+        Dir.glob(File.join(cached_ext, "**", "*.{so,bundle,dll,dylib}")).each do |artifact|
+          rel = artifact.delete_prefix("#{cached_ext}/")
           dest = File.join(lib_dir, rel)
           FS.mkdir_p(File.dirname(dest))
           FS.clonefile(artifact, dest)
@@ -322,7 +324,7 @@ module Scint
 
       private_class_method :find_extension_dirs, :compile_extension,
                            :compile_extconf, :compile_cmake, :compile_rake,
-                           :find_rake_executable, :link_extensions, :sync_extension_artifacts_into_gem,
+                           :find_rake_executable, :link_extensions,
                            :build_env, :run_cmd, :prebuilt_missing_for_ruby?
     end
   end
