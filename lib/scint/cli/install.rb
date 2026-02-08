@@ -1625,7 +1625,10 @@ module Scint
           next unless File.exist?(path)
 
           data = File.binread(path)
-          gemspec = if data.start_with?("---")
+          gemspec = if data.start_with?("# -*- encoding")
+            # Ruby format (to_ruby output) — most reliable, preserves require_paths
+            Gem::Specification.load(path)
+          elsif data.start_with?("---")
             data.force_encoding("UTF-8") if data.encoding != Encoding::UTF_8
             Gem::Specification.from_yaml(data)
           else
@@ -1640,7 +1643,7 @@ module Scint
         end
 
         nil
-      rescue StandardError
+      rescue SystemExit, StandardError
         nil
       end
 
@@ -1675,7 +1678,12 @@ module Scint
 
       def cache_gemspec(spec, gemspec, cache)
         path = cache.cached_spec_path(spec)
-        FS.atomic_write(path, gemspec.to_yaml)
+        content = if gemspec.respond_to?(:to_ruby)
+          gemspec.to_ruby
+        else
+          gemspec.to_yaml
+        end
+        FS.atomic_write(path, content)
       rescue StandardError
         # Non-fatal: we'll read metadata from .gem next time.
       end
@@ -1708,7 +1716,7 @@ module Scint
             FS.clone_tree(assembling_path, staging)
             manifest = build_cached_manifest(spec, cache, staging, extensions: extensions)
             Cache::Manifest.write_dotfiles(staging, manifest)
-            spec_payload = gemspec ? Marshal.dump(gemspec) : nil
+            spec_payload = gemspec ? gemspec.to_ruby : nil
             result = promoter.promote_tree(
               staging_path: staging,
               target_path: cached_dir,
