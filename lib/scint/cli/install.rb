@@ -56,8 +56,15 @@ module Scint
         parse_options
       end
 
+      def _tmark(label, t0)
+        now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        $stderr.puts "  [timing] #{label}: #{((now - t0) * 1000).round}ms" if ENV["SCINT_TIMING"]
+        now
+      end
+
       def run
         start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        _t = start_time
 
         cache = Scint::Cache::Layout.new
         cache_telemetry = Scint::Cache::Telemetry.new
@@ -78,6 +85,7 @@ module Scint
         scheduler.start
 
         begin
+          _t = _tmark("startup", _t)
           # 2. Parse Gemfile
           gemfile = Scint::Gemfile::Parser.parse("Gemfile")
 
@@ -89,6 +97,7 @@ module Scint
           dep_count = gemfile.dependencies.size
           scheduler.scale_workers(dep_count)
 
+          _t = _tmark("parse_gemfile", _t)
           # 3. Enqueue index fetches for all sources immediately
           gemfile.sources.each do |source|
             scheduler.enqueue(:fetch_index, source[:uri] || source.to_s,
@@ -109,20 +118,25 @@ module Scint
                               -> { clone_git_source(source, cache) })
           end
 
+          _t = _tmark("enqueue_fetches", _t)
           # 6. Wait for index fetches, then resolve
           scheduler.wait_for(:fetch_index)
+          _t = _tmark("wait_index", _t)
           scheduler.wait_for(:git_clone)
+          _t = _tmark("wait_git", _t)
 
           resolved = resolve(gemfile, lockfile, cache)
           resolved = dedupe_resolved_specs(adjust_meta_gems(resolved))
           force_purge_artifacts(resolved, bundle_path, cache) if @force
 
+          _t = _tmark("resolve", _t)
           # 7. Plan: diff resolved vs installed
           plan = Installer::Planner.plan(resolved, bundle_path, cache, telemetry: cache_telemetry)
           total_gems = resolved.size
           updated_gems = plan.count { |e| e.action != :skip }
           cached_gems = total_gems - updated_gems
           to_install = plan.reject { |e| e.action == :skip }
+          _t = _tmark("plan", _t)
 
           # Scale up for download/install phase based on actual work count
           scheduler.scale_workers(to_install.size)
@@ -130,6 +144,7 @@ module Scint
           # Warm-cache accelerator: pre-materialize cache-backed gem trees in
           # batches so install workers avoid one cp process per gem.
           bulk_prelink_gem_files(to_install, cache, bundle_path)
+          _t = _tmark("prelink", _t)
 
           if to_install.empty?
             # Keep lock artifacts aligned even when everything is already installed.
@@ -1560,15 +1575,13 @@ module Scint
       end
 
       def bulk_prelink_gem_files(entries, cache, bundle_path)
-        # Keep small installs simple; batching is for large warm-path runs.
         return if entries.length < 32
 
         ruby_dir = File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
         gems_dir = File.join(ruby_dir, "gems")
+        cache_abi_dir = cache.cached_abi_dir
 
-        manifest_jobs = []
-        fallback_sources = []
-
+        gem_names = []
         entries.each do |entry|
           next unless entry.action == :link || entry.action == :build_ext
 
@@ -1578,40 +1591,20 @@ module Scint
           full_name = cache.full_name(entry.spec)
           next unless File.basename(source_dir) == full_name
           next unless Dir.exist?(source_dir)
+          next if Dir.exist?(File.join(gems_dir, full_name))
 
-          dest_dir = File.join(gems_dir, full_name)
-          next if Dir.exist?(dest_dir)
-
-          manifest = cached_manifest_for_prelink(entry.spec, cache, source_dir)
-          if manifest && manifest["files"].is_a?(Array)
-            manifest_jobs << [source_dir, dest_dir, manifest["files"]]
-          else
-            fallback_sources << source_dir
-          end
+          gem_names << full_name
         end
 
-        return if manifest_jobs.empty? && fallback_sources.empty?
+        return if gem_names.empty?
 
-        manifest_jobs.each do |source_dir, dest_dir, entries|
-          FS.materialize_from_manifest(source_dir, dest_dir, entries)
+        if ENV["SCINT_TIMING"]
+          $stderr.puts "  [timing] prelink: #{gem_names.size} gems via linker"
         end
 
-        FS.clone_many_trees(fallback_sources, gems_dir) unless fallback_sources.empty?
+        FS.bulk_link_gems(cache_abi_dir, gems_dir, gem_names)
       rescue StandardError => e
         $stderr.puts("bulk prelink warning: #{e.message}") if ENV["SCINT_DEBUG"]
-      end
-
-      def cached_manifest_for_prelink(spec, cache, source_dir)
-        cached_path = cache.cached_path(spec)
-        return nil unless File.expand_path(source_dir) == File.expand_path(cached_path)
-
-        manifest = Cache::Validity.read_manifest(cache.cached_manifest_path(spec))
-        return nil unless manifest
-        return nil unless Cache::Validity.manifest_matches?(manifest, spec, Platform.abi_key, cache)
-
-        manifest
-      rescue StandardError
-        nil
       end
 
       def load_cached_gemspec(spec, cache, extracted_path)
@@ -1703,6 +1696,7 @@ module Scint
           promoter.with_staging_dir(prefix: "cached") do |staging|
             FS.clone_tree(assembling_path, staging)
             manifest = build_cached_manifest(spec, cache, staging, extensions: extensions)
+            Cache::Manifest.write_dotfiles(staging, manifest)
             spec_payload = gemspec ? Marshal.dump(gemspec) : nil
             result = promoter.promote_tree(
               staging_path: staging,

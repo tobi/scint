@@ -21,28 +21,75 @@ module Scint
       @mkdir_mutex.synchronize { @mkdir_cache[path] = true }
     end
 
+    # Detect best file copy strategy once per process.
+    # Returns :reflink, :hardlink, or :copy.
+    @copy_strategy = nil
+    @copy_strategy_mutex = Thread::Mutex.new
+
+    def detect_copy_strategy(src_dir, dst_dir)
+      @copy_strategy_mutex.synchronize do
+        return @copy_strategy if @copy_strategy
+
+        @copy_strategy = _probe_copy_strategy(src_dir, dst_dir)
+      end
+    end
+
+    def _probe_copy_strategy(src_dir, dst_dir)
+      # Create a temp file in src to test against dst
+      probe_src = File.join(src_dir, ".scint_probe_#{$$}")
+      probe_dst = File.join(dst_dir, ".scint_probe_#{$$}")
+      begin
+        File.write(probe_src, "x")
+        mkdir_p(dst_dir)
+
+        if Platform.macos?
+          if system("cp", "-c", probe_src, probe_dst, [:out, :err] => File::NULL)
+            return :reflink
+          end
+          File.delete(probe_dst) if File.exist?(probe_dst)
+        elsif Platform.linux?
+          if system("cp", "--reflink=always", probe_src, probe_dst, [:out, :err] => File::NULL)
+            return :reflink
+          end
+          File.delete(probe_dst) if File.exist?(probe_dst)
+        end
+
+        begin
+          File.link(probe_src, probe_dst)
+          return :hardlink
+        rescue SystemCallError
+          File.delete(probe_dst) if File.exist?(probe_dst)
+        end
+
+        :copy
+      ensure
+        File.delete(probe_src) if File.exist?(probe_src)
+        File.delete(probe_dst) if File.exist?(probe_dst)
+      end
+    rescue StandardError
+      :copy
+    end
+
     # APFS clonefile (CoW copy). Falls back to hardlink, then regular copy.
     def clonefile(src, dst)
       src = src.to_s
       dst = dst.to_s
       mkdir_p(File.dirname(dst))
 
-      # Try APFS clonefile via cp -c (macOS)
-      if Platform.macos?
-        return if system("cp", "-c", src, dst, [:out, :err] => File::NULL)
-      end
-
-      # Try Linux reflink copy-on-write where supported (btrfs/xfs/etc).
-      if Platform.linux?
-        return if system("cp", "--reflink=always", src, dst, [:out, :err] => File::NULL)
-      end
-
-      # Fallback: hardlink
-      begin
-        File.link(src, dst)
-        return
-      rescue SystemCallError
-        # cross-device or unsupported
+      case detect_copy_strategy(File.dirname(src), File.dirname(dst))
+      when :reflink
+        if Platform.macos?
+          return if system("cp", "-c", src, dst, [:out, :err] => File::NULL)
+        elsif Platform.linux?
+          return if system("cp", "--reflink=always", src, dst, [:out, :err] => File::NULL)
+        end
+      when :hardlink
+        begin
+          File.link(src, dst)
+          return
+        rescue SystemCallError
+          # fall through to copy
+        end
       end
 
       # Final fallback: regular copy
@@ -58,16 +105,15 @@ module Scint
       raise Errno::ENOENT, src_dir unless Dir.exist?(src_dir)
       mkdir_p(dst_dir)
 
-      # Fast path on macOS/APFS: copy-on-write clone of full tree.
-      if Platform.macos?
-        src_contents = File.join(src_dir, ".")
-        return if system("cp", "-cR", src_contents, dst_dir, [:out, :err] => File::NULL)
-      end
+      strategy = detect_copy_strategy(src_dir, dst_dir)
 
-      # Fast path on Linux filesystems with reflink support.
-      if Platform.linux?
+      if strategy == :reflink
         src_contents = File.join(src_dir, ".")
-        return if system("cp", "--reflink=always", "-R", src_contents, dst_dir, [:out, :err] => File::NULL)
+        if Platform.macos?
+          return if system("cp", "-cR", src_contents, dst_dir, [:out, :err] => File::NULL)
+        elsif Platform.linux?
+          return if system("cp", "--reflink=always", "-R", src_contents, dst_dir, [:out, :err] => File::NULL)
+        end
       end
 
       hardlink_tree(src_dir, dst_dir)
@@ -75,12 +121,15 @@ module Scint
 
     # Materialize a tree using a manifest to avoid directory scans.
     # Manifest entries must be hashes with "path" and "type" keys.
+    # Uses the fastest available file copy strategy (reflink > hardlink > copy).
     def materialize_from_manifest(src_dir, dst_dir, entries)
       src_dir = src_dir.to_s
       dst_dir = dst_dir.to_s
       entries = Array(entries)
       raise Errno::ENOENT, src_dir unless Dir.exist?(src_dir)
       mkdir_p(dst_dir)
+
+      strategy = detect_copy_strategy(src_dir, dst_dir)
 
       entries.each do |entry|
         rel = entry["path"].to_s
@@ -107,7 +156,7 @@ module Scint
           next if File.exist?(dst_path)
 
           begin
-            clonefile(src_path, dst_path)
+            _link_or_copy(src_path, dst_path, strategy)
           rescue Errno::EEXIST
             next
           rescue SystemCallError
@@ -116,6 +165,55 @@ module Scint
           end
         end
       end
+    end
+
+    # Fast file link/copy using a pre-detected strategy (no per-file probing).
+    def _link_or_copy(src, dst, strategy)
+      case strategy
+      when :reflink
+        if Platform.macos?
+          return if system("cp", "-c", src, dst, [:out, :err] => File::NULL)
+        elsif Platform.linux?
+          return if system("cp", "--reflink=always", src, dst, [:out, :err] => File::NULL)
+        end
+        # reflink failed for this file, try hardlink
+        begin
+          File.link(src, dst)
+          return
+        rescue SystemCallError; end
+        FileUtils.cp(src, dst)
+      when :hardlink
+        begin
+          File.link(src, dst)
+          return
+        rescue SystemCallError; end
+        FileUtils.cp(src, dst)
+      else
+        FileUtils.cp(src, dst)
+      end
+    end
+
+    LINKER_SCRIPT = File.expand_path("linker.sh", __dir__).freeze
+
+    # Bulk-link cached gem directories into dst_parent.
+    # Opens one helper process (linker.sh) and writes gem basenames to its
+    # stdin. The helper probes the fastest FS strategy once then applies it
+    # to every gem.
+    def bulk_link_gems(src_parent, dst_parent, gem_names)
+      src_parent = src_parent.to_s
+      dst_parent = dst_parent.to_s
+      gem_names = Array(gem_names)
+      return 0 if gem_names.empty?
+
+      mkdir_p(dst_parent)
+
+      IO.popen(["/bin/bash", LINKER_SCRIPT], "w") do |io|
+        io.puts src_parent
+        io.puts dst_parent
+        gem_names.each { |name| io.puts name }
+      end
+
+      gem_names.size
     end
 
     # Clone many source directories into one destination parent directory.
@@ -131,6 +229,8 @@ module Scint
       return 0 if sources.empty?
 
       copied = 0
+      strategy = sources.first ? detect_copy_strategy(sources.first, dst_parent) : :copy
+
       sources.each_slice([chunk_size.to_i, 1].max) do |slice|
         pending = slice.reject do |src|
           Dir.exist?(File.join(dst_parent, File.basename(src)))
@@ -138,10 +238,12 @@ module Scint
         next if pending.empty?
 
         ok = false
-        if Platform.macos?
-          ok = system("cp", "-cR", *pending, dst_parent, [:out, :err] => File::NULL)
-        elsif Platform.linux?
-          ok = system("cp", "--reflink=always", "-R", *pending, dst_parent, [:out, :err] => File::NULL)
+        if strategy == :reflink
+          if Platform.macos?
+            ok = system("cp", "-cR", *pending, dst_parent, [:out, :err] => File::NULL)
+          elsif Platform.linux?
+            ok = system("cp", "--reflink=always", "-R", *pending, dst_parent, [:out, :err] => File::NULL)
+          end
         end
 
         unless ok

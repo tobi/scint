@@ -31,6 +31,33 @@ module Scint
         FS.atomic_write(path, json)
       end
 
+      # Write a flat file listing (one relative path per line) into the gem dir.
+      # This enables bulk install via a single `cp -al` or `cpio -pld` call.
+      DOTFILES_NAME = ".scint-files"
+
+      def write_dotfiles(gem_dir, manifest = nil)
+        files = if manifest
+          Array(manifest["files"]).filter_map { |e| e["path"] if e["type"] != "dir" }
+        else
+          collect_file_paths(gem_dir)
+        end
+
+        dotfiles_path = File.join(gem_dir, DOTFILES_NAME)
+        File.write(dotfiles_path, files.sort.join("\n") + "\n")
+      end
+
+      def collect_file_paths(root)
+        paths = []
+        Find.find(root) do |path|
+          next if path == root
+          rel = path.delete_prefix("#{root}/")
+          next if rel == DOTFILES_NAME
+          stat = File.lstat(path)
+          paths << rel unless stat.directory?
+        end
+        paths
+      end
+
       def collect_files(root)
         entries = []
         Find.find(root) do |path|
