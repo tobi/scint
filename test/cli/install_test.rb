@@ -868,7 +868,7 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
-  def test_prepare_git_source_refreshes_extracted_checkout_when_revision_changes
+  def test_prepare_git_source_refreshes_when_cache_removed
     with_tmpdir do |dir|
       repo = init_git_repo(dir, "demo.gemspec" => "Gem::Specification.new\n", "REVISION" => "one\n")
       first = git_commit_hash(repo)
@@ -881,13 +881,17 @@ class CLIInstallTest < Minitest::Test
       entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
 
       install.send(:prepare_git_source, entry, cache)
-      extracted = cache.extracted_path(spec)
-      assert_equal "one\n", File.read(File.join(extracted, "REVISION"))
+      cached = cache.cached_path(spec)
+      assert_equal "one\n", File.read(File.join(cached, "REVISION"))
+
+      FileUtils.rm_rf(cached)
+      FileUtils.rm_f(cache.cached_spec_path(spec))
+      FileUtils.rm_f(cache.cached_manifest_path(spec))
 
       newer_spec = fake_spec(name: "demo", version: "1.0.0", source: Scint::Source::Git.new(uri: repo, revision: second))
       newer_entry = Scint::PlanEntry.new(spec: newer_spec, action: :download, cached_path: nil, gem_path: nil)
       install.send(:prepare_git_source, newer_entry, cache)
-      assert_equal "two\n", File.read(File.join(extracted, "REVISION"))
+      assert_equal "two\n", File.read(File.join(cached, "REVISION"))
     end
   end
 
@@ -900,16 +904,20 @@ class CLIInstallTest < Minitest::Test
       entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
 
       install.send(:prepare_git_source, entry, cache)
-      extracted = cache.extracted_path(spec)
-      assert_equal "one\n", File.read(File.join(extracted, "REVISION"))
+      cached = cache.cached_path(spec)
+      assert_equal "one\n", File.read(File.join(cached, "REVISION"))
 
       commit_file(repo, "REVISION", "two\n", "update")
+      FileUtils.rm_rf(cached)
+      FileUtils.rm_f(cache.cached_spec_path(spec))
+      FileUtils.rm_f(cache.cached_manifest_path(spec))
+
       install.send(:prepare_git_source, entry, cache)
-      assert_equal "two\n", File.read(File.join(extracted, "REVISION"))
+      assert_equal "two\n", File.read(File.join(cached, "REVISION"))
     end
   end
 
-  def test_prepare_git_source_materializes_per_gem_from_incoming_checkout
+  def test_prepare_git_source_materializes_per_gem_from_repo_checkout
     with_tmpdir do |dir|
       repo = init_git_repo(dir, "README.md" => "seed\n")
       with_cwd(repo) do
@@ -927,14 +935,10 @@ class CLIInstallTest < Minitest::Test
 
       install.send(:prepare_git_source, entry, cache)
 
-      extracted = cache.extracted_path(spec)
-      assert File.exist?(File.join(extracted, "demo.gemspec"))
-      assert File.exist?(File.join(extracted, "lib", "demo.rb"))
-      refute File.exist?(File.join(extracted, "ROOT_ONLY.txt"))
-
-      incoming_checkout = cache.git_checkout_path(repo, commit)
-      assert Dir.exist?(incoming_checkout)
-      assert File.exist?(File.join(incoming_checkout, "ROOT_ONLY.txt"))
+      cached = cache.cached_path(spec)
+      assert File.exist?(File.join(cached, "demo.gemspec"))
+      assert File.exist?(File.join(cached, "lib", "demo.rb"))
+      refute File.exist?(File.join(cached, "ROOT_ONLY.txt"))
     end
   end
 
@@ -963,21 +967,26 @@ class CLIInstallTest < Minitest::Test
       install = Scint::CLI::Install.new([])
       source = Scint::Source::Git.new(uri: "https://github.com/shopify/mruby-engine.git", revision: "main", submodules: true)
       spec = fake_spec(name: "mruby_engine", version: "0.0.3", source: source)
-      captured_submodules = nil
+      entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
+      called = false
 
       install.stub(:clone_git_repo, ->(*_args) {}) do
         install.stub(:fetch_git_repo, ->(*_args) {}) do
           install.stub(:resolve_git_revision, ->(*_args) { "deadbeef" }) do
-            install.stub(:materialize_git_checkout, lambda { |_bare, _checkout, _rev, _spec, _uri, submodules: false|
-              captured_submodules = submodules
+            install.stub(:checkout_git_tree_with_submodules, lambda { |_bare, destination, *_rest|
+              called = true
+              FileUtils.mkdir_p(destination)
+              File.write(File.join(destination, "mruby_engine.gemspec"), "Gem::Specification.new\n")
             }) do
-              install.send(:prepare_git_checkout, spec, cache, fetch: true)
+              install.stub(:checkout_git_tree, ->(*_args) { raise "unexpected" }) do
+                install.send(:assemble_git_spec, entry, cache, fetch: true)
+              end
             end
           end
         end
       end
 
-      assert_equal true, captured_submodules
+      assert_equal true, called
     end
   end
 
@@ -1012,41 +1021,6 @@ class CLIInstallTest < Minitest::Test
 
       assert Dir.exist?(destination)
       assert calls.any? { |args| args.include?("submodule") && args.include?("update") }
-    end
-  end
-
-  def test_materialize_git_checkout_refreshes_legacy_marker_when_submodules_enabled
-    with_tmpdir do |dir|
-      install = Scint::CLI::Install.new([])
-      bare_repo = File.join(dir, "repo.git")
-      checkout = File.join(dir, "checkout")
-      spec = fake_spec(name: "mruby_engine", version: "0.0.3")
-
-      FileUtils.mkdir_p(checkout)
-      marker = install.send(:git_checkout_marker_path, checkout)
-      File.write(marker, "deadbeef\n")
-
-      called = false
-      install.stub(:checkout_git_tree_with_submodules, lambda { |_bare, destination, *_rest|
-        called = true
-        FileUtils.mkdir_p(destination)
-        File.write(File.join(destination, "mruby_engine.gemspec"), "Gem::Specification.new\n")
-      }) do
-        install.send(
-          :materialize_git_checkout,
-          bare_repo,
-          checkout,
-          "deadbeef",
-          spec,
-          "https://github.com/Shopify/mruby-engine.git",
-          submodules: true,
-        )
-      end
-
-      assert called
-      marker_contents = File.read(marker)
-      assert_includes marker_contents, "revision=deadbeef"
-      assert_includes marker_contents, "submodules=1"
     end
   end
 
@@ -1715,7 +1689,7 @@ class CLIInstallTest < Minitest::Test
       entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
 
       called = false
-      install.stub(:prepare_git_checkout, ->(*_args, **_opts) { called = true }) do
+      install.stub(:ensure_git_repo_for_spec, ->(*_args, **_opts) { called = true }) do
         install.send(:download_gem, entry, cache)
       end
       assert_equal true, called
@@ -1763,24 +1737,44 @@ class CLIInstallTest < Minitest::Test
       entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
 
       called = false
-      install.stub(:materialize_git_spec, ->(*_args, **_opts) { called = true }) do
+      install.stub(:assemble_git_spec, ->(*_args, **_opts) { called = true }) do
         install.send(:extract_gem, entry, cache)
       end
       assert_equal true, called
     end
   end
 
-  def test_extract_gem_skips_already_extracted
+  def test_extract_gem_skips_already_cached
     with_tmpdir do |dir|
       install = Scint::CLI::Install.new([])
       cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = fake_spec(name: "rack", version: "2.2.8", source: "https://rubygems.org")
       entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
 
-      # Pre-create extracted dir
-      FileUtils.mkdir_p(cache.extracted_path(spec))
+      cached = cache.cached_path(spec)
+      FileUtils.mkdir_p(cached)
+      File.write(File.join(cached, "lib.rb"), "")
+
+      gemspec = Gem::Specification.new do |s|
+        s.name = "rack"
+        s.version = Gem::Version.new("2.2.8")
+        s.summary = "rack"
+        s.require_paths = ["lib"]
+      end
+
+      FileUtils.mkdir_p(File.dirname(cache.cached_spec_path(spec)))
+      File.binwrite(cache.cached_spec_path(spec), Marshal.dump(gemspec))
+      manifest = Scint::Cache::Manifest.build(
+        spec: spec,
+        gem_dir: cached,
+        abi_key: Scint::Platform.abi_key,
+        source: { "type" => "rubygems", "uri" => "https://rubygems.org" },
+        extensions: false,
+      )
+      Scint::Cache::Manifest.write(cache.cached_manifest_path(spec), manifest)
 
       install.send(:extract_gem, entry, cache)
+      assert Dir.exist?(cached)
     end
   end
 
@@ -1810,8 +1804,8 @@ class CLIInstallTest < Minitest::Test
 
       install.send(:extract_gem, entry, cache)
 
-      extracted = cache.extracted_path(spec)
-      assert Dir.exist?(extracted)
+      cached = cache.cached_path(spec)
+      assert Dir.exist?(cached)
     end
   end
 
@@ -2520,27 +2514,6 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
-  def test_git_spec_layout_current_true_when_matching_root_gemspec_exists
-    with_tmpdir do |dir|
-      install = Scint::CLI::Install.new([])
-      spec = fake_spec(name: "actionpack", version: "8.2.0.alpha", source: "https://github.com/rails/rails.git")
-      File.write(File.join(dir, "actionpack.gemspec"), "")
-
-      assert install.send(:git_spec_layout_current?, dir, spec)
-    end
-  end
-
-  def test_git_spec_layout_current_false_for_repo_root_layout_without_matching_root_gemspec
-    with_tmpdir do |dir|
-      install = Scint::CLI::Install.new([])
-      spec = fake_spec(name: "actionpack", version: "8.2.0.alpha", source: "https://github.com/rails/rails.git")
-      FileUtils.mkdir_p(File.join(dir, "actionpack"))
-      File.write(File.join(dir, "actionpack", "actionpack.gemspec"), "")
-
-      refute install.send(:git_spec_layout_current?, dir, spec)
-    end
-  end
-
   # --- load_cached_gemspec with YAML format ---
 
   def test_load_cached_gemspec_handles_yaml_format
@@ -2581,12 +2554,23 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
-  # --- git_checkout_marker_path ---
+  def test_load_gemspec_reads_extracted_gemspec_when_available
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      spec = fake_spec(name: "demo", version: "1.0.0")
+      extracted = File.join(dir, "extracted")
 
-  def test_git_checkout_marker_path
-    install = Scint::CLI::Install.new([])
-    result = install.send(:git_checkout_marker_path, "/tmp/extracted/demo-1.0.0")
-    assert_equal "/tmp/extracted/demo-1.0.0.scint_git_revision", result
+      FileUtils.mkdir_p(File.join(extracted, "lib"))
+      File.write(File.join(extracted, "lib", "demo.rb"), "")
+      File.write(
+        File.join(extracted, "demo.gemspec"),
+        "Gem::Specification.new do |s| s.name='demo'; s.version='1.0.0'; s.require_paths=['lib']; end\n",
+      )
+
+      gemspec = install.send(:load_gemspec, extracted, spec, cache)
+      assert_equal "demo", gemspec.name
+    end
   end
 
   # --- git_mutex_for ---
