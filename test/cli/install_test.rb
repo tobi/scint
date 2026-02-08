@@ -793,6 +793,35 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
+  def test_prepare_git_source_materializes_per_gem_from_incoming_checkout
+    with_tmpdir do |dir|
+      repo = init_git_repo(dir, "README.md" => "seed\n")
+      with_cwd(repo) do
+        FileUtils.mkdir_p("demo/lib")
+      end
+      commit_file(repo, "demo/demo.gemspec", "Gem::Specification.new { |s| s.name = 'demo'; s.version = '1.0.0' }\n", "add gemspec")
+      commit_file(repo, "demo/lib/demo.rb", "module Demo; end\n", "add lib")
+      commit_file(repo, "ROOT_ONLY.txt", "root\n", "add root marker")
+      commit = git_commit_hash(repo)
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      source = Scint::Source::Git.new(uri: repo, revision: commit, glob: "{,*,*/*}.gemspec")
+      spec = fake_spec(name: "demo", version: "1.0.0", source: source)
+      entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
+
+      install.send(:prepare_git_source, entry, cache)
+
+      extracted = cache.extracted_path(spec)
+      assert File.exist?(File.join(extracted, "demo.gemspec"))
+      assert File.exist?(File.join(extracted, "lib", "demo.rb"))
+      refute File.exist?(File.join(extracted, "ROOT_ONLY.txt"))
+
+      incoming_checkout = cache.git_checkout_path(repo, commit)
+      assert Dir.exist?(incoming_checkout)
+      assert File.exist?(File.join(incoming_checkout, "ROOT_ONLY.txt"))
+    end
+  end
+
   def test_clone_git_source_fetches_existing_bare_repo
     with_tmpdir do |dir|
       repo = init_git_repo(dir, "demo.gemspec" => "Gem::Specification.new\n", "REVISION" => "one\n")
@@ -1078,10 +1107,11 @@ class CLIInstallTest < Minitest::Test
       spec = fake_spec(name: "demo", version: "1.0.0", source: git_source)
       entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
 
-      # Stub prepare_git_source to avoid actual git operations
-      install.stub(:prepare_git_source, nil) do
+      called = false
+      install.stub(:prepare_git_checkout, ->(*_args, **_opts) { called = true }) do
         install.send(:download_gem, entry, cache)
       end
+      assert_equal true, called
     end
   end
 
@@ -1117,7 +1147,7 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
-  def test_extract_gem_skips_git_source
+  def test_extract_gem_materializes_git_source_from_checkout
     with_tmpdir do |dir|
       install = Scint::CLI::Install.new([])
       cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
@@ -1125,7 +1155,11 @@ class CLIInstallTest < Minitest::Test
       spec = fake_spec(name: "demo", version: "1.0.0", source: git_source)
       entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
 
-      install.send(:extract_gem, entry, cache)
+      called = false
+      install.stub(:materialize_git_spec, ->(*_args, **_opts) { called = true }) do
+        install.send(:extract_gem, entry, cache)
+      end
+      assert_equal true, called
     end
   end
 

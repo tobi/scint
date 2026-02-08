@@ -504,7 +504,7 @@ module Scint
         spec = entry.spec
         source = spec.source
         if git_source?(source)
-          prepare_git_source(entry, cache)
+          prepare_git_checkout(spec, cache, fetch: false)
           return
         end
         source_uri = source.to_s
@@ -542,8 +542,12 @@ module Scint
         spec = entry.spec
         source_uri = spec.source.to_s
 
-        # Git/path gems are already materialized by checkout or local path.
-        return if git_source?(spec.source)
+        # Git gems are extracted from the cached checkout; path gems are
+        # linked directly from local source.
+        if git_source?(spec.source)
+          materialize_git_spec(entry, cache)
+          return
+        end
         return if source_uri.start_with?("/") || !source_uri.start_with?("http")
 
         extracted = cache.extracted_path(spec)
@@ -566,7 +570,14 @@ module Scint
       end
 
       def prepare_git_source(entry, cache)
+        # Legacy helper used by tests/callers that expect git download+extract
+        # in a single step.
         spec = entry.spec
+        checkout_dir, resolved_revision, _uri = prepare_git_checkout(spec, cache, fetch: true)
+        materialize_git_spec(entry, cache, checkout_dir: checkout_dir, resolved_revision: resolved_revision)
+      end
+
+      def prepare_git_checkout(spec, cache, fetch: false)
         source = spec.source
         uri, revision = git_source_ref(source)
 
@@ -575,41 +586,72 @@ module Scint
         # Serialize all git operations per bare repo — git uses index.lock
         # and can't handle concurrent checkouts from the same repo.
         git_mutex_for(bare_repo).synchronize do
-          clone_git_repo(uri, bare_repo) unless Dir.exist?(bare_repo)
-          fetch_git_repo(bare_repo)
+          if Dir.exist?(bare_repo)
+            fetch_git_repo(bare_repo) if fetch
+          else
+            clone_git_repo(uri, bare_repo)
+            fetch_git_repo(bare_repo)
+          end
 
           resolved_revision = resolve_git_revision(bare_repo, revision)
+          incoming_checkout = cache.git_checkout_path(uri, resolved_revision)
+          materialize_git_checkout(bare_repo, incoming_checkout, resolved_revision, spec, uri)
+          [incoming_checkout, resolved_revision, uri]
+        end
+      end
 
-          extracted = cache.extracted_path(spec)
-          marker = git_checkout_marker_path(extracted)
-          if Dir.exist?(extracted) && File.exist?(marker)
-            return if File.read(marker).strip == resolved_revision
+      def materialize_git_spec(entry, cache, checkout_dir: nil, resolved_revision: nil)
+        spec = entry.spec
+        checkout_dir, resolved_revision, _uri = prepare_git_checkout(spec, cache, fetch: false) unless checkout_dir && resolved_revision
+        gem_root = resolve_git_gem_subdir(checkout_dir, spec)
+        extracted = cache.extracted_path(spec)
+        marker = git_checkout_marker_path(extracted)
+        if Dir.exist?(extracted) && File.exist?(marker) && File.read(marker).strip == resolved_revision
+          return
+        end
+
+        tmp = "#{extracted}.#{Process.pid}.#{Thread.current.object_id}.tmp"
+        begin
+          FileUtils.rm_rf(tmp)
+          FS.clone_tree(gem_root, tmp)
+
+          FileUtils.rm_rf(extracted)
+          FS.atomic_move(tmp, extracted)
+          FS.atomic_write(marker, "#{resolved_revision}\n")
+        ensure
+          FileUtils.rm_rf(tmp) if tmp && File.exist?(tmp)
+        end
+      end
+
+      def materialize_git_checkout(bare_repo, checkout_dir, resolved_revision, spec, uri)
+        marker = git_checkout_marker_path(checkout_dir)
+        if Dir.exist?(checkout_dir) && File.exist?(marker)
+          return if File.read(marker).strip == resolved_revision
+        end
+
+        tmp = "#{checkout_dir}.#{Process.pid}.#{Thread.current.object_id}.tmp"
+        begin
+          FileUtils.rm_rf(tmp)
+          FileUtils.mkdir_p(tmp)
+
+          _out, err, status = git_capture3(
+            "--git-dir", bare_repo,
+            "--work-tree", tmp,
+            "checkout",
+            "-f",
+            resolved_revision,
+            "--",
+            ".",
+          )
+          unless status.success?
+            raise InstallError, "Git checkout failed for #{spec.name} (#{uri}@#{resolved_revision}): #{err.to_s.strip}"
           end
 
-          tmp = "#{extracted}.#{Process.pid}.#{Thread.current.object_id}.tmp"
-          begin
-            FileUtils.rm_rf(tmp)
-            FileUtils.mkdir_p(tmp)
-
-            _out, err, status = git_capture3(
-              "--git-dir", bare_repo,
-              "--work-tree", tmp,
-              "checkout",
-              "-f",
-              resolved_revision,
-              "--",
-              ".",
-            )
-            unless status.success?
-              raise InstallError, "Git checkout failed for #{spec.name} (#{uri}@#{resolved_revision}): #{err.to_s.strip}"
-            end
-
-            FileUtils.rm_rf(extracted)
-            FS.atomic_move(tmp, extracted)
-            FS.atomic_write(marker, "#{resolved_revision}\n")
-          ensure
-            FileUtils.rm_rf(tmp) if tmp && File.exist?(tmp)
-          end
+          FileUtils.rm_rf(checkout_dir)
+          FS.atomic_move(tmp, checkout_dir)
+          FS.atomic_write(marker, "#{resolved_revision}\n")
+        ensure
+          FileUtils.rm_rf(tmp) if tmp && File.exist?(tmp)
         end
       end
 
@@ -846,6 +888,11 @@ module Scint
         source = spec.source
         glob = source.respond_to?(:glob) ? source.glob : Source::Git::DEFAULT_GLOB
         Dir.glob(File.join(repo_root, glob)).each do |path|
+          return File.dirname(path) if File.basename(path, ".gemspec") == name
+        end
+        # Compatibility fallback for monorepos whose gem layout does not match
+        # the lockfile glob exactly.
+        Dir.glob(File.join(repo_root, "**", "*.gemspec")).each do |path|
           return File.dirname(path) if File.basename(path, ".gemspec") == name
         end
 

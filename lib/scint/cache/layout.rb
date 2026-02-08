@@ -35,7 +35,7 @@ module Scint
       end
 
       def git_dir
-        File.join(@root, "git")
+        File.join(inbound_dir, "git")
       end
 
       # Isolated gem home used while compiling native extensions during install.
@@ -78,8 +78,14 @@ module Scint
       end
 
       def git_path(uri)
-        slug = Digest::SHA256.hexdigest(uri.to_s)[0, 16]
-        File.join(git_dir, slug)
+        slug = git_slug(uri)
+        File.join(git_dir, "repos", slug)
+      end
+
+      def git_checkout_path(uri, revision)
+        slug = git_slug(uri)
+        rev = revision.to_s.gsub(/[^0-9A-Za-z._-]/, "_")
+        File.join(git_dir, "checkouts", slug, rev)
       end
 
       # -- Helpers -------------------------------------------------------------
@@ -125,6 +131,10 @@ module Scint
         else
           Digest::SHA256.hexdigest(str)[0, 16]
         end
+      end
+
+      def git_slug(uri)
+        Digest::SHA256.hexdigest(uri.to_s)[0, 16]
       end
     end
   end

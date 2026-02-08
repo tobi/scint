@@ -58,7 +58,14 @@ class CacheLayoutTest < Minitest::Test
     layout = Scint::Cache::Layout.new(root: "/tmp/cache")
     path = layout.git_path("https://github.com/ruby/ruby.git")
 
-    assert_match %r{/tmp/cache/git/[0-9a-f]{16}$}, path
+    assert_match %r{/tmp/cache/inbound/git/repos/[0-9a-f]{16}$}, path
+  end
+
+  def test_git_checkout_path_scopes_by_revision
+    layout = Scint::Cache::Layout.new(root: "/tmp/cache")
+    path = layout.git_checkout_path("https://github.com/ruby/ruby.git", "abc123")
+
+    assert_equal "/tmp/cache/inbound/git/checkouts/#{File.basename(layout.git_path("https://github.com/ruby/ruby.git"))}/abc123", path
   end
 
   def test_install_ruby_dir_is_under_install_env
