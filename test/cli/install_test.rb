@@ -4315,6 +4315,309 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
+  # --- gemspec VERSION= env var handling (kgio-style abort) ---
+
+  def test_find_gemspec_rescues_system_exit_from_abort
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      # Simulate kgio-style gemspec: ENV["VERSION"] or abort "VERSION= must be specified"
+      File.write(File.join(dir, "kgio.gemspec"), <<~RUBY)
+        ENV["VERSION"] or abort "VERSION= must be specified"
+        Gem::Specification.new do |s|
+          s.name = "kgio"
+          s.version = ENV["VERSION"]
+          s.summary = "kgio"
+          s.authors = ["test"]
+        end
+      RUBY
+
+      # Without VERSION env, abort raises SystemExit — must be caught
+      result = install.send(:find_gemspec, dir, "kgio")
+      # Should not crash; returns nil or the spec if VERSION is set elsewhere
+      # The key assertion is that it doesn't raise SystemExit
+      assert_nil(result) || assert_kind_of(Gem::Specification, result)
+    end
+  end
+
+  def test_load_gemspec_file_sets_version_env_from_spec
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      spec = fake_spec(name: "kgio", version: "2.11.4")
+
+      File.write(File.join(dir, "kgio.gemspec"), <<~RUBY)
+        ENV["VERSION"] or abort "VERSION= must be specified"
+        Gem::Specification.new do |s|
+          s.name = "kgio"
+          s.version = ENV["VERSION"]
+          s.summary = "kgio"
+          s.authors = ["test"]
+        end
+      RUBY
+
+      result = install.send(:load_gemspec_file, File.join(dir, "kgio.gemspec"), spec)
+      assert_equal "kgio", result.name
+      assert_equal Gem::Version.new("2.11.4"), result.version
+    end
+  end
+
+  def test_load_gemspec_file_does_not_override_existing_version_env
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      spec = fake_spec(name: "kgio", version: "2.11.4")
+
+      File.write(File.join(dir, "kgio.gemspec"), <<~RUBY)
+        Gem::Specification.new do |s|
+          s.name = "kgio"
+          s.version = ENV["VERSION"]
+          s.summary = "kgio"
+          s.authors = ["test"]
+        end
+      RUBY
+
+      old_version = ENV["VERSION"]
+      begin
+        ENV["VERSION"] = "9.9.9"
+        result = install.send(:load_gemspec_file, File.join(dir, "kgio.gemspec"), spec)
+        assert_equal Gem::Version.new("9.9.9"), result.version
+        # VERSION env should be preserved
+        assert_equal "9.9.9", ENV["VERSION"]
+      ensure
+        ENV["VERSION"] = old_version
+      end
+    end
+  end
+
+  def test_load_gemspec_file_restores_version_env_after_load
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      spec = fake_spec(name: "kgio", version: "2.11.4")
+
+      File.write(File.join(dir, "kgio.gemspec"), <<~RUBY)
+        Gem::Specification.new do |s|
+          s.name = "kgio"
+          s.version = ENV["VERSION"]
+          s.summary = "kgio"
+          s.authors = ["test"]
+        end
+      RUBY
+
+      old_version = ENV["VERSION"]
+      begin
+        ENV.delete("VERSION")
+        install.send(:load_gemspec_file, File.join(dir, "kgio.gemspec"), spec)
+        assert_nil ENV["VERSION"], "VERSION env should be restored to nil after load"
+      ensure
+        ENV["VERSION"] = old_version
+      end
+    end
+  end
+
+  def test_read_require_paths_rescues_system_exit
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      broken_spec = File.join(dir, "abort.gemspec")
+      File.write(broken_spec, 'abort "VERSION= must be specified"')
+      result = install.send(:read_require_paths, broken_spec)
+      assert_equal ["lib"], result
+    end
+  end
+
+  def test_read_gemspec_from_extracted_sets_version_env
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      spec = fake_spec(name: "kgio", version: "2.11.4")
+
+      gem_dir = File.join(dir, "kgio-2.11.4")
+      FileUtils.mkdir_p(gem_dir)
+      File.write(File.join(gem_dir, "kgio.gemspec"), <<~RUBY)
+        ENV["VERSION"] or abort "VERSION= must be specified"
+        Gem::Specification.new do |s|
+          s.name = "kgio"
+          s.version = ENV["VERSION"]
+          s.summary = "kgio"
+          s.authors = ["test"]
+        end
+      RUBY
+
+      old_version = ENV["VERSION"]
+      begin
+        ENV.delete("VERSION")
+        result = install.send(:read_gemspec_from_extracted, gem_dir, spec)
+        assert_equal "kgio", result.name
+        assert_equal Gem::Version.new("2.11.4"), result.version
+        assert_nil ENV["VERSION"], "VERSION env should be cleaned up"
+      ensure
+        ENV["VERSION"] = old_version
+      end
+    end
+  end
+
+  # --- cached gemspec require_paths preservation (Marshal roundtrip bug) ---
+
+  def test_cache_gemspec_preserves_require_paths_with_ext
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      spec = fake_spec(name: "libv8-node", version: "24.1.0.0", platform: "x86_64-linux")
+
+      gemspec = Gem::Specification.new do |s|
+        s.name = "libv8-node"
+        s.version = Gem::Version.new("24.1.0.0")
+        s.platform = "x86_64-linux"
+        s.authors = ["test"]
+        s.summary = "libv8-node"
+        s.require_paths = ["lib", "ext"]
+      end
+
+      install.send(:cache_gemspec, spec, gemspec, cache)
+
+      # Read back the cached spec and verify require_paths preserved
+      cached_dir = cache.cached_path(spec)
+      FileUtils.mkdir_p(File.join(cached_dir, "lib"))
+      FileUtils.mkdir_p(File.join(cached_dir, "ext"))
+
+      loaded = install.send(:load_cached_gemspec, spec, cache, cached_dir)
+      assert_equal ["lib", "ext"], loaded.require_paths,
+        "require_paths with 'ext' should survive caching (was lost via Marshal roundtrip)"
+    end
+  end
+
+  def test_promote_assembled_gem_preserves_require_paths
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      spec = fake_spec(name: "libv8-node", version: "24.1.0.0", platform: "x86_64-linux")
+
+      gemspec = Gem::Specification.new do |s|
+        s.name = "libv8-node"
+        s.version = Gem::Version.new("24.1.0.0")
+        s.platform = "x86_64-linux"
+        s.authors = ["test"]
+        s.summary = "libv8-node"
+        s.require_paths = ["lib", "ext"]
+      end
+
+      # Create a fake assembling dir
+      assembling = cache.assembling_path(spec)
+      FileUtils.mkdir_p(File.join(assembling, "lib"))
+      FileUtils.mkdir_p(File.join(assembling, "ext"))
+      File.write(File.join(assembling, "lib", "dummy.rb"), "")
+      File.write(File.join(assembling, "ext", "location.rb"), "")
+
+      install.send(:promote_assembled_gem, spec, cache, assembling, gemspec, extensions: false)
+
+      # Read back the promoted cached spec
+      cached_dir = cache.cached_path(spec)
+      loaded = install.send(:load_cached_gemspec, spec, cache, cached_dir)
+      assert_equal ["lib", "ext"], loaded.require_paths,
+        "require_paths should be preserved through promote_assembled_gem"
+    end
+  end
+
+  def test_marshal_roundtrip_loses_require_paths_proving_fix_needed
+    # This test documents the RubyGems bug that our fix works around:
+    # Marshal.dump/load on Gem::Specification drops require_paths.
+    spec = Gem::Specification.new do |s|
+      s.name = "test"
+      s.version = "1.0"
+      s.require_paths = ["lib", "ext"]
+    end
+
+    data = Marshal.dump(spec)
+    reloaded = Marshal.load(data)
+
+    # This proves Marshal roundtrip loses "ext" from require_paths
+    assert_equal ["lib"], reloaded.require_paths,
+      "Gem::Specification._dump drops require_paths — this is the bug we work around"
+    assert_equal ["lib", "ext"], spec.require_paths,
+      "Original should still have both paths"
+  end
+
+  def test_load_cached_gemspec_reads_ruby_format
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      spec = fake_spec(name: "libv8-node", version: "24.1.0.0", platform: "x86_64-linux")
+
+      gemspec = Gem::Specification.new do |s|
+        s.name = "libv8-node"
+        s.version = Gem::Version.new("24.1.0.0")
+        s.platform = "x86_64-linux"
+        s.authors = ["test"]
+        s.summary = "libv8-node"
+        s.require_paths = ["lib", "ext"]
+      end
+
+      # Write in to_ruby format (our new format)
+      spec_path = cache.cached_spec_path(spec)
+      FileUtils.mkdir_p(File.dirname(spec_path))
+      File.write(spec_path, gemspec.to_ruby)
+
+      cached_dir = cache.cached_path(spec)
+      FileUtils.mkdir_p(File.join(cached_dir, "lib"))
+      FileUtils.mkdir_p(File.join(cached_dir, "ext"))
+
+      loaded = install.send(:load_cached_gemspec, spec, cache, cached_dir)
+      assert_equal "libv8-node", loaded.name
+      assert_equal ["lib", "ext"], loaded.require_paths
+    end
+  end
+
+  def test_load_cached_gemspec_reads_legacy_yaml_format
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      spec = fake_spec(name: "rack", version: "2.2.8")
+
+      gemspec = Gem::Specification.new do |s|
+        s.name = "rack"
+        s.version = Gem::Version.new("2.2.8")
+        s.authors = ["test"]
+        s.summary = "rack"
+        s.require_paths = ["lib"]
+      end
+
+      # Write in legacy YAML format
+      spec_path = cache.cached_spec_path(spec)
+      FileUtils.mkdir_p(File.dirname(spec_path))
+      File.write(spec_path, gemspec.to_yaml)
+
+      cached_dir = cache.cached_path(spec)
+      FileUtils.mkdir_p(File.join(cached_dir, "lib"))
+
+      loaded = install.send(:load_cached_gemspec, spec, cache, cached_dir)
+      assert_equal "rack", loaded.name
+      assert_equal ["lib"], loaded.require_paths
+    end
+  end
+
+  def test_load_cached_gemspec_reads_legacy_marshal_format
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      spec = fake_spec(name: "rack", version: "2.2.8")
+
+      gemspec = Gem::Specification.new do |s|
+        s.name = "rack"
+        s.version = Gem::Version.new("2.2.8")
+        s.authors = ["test"]
+        s.summary = "rack"
+        s.require_paths = ["lib"]
+      end
+
+      # Write in legacy Marshal format
+      spec_path = cache.cached_spec_path(spec)
+      FileUtils.mkdir_p(File.dirname(spec_path))
+      File.binwrite(spec_path, Marshal.dump(gemspec))
+
+      cached_dir = cache.cached_path(spec)
+      FileUtils.mkdir_p(File.join(cached_dir, "lib"))
+
+      loaded = install.send(:load_cached_gemspec, spec, cache, cached_dir)
+      assert_equal "rack", loaded.name
+    end
+  end
+
   private
 
   def init_git_repo(root_dir, files)

@@ -372,4 +372,64 @@ class PreparerTest < Minitest::Test
       end
     end
   end
+
+  def test_read_gemspec_from_extracted_rescues_system_exit_from_abort
+    with_tmpdir do |dir|
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      pool = FakeDownloadPool.new
+      package = FakePackage.new(gemspec: {})
+      preparer = new_preparer(layout, pool: pool, package: package)
+      spec = fake_spec(name: "kgio", version: "2.11.4")
+
+      extracted = File.join(dir, "extracted")
+      FileUtils.mkdir_p(extracted)
+      File.write(File.join(extracted, "kgio.gemspec"),
+        'ENV["VERSION"] or abort "VERSION= must be specified"')
+
+      old_version = ENV["VERSION"]
+      begin
+        ENV.delete("VERSION")
+        result = preparer.send(:read_gemspec_from_extracted, extracted, spec)
+        # Should set VERSION from spec and load successfully, or return nil — not crash
+        if result
+          assert_equal "kgio", result.name
+        end
+        assert_nil ENV["VERSION"], "VERSION env should be restored"
+      ensure
+        ENV["VERSION"] = old_version
+      end
+    end
+  end
+
+  def test_read_gemspec_from_extracted_sets_version_env_for_dynamic_gemspecs
+    with_tmpdir do |dir|
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      pool = FakeDownloadPool.new
+      package = FakePackage.new(gemspec: {})
+      preparer = new_preparer(layout, pool: pool, package: package)
+      spec = fake_spec(name: "kgio", version: "2.11.4")
+
+      extracted = File.join(dir, "extracted")
+      FileUtils.mkdir_p(extracted)
+      File.write(File.join(extracted, "kgio.gemspec"), <<~RUBY)
+        ENV["VERSION"] or abort "VERSION= must be specified"
+        Gem::Specification.new do |s|
+          s.name = "kgio"
+          s.version = ENV["VERSION"]
+          s.summary = "kgio"
+          s.authors = ["test"]
+        end
+      RUBY
+
+      old_version = ENV["VERSION"]
+      begin
+        ENV.delete("VERSION")
+        result = preparer.send(:read_gemspec_from_extracted, extracted, spec)
+        assert_equal "kgio", result.name
+        assert_equal Gem::Version.new("2.11.4"), result.version
+      ensure
+        ENV["VERSION"] = old_version
+      end
+    end
+  end
 end
