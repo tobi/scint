@@ -77,6 +77,10 @@ module Scint
         File.join(assembling_dir, abi_key, full_name(spec))
       end
 
+      def cached_abi_dir(abi_key = Platform.abi_key)
+        File.join(cached_dir, abi_key)
+      end
+
       def cached_path(spec, abi_key = Platform.abi_key)
         File.join(cached_dir, abi_key, full_name(spec))
       end
