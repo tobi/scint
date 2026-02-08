@@ -38,9 +38,9 @@ class PlannerTest < Minitest::Test
   end
 
   def write_ext_complete(layout, spec)
-    ext_dir = layout.ext_path(spec)
-    FileUtils.mkdir_p(ext_dir)
-    File.write(File.join(ext_dir, "gem.build_complete"), "")
+    cached_dir = layout.cached_path(spec)
+    FileUtils.mkdir_p(cached_dir)
+    File.write(File.join(cached_dir, Scint::Installer::ExtensionBuilder::BUILD_MARKER), "")
   end
 
   def test_plan_one_marks_skip_when_already_installed
@@ -96,9 +96,7 @@ class PlannerTest < Minitest::Test
 
       write_cached_entry(layout, spec, ext_name: "bootsnap")
 
-      cached_ext = layout.ext_path(spec)
-      FileUtils.mkdir_p(cached_ext)
-      File.write(File.join(cached_ext, "gem.build_complete"), "")
+      write_ext_complete(layout, spec)
 
       entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
       assert_equal :link, entry.action
@@ -183,8 +181,7 @@ class PlannerTest < Minitest::Test
       spec = Spec.new(name: "ffi", version: "1.17.0", platform: "ruby", has_extensions: true)
 
       write_cached_entry(layout, spec, ext_name: "ffi_c")
-      FileUtils.mkdir_p(layout.ext_path(spec))
-      File.write(File.join(layout.ext_path(spec), "gem.build_complete"), "")
+      write_ext_complete(layout, spec)
 
       entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
       assert_equal :link, entry.action

@@ -2,12 +2,16 @@
 
 require "fileutils"
 require_relative "layout"
+require_relative "manifest"
+require_relative "validity"
 require_relative "../errors"
 require_relative "../downloader/pool"
 require_relative "../gem/package"
 require_relative "../fs"
 require_relative "../platform"
 require_relative "../worker_pool"
+require_relative "../installer/extension_builder"
+require_relative "../installer/promoter"
 
 module Scint
   module Cache
@@ -75,13 +79,12 @@ module Scint
 
       def task_for(spec)
         inbound = @cache.inbound_path(spec)
-        extracted = @cache.extracted_path(spec)
-        metadata = @cache.spec_cache_path(spec)
+        cached_valid = Cache::Validity.cached_valid?(spec, @cache)
 
         Task.new(
           spec: spec,
           download: !File.exist?(inbound),
-          extract: !Dir.exist?(extracted) || !File.exist?(metadata),
+          extract: !cached_valid,
         )
       end
 
@@ -130,24 +133,27 @@ module Scint
             raise CacheError, "Missing downloaded gem for #{spec.name}: #{inbound}"
           end
 
-          extracted = @cache.extracted_path(spec)
-          metadata = @cache.spec_cache_path(spec)
+          assembling = @cache.assembling_path(spec)
+          tmp = "#{assembling}.#{Process.pid}.#{Thread.current.object_id}.tmp"
 
           gemspec = nil
           if task.extract
-            FileUtils.rm_rf(extracted)
-            FS.mkdir_p(extracted)
-            result = GemPkg::Package.new.extract(inbound, extracted)
+            FileUtils.rm_rf(assembling)
+            FileUtils.rm_rf(tmp)
+            FS.mkdir_p(File.dirname(assembling))
+
+            result = GemPkg::Package.new.extract(inbound, tmp)
             gemspec = result[:gemspec]
-          elsif !File.exist?(metadata)
-            gemspec = GemPkg::Package.new.read_metadata(inbound)
+            FS.atomic_move(tmp, assembling)
           end
 
           if gemspec
-            FS.atomic_write(metadata, gemspec.to_yaml)
+            promote_assembled(spec, assembling, gemspec)
           end
 
           true
+        ensure
+          FileUtils.rm_rf(tmp) if tmp && File.exist?(tmp)
         end
 
         tasks.each do |task|
@@ -167,6 +173,44 @@ module Scint
         failures
       end
 
+      def promote_assembled(spec, assembling, gemspec)
+        return unless assembling && Dir.exist?(assembling)
+
+        cached_dir = @cache.cached_path(spec)
+        promoter = Installer::Promoter.new(root: @cache.root)
+        lock_key = "#{Platform.abi_key}-#{@cache.full_name(spec)}"
+        extensions = Installer::ExtensionBuilder.needs_build?(spec, assembling)
+
+        promoter.with_staging_dir(prefix: "cached") do |staging|
+          FS.clone_tree(assembling, staging)
+          manifest = Cache::Manifest.build(
+            spec: spec,
+            gem_dir: staging,
+            abi_key: Platform.abi_key,
+            source: { "type" => "rubygems", "uri" => spec.source.to_s },
+            extensions: extensions,
+          )
+          spec_payload = gemspec ? Marshal.dump(gemspec) : nil
+          result = promoter.promote_tree(
+            staging_path: staging,
+            target_path: cached_dir,
+            lock_key: lock_key,
+          )
+          write_cached_metadata(spec, spec_payload, manifest) if result == :promoted
+        end
+
+        FileUtils.rm_rf(assembling)
+      end
+
+      def write_cached_metadata(spec, spec_payload, manifest)
+        spec_path = @cache.cached_spec_path(spec)
+        manifest_path = @cache.cached_manifest_path(spec)
+        FS.mkdir_p(File.dirname(spec_path))
+
+        FS.atomic_write(spec_path, spec_payload) if spec_payload
+        Cache::Manifest.write(manifest_path, manifest)
+      end
+
       def download_uri_for(spec)
         source = spec.source.to_s.chomp("/")
         "#{source}/gems/#{@cache.full_name(spec)}.gem"
@@ -174,8 +218,13 @@ module Scint
 
       def purge_artifacts(spec)
         FileUtils.rm_f(@cache.inbound_path(spec))
-        FileUtils.rm_rf(@cache.extracted_path(spec))
+        FileUtils.rm_rf(@cache.assembling_path(spec))
+        FileUtils.rm_rf(@cache.cached_path(spec))
+        FileUtils.rm_f(@cache.cached_spec_path(spec))
+        FileUtils.rm_f(@cache.cached_manifest_path(spec))
         FileUtils.rm_f(@cache.spec_cache_path(spec))
+        FileUtils.rm_rf(@cache.extracted_path(spec))
+        FileUtils.rm_rf(@cache.ext_path(spec))
       end
 
       def result_hash(warmed, skipped, ignored, failures)

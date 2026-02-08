@@ -11,24 +11,21 @@ module Scint
     module ExtensionBuilder
       module_function
 
+      BUILD_MARKER = ".scint.build_complete"
+
       # Build native extensions for a prepared gem.
       # prepared_gem: PreparedGem struct
       # bundle_path:  .bundle/ root
       # abi_key:      e.g. "ruby-3.3.0-arm64-darwin24" (defaults to Platform.abi_key)
       def build(prepared_gem, bundle_path, cache_layout, abi_key: Platform.abi_key, compile_slots: 1, output_tail: nil)
         spec = prepared_gem.spec
-        ruby_dir = Platform.ruby_install_dir(bundle_path)
         build_ruby_dir = cache_layout.install_ruby_dir
-
-        # Check global extension cache first
-        cached_ext = cache_layout.ext_path(spec, abi_key)
-        if Dir.exist?(cached_ext) && File.exist?(File.join(cached_ext, "gem.build_complete"))
-          link_extensions(cached_ext, ruby_dir, spec, abi_key)
-          return true
-        end
-
-        # Build in a temp dir, then cache
         src_dir = prepared_gem.extracted_path
+
+        marker = build_marker_path(src_dir)
+        return true if File.exist?(marker)
+
+        # Build in a temp dir, then sync artifacts into the source tree.
         FS.with_tempdir("scint-ext") do |tmpdir|
           # Stage the full gem source tree in an isolated workspace.
           # Many extconf scripts use paths like ../../vendor relative to ext/,
@@ -53,34 +50,24 @@ module Scint
             compile_extension(ext_dir, ext_build_dir, install_dir, staged_src_dir, spec, build_ruby_dir, compile_slots, output_tail)
           end
 
-          # Write marker
-          File.write(File.join(install_dir, "gem.build_complete"), "")
-
-          # Cache globally
-          FS.mkdir_p(File.dirname(cached_ext))
-          FS.atomic_move(install_dir, cached_ext)
+          sync_extensions_into_gem(install_dir, src_dir)
         end
 
-        link_extensions(cached_ext, ruby_dir, spec, abi_key)
+        File.write(marker, "")
         true
       end
 
       # True when a completed global extension build exists for this spec + ABI.
       def cached_build_available?(spec, cache_layout, abi_key: Platform.abi_key)
-        cached_ext = cache_layout.ext_path(spec, abi_key)
-        Dir.exist?(cached_ext) && File.exist?(File.join(cached_ext, "gem.build_complete"))
+        cached_dir = cache_layout.cached_path(spec, abi_key)
+        File.exist?(build_marker_path(cached_dir))
       end
 
-      # Link already-compiled extensions from global cache into bundle_path.
-      # Returns true when cache was present and linked, false otherwise.
-      def link_cached_build(prepared_gem, bundle_path, cache_layout, abi_key: Platform.abi_key)
+      # Link already-compiled extensions from the cached gem tree.
+      # Returns true when cache marker is present, false otherwise.
+      def link_cached_build(prepared_gem, _bundle_path, cache_layout, abi_key: Platform.abi_key)
         spec = prepared_gem.spec
-        return false unless cached_build_available?(spec, cache_layout, abi_key: abi_key)
-
-        ruby_dir = Platform.ruby_install_dir(bundle_path)
-        cached_ext = cache_layout.ext_path(spec, abi_key)
-        link_extensions(cached_ext, ruby_dir, spec, abi_key)
-        true
+        cached_build_available?(spec, cache_layout, abi_key: abi_key)
       end
 
       # True when a gem has native extension sources that need compiling.
@@ -240,10 +227,11 @@ module Scint
       end
 
       # Sync compiled extension artifacts into a gem's lib directory.
-      # cached_ext is the cache/ext directory produced by builds.
+      # source_dir should contain the compiled artifacts (from build output
+      # or a cached gem tree).
       def sync_extensions_into_gem(cached_ext, gem_dir)
         lib_dir = File.join(gem_dir, "lib")
-        return unless Dir.exist?(lib_dir)
+        FS.mkdir_p(lib_dir)
 
         Dir.glob(File.join(cached_ext, "**", "*.{so,bundle,dll,dylib}")).each do |artifact|
           rel = artifact.delete_prefix("#{cached_ext}/")
@@ -251,6 +239,10 @@ module Scint
           FS.mkdir_p(File.dirname(dest))
           FS.clonefile(artifact, dest)
         end
+      end
+
+      def build_marker_path(gem_dir)
+        File.join(gem_dir, BUILD_MARKER)
       end
 
       def build_env(gem_dir, build_ruby_dir, make_jobs)
