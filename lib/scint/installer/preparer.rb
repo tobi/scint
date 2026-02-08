@@ -7,6 +7,7 @@ require_relative "../cache/layout"
 require_relative "../fs"
 require_relative "../errors"
 require_relative "../spec_utils"
+require_relative "./promoter"
 
 module Scint
   module Installer
