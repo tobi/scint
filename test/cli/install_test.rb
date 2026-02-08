@@ -1711,12 +1711,14 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
-  def test_resolve_git_gem_subdir_returns_repo_root_when_no_matching_gemspec
+  def test_resolve_git_gem_subdir_raises_when_no_matching_gemspec
     with_tmpdir do |dir|
       install = Scint::CLI::Install.new([])
       spec = fake_spec(name: "missing", version: "1.0.0", source: "https://github.com/demo.git")
-      result = install.send(:resolve_git_gem_subdir, dir, spec)
-      assert_equal dir, result
+      error = assert_raises(Scint::InstallError) do
+        install.send(:resolve_git_gem_subdir, dir, spec)
+      end
+      assert_includes error.message, "does not contain missing.gemspec"
     end
   end
 
@@ -2477,6 +2479,26 @@ class CLIInstallTest < Minitest::Test
       entry = Scint::PlanEntry.new(spec: spec, action: :link, cached_path: nil, gem_path: nil)
       result = install.send(:extracted_path_for_entry, entry, cache)
       assert_equal sub, result
+    end
+  end
+
+  def test_extracted_path_for_entry_with_git_source_raises_when_gemspec_missing
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+
+      git_source = Scint::Source::Git.new(uri: "https://github.com/rails/rails.git")
+      spec = fake_spec(name: "missing", version: "1.0.0", source: git_source)
+
+      extracted = cache.extracted_path(spec)
+      FileUtils.mkdir_p(extracted)
+      File.write(File.join(extracted, "other.gemspec"), "")
+
+      entry = Scint::PlanEntry.new(spec: spec, action: :link, cached_path: nil, gem_path: nil)
+      error = assert_raises(Scint::InstallError) do
+        install.send(:extracted_path_for_entry, entry, cache)
+      end
+      assert_includes error.message, "does not contain missing.gemspec"
     end
   end
 

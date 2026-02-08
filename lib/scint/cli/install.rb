@@ -849,7 +849,9 @@ module Scint
           return File.dirname(path) if File.basename(path, ".gemspec") == name
         end
 
-        repo_root
+        source_uri = source.respond_to?(:uri) ? source.uri : source.to_s
+        raise InstallError,
+              "Git source #{source_uri} does not contain #{name}.gemspec (glob: #{glob.inspect}); lockfile source mapping may be stale"
       end
 
       def link_gem_files(entry, cache, bundle_path)
