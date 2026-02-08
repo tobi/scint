@@ -1,0 +1,311 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$PWD"
+TEST_ROOT=""
+TOOL=""
+FORCE=0
+SKIP_INVALID=0
+PROJECT_FILTER=""
+
+usage() {
+  cat <<'USAGE'
+Usage: bin/scint-bench-matrix [options]
+
+Run bundler-vs-scint cold/warm benchmarks for each immediate subdirectory of
+--root. By default, each subdirectory must:
+  - contain Gemfile
+  - contain Gemfile.lock
+  - be in a git worktree
+
+Outputs:
+  - logs/bench-<timestamp>/summary.tsv
+  - logs/bench-<timestamp>/table.md
+
+Optional smoke test:
+  If <root>/<project>-test.sh exists, it is run after the benchmark as:
+    cd <root>/<project> && scint exec ../<project>-test.sh
+  against the warm scint install.
+
+Options:
+  --root PATH            Root containing project subdirectories (default: cwd)
+  --test-root PATH       Benchmark data root (default: <root>/.bench-data)
+  --tool PATH            scint-vs-bundler path (default: <repo>/bin/scint-vs-bundler)
+  --projects a,b,c       Restrict to specific subdirectory names
+  --force                Rebuild bundler baselines
+  --skip-invalid         Skip invalid subdirs instead of failing
+  -h, --help             Show help
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --root)
+      ROOT="${2:-}"
+      shift 2
+      ;;
+    --test-root)
+      TEST_ROOT="${2:-}"
+      shift 2
+      ;;
+    --tool)
+      TOOL="${2:-}"
+      shift 2
+      ;;
+    --projects)
+      PROJECT_FILTER="${2:-}"
+      shift 2
+      ;;
+    --force)
+      FORCE=1
+      shift
+      ;;
+    --skip-invalid)
+      SKIP_INVALID=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+ROOT="$(cd "$ROOT" && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TOOL="${TOOL:-$REPO_ROOT/bin/scint-vs-bundler}"
+TEST_ROOT="${TEST_ROOT:-$ROOT/.bench-data}"
+
+if [[ ! -x "$TOOL" ]]; then
+  echo "Tool not executable: $TOOL" >&2
+  exit 2
+fi
+
+TS="$(date +%Y%m%d-%H%M%S)"
+OUT_DIR="$ROOT/logs/bench-$TS"
+mkdir -p "$OUT_DIR" "$TEST_ROOT"
+
+SUMMARY_TSV="$OUT_DIR/summary.tsv"
+TABLE_MD="$OUT_DIR/table.md"
+echo -e "project\tproject_path\trun_rc\tbundler_cold\tbundler_warm\tscint_cold\tscint_warm\tbundler_cold_rc\tbundler_warm_rc\tscint_cold_rc\tscint_warm_rc\ttest_script\ttest_seconds\ttest_rc" > "$SUMMARY_TSV"
+
+declare -a projects=()
+if [[ -n "$PROJECT_FILTER" ]]; then
+  IFS=',' read -r -a projects <<< "$PROJECT_FILTER"
+else
+  for dir in "$ROOT"/*; do
+    [[ -d "$dir" ]] || continue
+    projects+=("$(basename "$dir")")
+  done
+fi
+
+echo "Root: $ROOT"
+echo "Tool: $TOOL"
+echo "Test root: $TEST_ROOT"
+echo "Output dir: $OUT_DIR"
+echo
+
+invalid_count=0
+for project in "${projects[@]}"; do
+  project="${project// /}"
+  [[ -z "$project" ]] && continue
+
+  project_dir="$ROOT/$project"
+  reasons=()
+  [[ -d "$project_dir" ]] || reasons+=("missing directory")
+  [[ -f "$project_dir/Gemfile" ]] || reasons+=("missing Gemfile")
+  [[ -f "$project_dir/Gemfile.lock" ]] || reasons+=("missing Gemfile.lock")
+  git -C "$project_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || reasons+=("not a git worktree")
+
+  if [[ ${#reasons[@]} -gt 0 ]]; then
+    invalid_count=$((invalid_count + 1))
+    msg="[INVALID] $project: ${reasons[*]}"
+    if [[ "$SKIP_INVALID" -eq 1 ]]; then
+      echo "$msg (skipped)"
+      continue
+    fi
+    echo "$msg" >&2
+    continue
+  fi
+
+  echo "[RUN ] $project"
+  log_file="$OUT_DIR/$project.log"
+
+  cmd=( "$TOOL" "--test-root" "$TEST_ROOT" "$project_dir" )
+  if [[ "$FORCE" -eq 1 ]]; then
+    cmd=( "$TOOL" "--force" "--test-root" "$TEST_ROOT" "$project_dir" )
+  fi
+
+  set +e
+  "${cmd[@]}" > "$log_file" 2>&1
+  run_rc=$?
+  set -e
+
+  test_script="NA"
+  test_seconds="NA"
+  test_rc="NA"
+  candidate_test_script="$ROOT/${project}-test.sh"
+  if [[ "$run_rc" -eq 0 && -f "$candidate_test_script" ]]; then
+    test_script="$candidate_test_script"
+    if [[ ! -x "$test_script" ]]; then
+      chmod +x "$test_script"
+    fi
+    test_log="$OUT_DIR/$project.test.log"
+    scint_root="$(ruby -ryaml -e '
+      path = ARGV[0]
+      test_root = ARGV[1]
+      y = File.join(test_root, "timings.yml")
+      data = File.exist?(y) ? (YAML.load_file(y) || {}) : {}
+      entry = data.fetch("projects", {}).values
+        .select { |v| v.is_a?(Hash) && v["project_path"].to_s == path.to_s }
+        .max_by { |v| v["updated_at"].to_s } || {}
+      print(entry.dig("paths", "scint_root").to_s)
+    ' "$project_dir" "$TEST_ROOT")"
+    if [[ -n "$scint_root" ]]; then
+      scint_warm="$scint_root/warm"
+      scint_gem_home="$scint_root/gem-home"
+      scint_cache="$scint_root/cache"
+      system_gem_dir="$(ruby -e 'puts Gem.default_dir')"
+      start="$(ruby -e 'puts Process.clock_gettime(Process::CLOCK_MONOTONIC)')"
+      set +e
+      (
+        cd "$project_dir" && \
+        env BUNDLE_PATH="$scint_warm" \
+            GEM_HOME="$scint_gem_home" \
+            GEM_PATH="$scint_gem_home:$system_gem_dir" \
+            XDG_CACHE_HOME="$scint_cache" \
+        "$REPO_ROOT/bin/scint" exec "../${project}-test.sh"
+      ) > "$test_log" 2>&1
+      test_rc=$?
+      set -e
+      finish="$(ruby -e 'puts Process.clock_gettime(Process::CLOCK_MONOTONIC)')"
+      test_seconds="$(ruby -e "puts (($finish - $start)).round(2)")"
+    else
+      test_rc=98
+      echo "Could not resolve scint_root from $TEST_ROOT/timings.yml" > "$test_log"
+    fi
+  fi
+
+  row="$(ruby -ryaml -e '
+    project = ARGV[0]
+    path = ARGV[1]
+    run_rc = ARGV[2]
+    test_root = ARGV[3]
+    test_script = ARGV[4]
+    test_seconds = ARGV[5]
+    test_rc = ARGV[6]
+    y = File.join(test_root, "timings.yml")
+    data = File.exist?(y) ? (YAML.load_file(y) || {}) : {}
+    entry = data.fetch("projects", {}).values
+      .select { |v| v.is_a?(Hash) && v["project_path"].to_s == path.to_s }
+      .max_by { |v| v["updated_at"].to_s } || {}
+    t = entry.fetch("timings_seconds", {})
+    s = entry.fetch("status", {})
+    values = [
+      project,
+      path,
+      run_rc,
+      t["bundler_cold"],
+      t["bundler_warm"],
+      t["scint_cold"],
+      t["scint_warm"],
+      s["bundler_cold_rc"],
+      s["bundler_warm_rc"],
+      s["scint_cold_rc"],
+      s["scint_warm_rc"],
+      test_script,
+      test_seconds,
+      test_rc,
+    ].map { |v| v.nil? ? "NA" : v.to_s }
+    puts values.join("\t")
+  ' "$project" "$project_dir" "$run_rc" "$TEST_ROOT" "$test_script" "$test_seconds" "$test_rc")"
+
+  echo "$row" >> "$SUMMARY_TSV"
+  if [[ "$run_rc" -eq 0 && ( "$test_rc" == "0" || "$test_rc" == "NA" ) ]]; then
+    echo "[PASS] $project"
+  elif [[ "$test_rc" != "NA" ]]; then
+    echo "[FAIL] $project (test rc=$test_rc; see $OUT_DIR/$project.test.log)"
+  else
+    echo "[FAIL] $project (see $log_file)"
+  fi
+done
+
+if [[ "$invalid_count" -gt 0 && "$SKIP_INVALID" -eq 0 ]]; then
+  echo
+  echo "Found $invalid_count invalid subdirectories. Use --skip-invalid to ignore." >&2
+  exit 2
+fi
+
+ruby -e '
+  tsv = ARGV[0]
+  out = ARGV[1]
+  rows = File.readlines(tsv, chomp: true)
+  cols = rows.shift.split("\t")
+
+  parsed = rows.map do |line|
+    values = line.split("\t", -1)
+    h = {}
+    cols.each_with_index { |c, i| h[c] = values[i] }
+    h
+  end
+
+  valid = parsed.select do |r|
+    r["bundler_cold_rc"] == "0" &&
+      r["bundler_warm_rc"] == "0" &&
+      r["scint_cold_rc"] == "0" &&
+      r["scint_warm_rc"] == "0" &&
+      (r["test_rc"] == "0" || r["test_rc"] == "NA") &&
+      r["bundler_cold"] != "NA" &&
+      r["bundler_warm"] != "NA" &&
+      r["scint_cold"] != "NA" &&
+      r["scint_warm"] != "NA"
+  end
+
+  format_time = lambda do |seconds|
+    s = seconds.to_f
+    if s < 60.0
+      txt = format("%.1f", s).sub(/\.0\z/, "")
+      "#{txt}s"
+    else
+      mins = (s / 60).floor
+      rem = s - (mins * 60)
+      "#{mins}m #{format("%.1f", rem).sub(/\.0\z/, "")}s"
+    end
+  end
+
+  describe_rel = lambda do |phase, baseline|
+    speed = baseline > 0 ? baseline / phase : 0.0
+    if speed >= 1.0
+      "#{format("%.2f", speed)}x faster"
+    else
+      "#{format("%.2f", 1.0 / speed)}x slower"
+    end
+  end
+
+  File.open(out, "w") do |f|
+    f.puts "| Project | Bundler Cold | Bundler Warm | Scint Cold | Scint Warm | Test |"
+    f.puts "|---|---:|---:|---:|---:|---|"
+    valid.each do |r|
+      bc = r["bundler_cold"].to_f
+      bw = r["bundler_warm"].to_f
+      sc = r["scint_cold"].to_f
+      sw = r["scint_warm"].to_f
+      test_label = if r["test_rc"] == "NA"
+        "n/a"
+      else
+        "#{format_time.call(r["test_seconds"].to_f)} (pass)"
+      end
+      f.puts("| #{r["project"]} | #{format_time.call(bc)} (1.00x baseline) | #{format_time.call(bw)} (#{describe_rel.call(bw, bc)}) | #{format_time.call(sc)} (#{describe_rel.call(sc, bc)}) | #{format_time.call(sw)} (#{describe_rel.call(sw, bc)}) | #{test_label} |")
+    end
+  end
+' "$SUMMARY_TSV" "$TABLE_MD"
+
+echo
+echo "Summary TSV: $SUMMARY_TSV"
+echo "Markdown table: $TABLE_MD"
+cat "$TABLE_MD"

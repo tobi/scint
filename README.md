@@ -37,6 +37,29 @@ scint cache clear
 scint cache dir
 ```
 
+Benchmark helpers:
+
+```bash
+bin/scint-vs-bundler [--force] [--test-root /tmp/scint-tests] /path/to/project
+bin/scint-bench-matrix [--force] --root /path/to/projects
+```
+
+`bin/scint-bench-matrix` is a generic runner for a root directory where each
+immediate subdirectory is a Ruby project under git with both `Gemfile` and
+`Gemfile.lock`. It runs bundler cold/warm and scint cold/warm via
+`bin/scint-vs-bundler` and writes:
+
+1. `logs/bench-<timestamp>/summary.tsv`
+2. `logs/bench-<timestamp>/table.md`
+
+Optional project smoke test convention:
+
+1. If `<root>/<project>-test.sh` exists, matrix runs it after the benchmark.
+2. Execution is:
+   `cd <root>/<project> && scint exec ../<project>-test.sh`
+3. The script runs against the warm scint install and is included in
+   `summary.tsv`/`table.md` status.
+
 Performance and IO diagnostics:
 
 ```bash
