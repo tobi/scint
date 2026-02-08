@@ -89,7 +89,9 @@ module Scint
           return nil
         end
 
-        data = JSON.parse(File.read(path))
+        raw = File.read(path)
+        raw.force_encoding("UTF-8") unless raw.encoding == Encoding::UTF_8
+        data = JSON.parse(raw)
         return nil unless data.is_a?(Hash)
 
         version = data["version"]
