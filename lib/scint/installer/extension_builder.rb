@@ -286,6 +286,7 @@ module Scint
 
         Open3.popen2e(env, *cmd, **opts) do |stdin, out_err, wait_thr|
           stdin.close
+          out_err.set_encoding("ASCII-8BIT")
 
           out_err.each_line do |line|
             stripped = line.rstrip
