@@ -9,6 +9,7 @@ require_relative "../gemfile/parser"
 require_relative "../lockfile/parser"
 require_relative "install"
 require_relative "../fs"
+require_relative "../spec_utils"
 
 module Scint
   module CLI
@@ -306,7 +307,7 @@ module Scint
       def dedupe_specs(specs)
         seen = {}
         specs.each do |spec|
-          key = "#{spec.name}-#{spec.version}-#{spec.platform}"
+          key = SpecUtils.full_key(spec)
           seen[key] ||= spec
         end
         seen.values

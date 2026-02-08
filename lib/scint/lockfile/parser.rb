@@ -3,6 +3,7 @@
 require_relative "../source/rubygems"
 require_relative "../source/git"
 require_relative "../source/path"
+require_relative "../spec_utils"
 
 module Scint
   module Lockfile
@@ -209,7 +210,7 @@ module Scint
         platform = $4 || "ruby"
         checksums_str = $6
 
-        key = platform == "ruby" ? "#{name}-#{version}" : "#{name}-#{version}-#{platform}"
+        key = SpecUtils.full_name_for(name, version, platform)
 
         if checksums_str
           @checksums[key] = checksums_str.split(",").map(&:strip)

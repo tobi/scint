@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "../spec_utils"
+
 module Scint
   module Lockfile
     # Writes a standard Gemfile.lock file from structured data.
@@ -106,24 +108,22 @@ module Scint
         # Sort by full name (name-version-platform) for consistency
         sorted = specs.sort_by do |s|
           if s.is_a?(Hash)
-            n = s[:name]
-            v = s[:version]
-            p = s[:platform]
-            p == "ruby" ? "#{n}-#{v}" : "#{n}-#{v}-#{p}"
+            SpecUtils.full_name_for(s[:name], s[:version], s[:platform])
           else
-            "#{s.name}-#{s.version}#{"-#{s.platform}" if s.platform != "ruby"}"
+            SpecUtils.full_name_for(s.name, s.version, s.platform)
           end
         end
 
         sorted.each do |spec|
-          name, version, platform, deps = if spec.is_a?(Hash)
-            [spec[:name], spec[:version], spec[:platform], spec[:dependencies] || []]
+          name, version, deps = if spec.is_a?(Hash)
+            [spec[:name], spec[:version], spec[:dependencies] || []]
           else
-            [spec.name, spec.version, spec.platform, spec.dependencies || []]
+            [spec.name, spec.version, spec.dependencies || []]
           end
 
           # Format: "    name (version)" or "    name (version-platform)"
-          version_str = platform && platform != "ruby" ? "#{version}-#{platform}" : version.to_s
+          platform_str = SpecUtils.platform_str(spec)
+          version_str = platform_str == "ruby" ? version.to_s : "#{version}-#{platform_str}"
           out << "    #{name} (#{version_str})\n"
 
           # Dependencies of this spec (6-space indent)

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../fs"
+require_relative "../spec_utils"
 
 module Scint
   module Cache
@@ -30,7 +31,7 @@ module Scint
       # Check if a gem is installed. specs_hash keys are "name-version" or "name-version-platform".
       def installed?(name, version, platform = "ruby")
         data = load
-        key = cache_key(name, version, platform)
+        key = SpecUtils.full_name_for(name, version, platform)
         data.key?(key)
       end
 
@@ -38,7 +39,7 @@ module Scint
       def add(name, version, platform = "ruby")
         @mutex.synchronize do
           @data ||= load_from_disk
-          key = cache_key(name, version, platform)
+          key = SpecUtils.full_name_for(name, version, platform)
           @data[key] = true
           FS.atomic_write(@path, Marshal.dump(@data))
         end
@@ -48,21 +49,13 @@ module Scint
       def remove(name, version, platform = "ruby")
         @mutex.synchronize do
           @data ||= load_from_disk
-          key = cache_key(name, version, platform)
+          key = SpecUtils.full_name_for(name, version, platform)
           @data.delete(key)
           FS.atomic_write(@path, Marshal.dump(@data))
         end
       end
 
       private
-
-      def cache_key(name, version, platform)
-        if platform && platform.to_s != "ruby" && platform.to_s != ""
-          "#{name}-#{version}-#{platform}"
-        else
-          "#{name}-#{version}"
-        end
-      end
 
       def load_from_disk
         return {} unless File.exist?(@path)

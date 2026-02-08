@@ -59,6 +59,7 @@ module Scint
   autoload :Progress,    "scint/progress"
   autoload :FS,          "scint/fs"
   autoload :Platform,    "scint/platform"
+  autoload :SpecUtils,   "scint/spec_utils"
 
   # Errors
   autoload :BundlerError,        "scint/errors"

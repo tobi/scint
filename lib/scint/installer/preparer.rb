@@ -6,6 +6,7 @@ require_relative "../gem/extractor"
 require_relative "../cache/layout"
 require_relative "../fs"
 require_relative "../errors"
+require_relative "../spec_utils"
 
 module Scint
   module Installer
@@ -182,15 +183,7 @@ module Scint
 
       def gem_download_uri(entry)
         spec = entry.spec
-        name = spec.respond_to?(:name) ? spec.name : spec[:name]
-        version = spec.respond_to?(:version) ? spec.version : spec[:version]
-        platform = spec.respond_to?(:platform) ? spec.platform : spec[:platform]
-
-        filename = if platform && platform.to_s != "ruby" && platform.to_s != ""
-                     "#{name}-#{version}-#{platform}.gem"
-                   else
-                     "#{name}-#{version}.gem"
-                   end
+        filename = "#{SpecUtils.full_name(spec)}.gem"
 
         # Use cached_path if provided, otherwise construct from source
         if entry.cached_path

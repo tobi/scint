@@ -3,6 +3,7 @@
 require_relative "../runtime/exec"
 require_relative "../fs"
 require_relative "../platform"
+require_relative "../spec_utils"
 require_relative "../lockfile/parser"
 require "pathname"
 
@@ -69,7 +70,7 @@ module Scint
         data = {}
 
         lockfile.specs.each do |spec|
-          full = spec_full_name(spec)
+          full = SpecUtils.full_name(spec)
           gem_dir = File.join(ruby_dir, "gems", full)
           next unless Dir.exist?(gem_dir)
 
@@ -102,7 +103,7 @@ module Scint
       end
 
       def detect_ruby_dir(bundle_dir)
-        target = RUBY_VERSION.split(".")[0, 2].join(".") + ".0"
+        target = Platform.ruby_minor_version_dir
         preferred = File.join(bundle_dir, "ruby", target)
         return preferred if Dir.exist?(preferred)
 
@@ -111,13 +112,7 @@ module Scint
       end
 
       def spec_full_name(spec)
-        name = spec[:name]
-        version = spec[:version]
-        platform = spec[:platform]
-        base = "#{name}-#{version}"
-        return base if platform.nil? || platform.to_s == "ruby" || platform.to_s.empty?
-
-        "#{base}-#{platform}"
+        SpecUtils.full_name(spec)
       end
 
       def read_require_paths(spec_file)

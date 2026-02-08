@@ -3,6 +3,7 @@
 require_relative "../errors"
 require_relative "../fs"
 require_relative "../platform"
+require_relative "../spec_utils"
 require_relative "../progress"
 require_relative "../worker_pool"
 require_relative "../scheduler"
@@ -220,7 +221,7 @@ module Scint
       def dedupe_resolved_specs(resolved)
         seen = {}
         resolved.each do |spec|
-          key = "#{spec.name}-#{spec.version}-#{spec.platform}"
+          key = SpecUtils.full_key(spec)
           seen[key] ||= spec
         end
         seen.values
@@ -230,8 +231,8 @@ module Scint
       # No download needed — we know exactly where we are.
       def install_builtin_gem(entry, bundle_path)
         spec = entry.spec
-        ruby_dir = File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
-        full_name = spec_full_name(spec)
+        ruby_dir = Platform.ruby_install_dir(bundle_path)
+        full_name = SpecUtils.full_name(spec)
         scint_root = File.expand_path("../../..", __FILE__)
 
         # Copy gem files into gems/scint-x.y.z/lib/
@@ -629,7 +630,7 @@ module Scint
       end
 
       def gemspec_paths_in_git_revision(bare_repo, revision)
-        out, err, status = git_capture3(
+        out, _err, status = git_capture3(
           "--git-dir", bare_repo,
           "ls-tree",
           "-r",
@@ -671,7 +672,7 @@ module Scint
 
       def with_git_worktree(bare_repo, revision)
         worktree = Dir.mktmpdir("scint-gemspec")
-        out, err, status = git_capture3(
+        _out, _err, status = git_capture3(
           "--git-dir", bare_repo,
           "--work-tree", worktree,
           "checkout",
@@ -734,7 +735,7 @@ module Scint
         return resolved_specs if preferred.empty?
 
         resolved_specs.each do |spec|
-          key = "#{spec.name}-#{spec.version}"
+          key = SpecUtils.full_name_for(spec.name, spec.version)
           platform = preferred[key]
           next if platform.nil? || platform.empty?
 
@@ -761,7 +762,7 @@ module Scint
               preferred = preferred.to_s
               next if preferred.empty? || preferred == spec.platform.to_s
 
-              out["#{spec.name}-#{spec.version}"] = preferred
+              out[SpecUtils.full_name_for(spec.name, spec.version)] = preferred
             end
           rescue StandardError
             next
@@ -787,7 +788,7 @@ module Scint
         # Path gems are not downloaded from a remote
         return if source_uri.start_with?("/") || !source_uri.start_with?("http")
 
-        full_name = spec_full_name(spec)
+        full_name = SpecUtils.full_name(spec)
         gem_filename = "#{full_name}.gem"
         source_uri = source_uri.chomp("/")
         download_uri = "#{source_uri}/gems/#{gem_filename}"
@@ -1227,7 +1228,7 @@ module Scint
       end
 
       def spec_key(spec)
-        "#{spec.name}-#{spec.version}-#{spec.platform}"
+        SpecUtils.full_key(spec)
       end
 
       def dependency_link_job_ids(spec, link_job_by_name)
@@ -1350,7 +1351,7 @@ module Scint
         dep_names.uniq!
         return if dep_names.empty?
 
-        source_ruby_dir = File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
+        source_ruby_dir = Platform.ruby_install_dir(bundle_path)
         target_ruby_dir = cache.install_ruby_dir
 
         dep_names.each do |name|
@@ -1817,19 +1818,15 @@ module Scint
       end
 
       def lockfile_spec_checksum_key(spec)
-        name = spec[:name]
-        version = spec[:version]
-        platform = spec[:platform] || "ruby"
-        platform == "ruby" ? "#{name}-#{version}" : "#{name}-#{version}-#{platform}"
+        SpecUtils.full_name_for(spec[:name], spec[:version], spec[:platform] || "ruby")
       end
 
       def write_runtime_config(resolved, bundle_path)
-        ruby_dir = File.join(bundle_path, "ruby",
-                             RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
+        ruby_dir = Platform.ruby_install_dir(bundle_path)
 
         data = {}
         resolved.each do |spec|
-          full = spec_full_name(spec)
+          full = SpecUtils.full_name(spec)
           gem_dir = File.join(ruby_dir, "gems", full)
           spec_file = File.join(ruby_dir, "specifications", "#{full}.gemspec")
           require_paths = read_require_paths(spec_file)
@@ -1905,9 +1902,7 @@ module Scint
       end
 
       def spec_full_name(spec)
-        base = "#{spec.name}-#{spec.version}"
-        plat = spec.respond_to?(:platform) ? spec.platform : nil
-        (plat.nil? || plat.to_s == "ruby" || plat.to_s.empty?) ? base : "#{base}-#{plat}"
+        SpecUtils.full_name(spec)
       end
 
       def elapsed_ms_since(start_time)
@@ -1916,7 +1911,7 @@ module Scint
       end
 
       def force_purge_artifacts(resolved, bundle_path, cache)
-        ruby_dir = File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
+        ruby_dir = Platform.ruby_install_dir(bundle_path)
         ext_root = File.join(ruby_dir, "extensions", Platform.gem_arch, Platform.extension_api_version)
 
         resolved.each do |spec|

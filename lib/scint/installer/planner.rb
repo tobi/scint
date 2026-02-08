@@ -18,7 +18,7 @@ module Scint
       # Download entries are sorted largest-first so big gems start early,
       # keeping the pipeline saturated while small gems fill in gaps.
       def plan(resolved_specs, bundle_path, cache_layout)
-        ruby_dir = ruby_install_dir(bundle_path)
+        ruby_dir = Platform.ruby_install_dir(bundle_path)
         entries = resolved_specs.map do |spec|
           plan_one(spec, ruby_dir, cache_layout)
         end
@@ -98,10 +98,6 @@ module Scint
         !Dir.exist?(ext_install_dir)
       end
 
-      def ruby_install_dir(bundle_path)
-        File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
-      end
-
       # Rough size estimate for download ordering.
       # If we don't know, use 0 so unknowns sort after large known gems.
       def estimated_size(spec)
@@ -135,7 +131,7 @@ module Scint
       end
 
       private_class_method :plan_one, :needs_ext_build?, :extension_link_missing?,
-                           :ruby_install_dir, :estimated_size, :local_source_path
+                           :estimated_size, :local_source_path
     end
   end
 end

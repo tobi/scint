@@ -40,6 +40,14 @@ module Scint
       RUBY_VERSION
     end
 
+    def ruby_minor_version_dir
+      @ruby_minor_version_dir ||= RUBY_VERSION.split(".")[0, 2].join(".") + ".0"
+    end
+
+    def ruby_install_dir(base)
+      File.join(base, "ruby", ruby_minor_version_dir)
+    end
+
     def extension_api_version
       ::Gem.extension_api_version
     end

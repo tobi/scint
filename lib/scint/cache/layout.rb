@@ -2,6 +2,7 @@
 
 require_relative "../fs"
 require_relative "../platform"
+require_relative "../spec_utils"
 require "digest"
 require "uri"
 
@@ -45,7 +46,7 @@ module Scint
       end
 
       def install_ruby_dir
-        File.join(install_env_dir, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
+        Platform.ruby_install_dir(install_env_dir)
       end
 
       # -- Per-spec paths ------------------------------------------------------
@@ -91,16 +92,7 @@ module Scint
       # -- Helpers -------------------------------------------------------------
 
       def full_name(spec)
-        name = spec.respond_to?(:name) ? spec.name : spec[:name]
-        version = spec.respond_to?(:version) ? spec.version : spec[:version]
-        platform = spec.respond_to?(:platform) ? spec.platform : spec[:platform]
-
-        base = "#{name}-#{version}"
-        if platform && platform.to_s != "ruby" && platform.to_s != ""
-          "#{base}-#{platform}"
-        else
-          base
-        end
+        SpecUtils.full_name(spec)
       end
 
       # Ensure a directory exists (thread-safe, cached).

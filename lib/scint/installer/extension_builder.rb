@@ -3,6 +3,7 @@
 require_relative "../fs"
 require_relative "../platform"
 require_relative "../errors"
+require_relative "../spec_utils"
 require "open3"
 
 module Scint
@@ -16,7 +17,7 @@ module Scint
       # abi_key:      e.g. "ruby-3.3.0-arm64-darwin24" (defaults to Platform.abi_key)
       def build(prepared_gem, bundle_path, cache_layout, abi_key: Platform.abi_key, compile_slots: 1, output_tail: nil)
         spec = prepared_gem.spec
-        ruby_dir = ruby_install_dir(bundle_path)
+        ruby_dir = Platform.ruby_install_dir(bundle_path)
         build_ruby_dir = cache_layout.install_ruby_dir
 
         # Check global extension cache first
@@ -76,7 +77,7 @@ module Scint
         spec = prepared_gem.spec
         return false unless cached_build_available?(spec, cache_layout, abi_key: abi_key)
 
-        ruby_dir = ruby_install_dir(bundle_path)
+        ruby_dir = Platform.ruby_install_dir(bundle_path)
         cached_ext = cache_layout.ext_path(spec, abi_key)
         link_extensions(cached_ext, ruby_dir, spec, abi_key)
         true
@@ -316,22 +317,13 @@ module Scint
       end
 
       def spec_full_name(spec)
-        name = spec.name
-        version = spec.version
-        plat = spec.respond_to?(:platform) ? spec.platform : nil
-        base = "#{name}-#{version}"
-        (plat.nil? || plat.to_s == "ruby" || plat.to_s.empty?) ? base : "#{base}-#{plat}"
-      end
-
-      def ruby_install_dir(bundle_path)
-        File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
+        SpecUtils.full_name(spec)
       end
 
       private_class_method :find_extension_dirs, :compile_extension,
                            :compile_extconf, :compile_cmake, :compile_rake,
                            :find_rake_executable, :link_extensions, :sync_extension_artifacts_into_gem,
-                           :build_env, :run_cmd,
-                           :spec_full_name, :ruby_install_dir, :prebuilt_missing_for_ruby?
+                           :build_env, :run_cmd, :prebuilt_missing_for_ruby?
     end
   end
 end

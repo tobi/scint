@@ -2,6 +2,7 @@
 
 require_relative "setup"
 require_relative "../fs"
+require_relative "../platform"
 require "base64"
 require "pathname"
 require "rbconfig"
@@ -26,8 +27,7 @@ module Scint
 
         bundle_dir = File.dirname(lock_path)
         scint_lib_dir = File.expand_path("../..", __dir__)
-        ruby_dir = File.join(bundle_dir, "ruby",
-                             RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
+        ruby_dir = Platform.ruby_install_dir(bundle_dir)
 
         # Set RUBYLIB to make our Bundler shim loadable. We intentionally avoid
         # injecting all gem load paths here because large apps can exceed exec
