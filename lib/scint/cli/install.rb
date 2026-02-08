@@ -32,6 +32,7 @@ require_relative "../resolver/provider"
 require_relative "../resolver/resolver"
 require_relative "../credentials"
 require "open3"
+require "set"
 
 module Scint
   module CLI
@@ -278,7 +279,7 @@ module Scint
 
       def resolve(gemfile, lockfile, cache)
         # If lockfile is up-to-date, use its specs directly
-        if lockfile && lockfile_current?(gemfile, lockfile)
+        if lockfile && lockfile_current?(gemfile, lockfile) && lockfile_git_source_mapping_valid?(lockfile, cache)
           return lockfile_to_resolved(lockfile)
         end
 
@@ -463,6 +464,57 @@ module Scint
         end
 
         apply_locked_platform_preferences(resolved)
+      end
+
+      def lockfile_git_source_mapping_valid?(lockfile, cache)
+        return true unless lockfile && cache
+
+        git_specs = Array(lockfile.specs).select { |s| s[:source].is_a?(Source::Git) }
+        return true if git_specs.empty?
+
+        by_source = git_specs.group_by { |s| s[:source] }
+        by_source.each do |source, specs|
+          uri, revision = git_source_ref(source)
+          bare_repo = cache.git_path(uri)
+          return false unless Dir.exist?(bare_repo)
+
+          resolved_revision = begin
+            resolve_git_revision(bare_repo, revision)
+          rescue InstallError
+            nil
+          end
+          return false unless resolved_revision
+
+          gemspec_names = gemspec_names_in_git_revision(bare_repo, resolved_revision)
+          return false if gemspec_names.empty?
+
+          specs.each do |spec|
+            return false unless gemspec_names.include?(spec[:name].to_s)
+          end
+        end
+
+        true
+      end
+
+      def gemspec_names_in_git_revision(bare_repo, revision)
+        out, err, status = git_capture3(
+          "--git-dir", bare_repo,
+          "ls-tree",
+          "-r",
+          "--name-only",
+          revision,
+        )
+        return Set.new unless status.success?
+
+        names = Set.new
+        out.each_line do |line|
+          path = line.strip
+          next unless path.end_with?(".gemspec")
+          names << File.basename(path, ".gemspec")
+        end
+        names
+      rescue StandardError
+        Set.new
       end
 
       # Preference: exact platform match > compatible match > ruby > first.

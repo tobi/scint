@@ -1053,6 +1053,7 @@ class CLIInstallTest < Minitest::Test
     refute install.send(:lockfile_current?, gemfile, lockfile)
   end
 
+
   def test_lockfile_current_ignores_missing_dependency_for_foreign_platform
     install = Scint::CLI::Install.new([])
     gemfile = Scint::Gemfile::ParseResult.new(
@@ -1101,6 +1102,89 @@ class CLIInstallTest < Minitest::Test
     refute install.send(:lockfile_current?, gemfile, lockfile)
   end
 
+  def test_lockfile_git_source_mapping_valid_returns_true_when_specs_exist_in_repo
+    with_tmpdir do |dir|
+      repo = init_git_repo(dir, "demo.gemspec" => "Gem::Specification.new\n")
+      commit = git_commit_hash(repo)
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      source = Scint::Source::Git.new(uri: repo, revision: commit)
+      install.send(:clone_git_source, source, cache)
+
+      lockfile = Scint::Lockfile::LockfileData.new(
+        specs: [
+          { name: "demo", version: "1.0.0", platform: "ruby", dependencies: [], source: source, checksum: nil },
+        ],
+        dependencies: {},
+        platforms: [],
+        sources: [source],
+        bundler_version: nil,
+        ruby_version: nil,
+        checksums: nil,
+      )
+
+      assert install.send(:lockfile_git_source_mapping_valid?, lockfile, cache)
+    end
+  end
+
+  def test_lockfile_git_source_mapping_valid_returns_false_when_spec_missing_from_repo
+    with_tmpdir do |dir|
+      repo = init_git_repo(dir, "demo.gemspec" => "Gem::Specification.new\n")
+      commit = git_commit_hash(repo)
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      source = Scint::Source::Git.new(uri: repo, revision: commit)
+      install.send(:clone_git_source, source, cache)
+
+      lockfile = Scint::Lockfile::LockfileData.new(
+        specs: [
+          { name: "demo", version: "1.0.0", platform: "ruby", dependencies: [], source: source, checksum: nil },
+          { name: "missing", version: "1.0.0", platform: "ruby", dependencies: [], source: source, checksum: nil },
+        ],
+        dependencies: {},
+        platforms: [],
+        sources: [source],
+        bundler_version: nil,
+        ruby_version: nil,
+        checksums: nil,
+      )
+
+      refute install.send(:lockfile_git_source_mapping_valid?, lockfile, cache)
+    end
+  end
+
+  def test_resolve_falls_back_to_full_resolution_when_git_source_mapping_is_invalid
+    install = Scint::CLI::Install.new([])
+    gemfile = Scint::Gemfile::ParseResult.new(
+      dependencies: [Scint::Gemfile::Dependency.new("rack")],
+      sources: [{ type: :rubygems, uri: "https://rubygems.org" }],
+      ruby_version: nil,
+      platforms: [],
+    )
+    lockfile = Scint::Lockfile::LockfileData.new(
+      specs: [{ name: "rack", version: "2.2.8" }],
+      dependencies: {},
+      platforms: [],
+      sources: [],
+      bundler_version: nil,
+      ruby_version: nil,
+      checksums: nil,
+    )
+    fake_resolved = [fake_spec(name: "rack", version: "2.2.8")]
+    fake_resolver = Object.new
+    fake_resolver.define_singleton_method(:resolve) { fake_resolved }
+
+    Scint::Resolver::Resolver.stub(:new, fake_resolver) do
+      install.stub(:lockfile_current?, true) do
+        install.stub(:lockfile_git_source_mapping_valid?, false) do
+          install.stub(:lockfile_to_resolved, ->(_lockfile) { raise "lockfile path should not be used" }) do
+            resolved = install.send(:resolve, gemfile, lockfile, nil)
+            assert_equal fake_resolved, resolved
+          end
+        end
+      end
+    end
+  end
   # --- find_gemspec ---
 
   def test_find_gemspec_returns_nil_when_path_does_not_exist
