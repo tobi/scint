@@ -135,6 +135,11 @@ module Scint
           source_opts[:path] = path_val
         end
 
+        # Internal/source metadata used by lockfile generation.
+        source_opts[:glob] = options.delete(:glob) if options.key?(:glob)
+        source_opts[:gemspec_generated] = options.delete(:gemspec_generated) if options.key?(:gemspec_generated)
+        source_opts[:gemspec_primary] = options.delete(:gemspec_primary) if options.key?(:gemspec_primary)
+
         if options[:source]
           source_opts[:source] = options.delete(:source)
         end
@@ -230,7 +235,13 @@ module Scint
         gemspecs.each do |gs|
           spec_name = File.basename(gs, ".gemspec")
           next if name && spec_name != name
-          gem(spec_name, path: File.dirname(gs), glob: glob)
+          gem(
+            spec_name,
+            path: File.dirname(gs),
+            glob: glob,
+            gemspec_generated: true,
+            gemspec_primary: File.expand_path(File.dirname(gs)) == dir,
+          )
         end
       end
 

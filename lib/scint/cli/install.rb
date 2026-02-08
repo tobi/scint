@@ -1870,14 +1870,23 @@ module Scint
 
       def build_lockfile_dependencies(gemfile, lockfile)
         locked = lockfile&.dependencies || {}
-        gemfile.dependencies.map do |dep|
-          locked_dep = locked[dep.name]
-          {
-            name: dep.name,
-            version_reqs: dep.version_reqs,
-            pinned: !!(locked_dep && locked_dep[:pinned]),
-          }
-        end
+        gemfile.dependencies
+          .select { |dep| lockfile_dependency_direct?(dep) }
+          .map do |dep|
+            locked_dep = locked[dep.name]
+            {
+              name: dep.name,
+              version_reqs: dep.version_reqs,
+              pinned: !!(locked_dep && locked_dep[:pinned]),
+            }
+          end
+      end
+
+      def lockfile_dependency_direct?(dep)
+        opts = dep.source_options || {}
+        return true unless opts[:gemspec_generated]
+
+        opts[:gemspec_primary] != false
       end
 
       def build_lockfile_platforms(specs, lockfile)
