@@ -181,6 +181,8 @@ if [[ "$SETUP_EXISTS" -eq 1 ]]; then
 fi
 
 # ── 2. scint install ────────────────────────────────────────────
+cd "$TARGET"
+
 INSTALL_ARGS=("--path" "$BUNDLE_PATH")
 
 run_phase "scint install ($RUN_KIND)" \
