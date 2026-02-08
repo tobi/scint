@@ -1272,15 +1272,19 @@ module Scint
       end
 
       def compile_slots_for(worker_count)
-        # Keep compile parallelism conservative: at most 2 native builds.
-        # Small pools stay single-lane; larger pools can run two builds.
+        # Scale compile concurrency with available CPUs.
+        # Most native extensions have 1-3 source files and don't benefit from
+        # high make -j; running more concurrent builds is more effective.
+        # Each slot gets cpu_count/slots make jobs (see adaptive_make_jobs).
         workers = [worker_count.to_i, 1].max
         override = positive_integer_env("SCINT_COMPILE_CONCURRENCY")
         return [override, workers].min if override
 
-        return 1 if workers <= 6
-
-        2
+        cpus = Platform.cpu_count
+        # Aim for 8 make-jobs per slot → slots = cpus / 8, clamped.
+        slots = cpus / 8
+        slots = [[slots, 2].max, workers].min
+        slots
       end
 
       def git_slots_for(worker_count)
