@@ -3,6 +3,8 @@
 require_relative "../fs"
 require_relative "../platform"
 require_relative "../spec_utils"
+require_relative "../cache/layout"
+require_relative "../cache/validity"
 require "pathname"
 
 module Scint
@@ -34,7 +36,7 @@ module Scint
         # 1. Link gem files into gems/{full_name}/
         gem_dest = File.join(ruby_dir, "gems", full_name)
         unless Dir.exist?(gem_dest)
-          FS.clone_tree(prepared_gem.extracted_path, gem_dest)
+          materialize_gem_dir(prepared_gem, gem_dest)
         end
 
         # 2. Write gemspec into specifications/
@@ -59,6 +61,44 @@ module Scint
       end
 
       # --- private helpers ---
+
+      def materialize_gem_dir(prepared_gem, gem_dest)
+        manifest = cached_manifest_for(prepared_gem)
+        if manifest && manifest["files"].is_a?(Array)
+          FS.materialize_from_manifest(prepared_gem.extracted_path, gem_dest, manifest["files"])
+        else
+          FS.clone_tree(prepared_gem.extracted_path, gem_dest)
+        end
+      end
+
+      def cached_manifest_for(prepared_gem)
+        return nil unless prepared_gem.from_cache
+
+        layout = cache_layout_for(prepared_gem)
+        cached_path = layout.cached_path(prepared_gem.spec)
+        return nil unless File.expand_path(prepared_gem.extracted_path) == File.expand_path(cached_path)
+
+        manifest = Cache::Validity.read_manifest(layout.cached_manifest_path(prepared_gem.spec))
+        return nil unless manifest
+        return nil unless Cache::Validity.manifest_matches?(manifest, prepared_gem.spec, Platform.abi_key, layout)
+
+        manifest
+      rescue StandardError
+        nil
+      end
+
+      def cache_layout_for(prepared_gem)
+        extracted = File.expand_path(prepared_gem.extracted_path)
+        abi_dir = File.dirname(extracted)
+        cached_dir = File.dirname(abi_dir)
+        root = File.dirname(cached_dir)
+
+        if File.basename(abi_dir) == Platform.abi_key && File.basename(cached_dir) == "cached"
+          Cache::Layout.new(root: root)
+        else
+          Cache::Layout.new
+        end
+      end
 
       def write_gemspec(prepared_gem, ruby_dir, full_name)
         spec_dir = File.join(ruby_dir, "specifications")
@@ -201,7 +241,8 @@ module Scint
         RUBY
       end
 
-      private_class_method :write_gemspec, :write_binstubs_impl, :write_ruby_bin_stub,
+      private_class_method :materialize_gem_dir, :cached_manifest_for, :cache_layout_for,
+                           :write_gemspec, :write_binstubs_impl, :write_ruby_bin_stub,
                            :write_bundle_bin_wrapper, :extract_executables,
                            :detect_executables_from_files, :augment_executable_metadata, :infer_bindir,
                            :minimal_gemspec

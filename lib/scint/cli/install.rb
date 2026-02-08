@@ -1526,7 +1526,10 @@ module Scint
         ruby_dir = File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
         gems_dir = File.join(ruby_dir, "gems")
 
-        sources = entries.filter_map do |entry|
+        manifest_jobs = []
+        fallback_sources = []
+
+        entries.each do |entry|
           next unless entry.action == :link || entry.action == :build_ext
 
           source_dir = entry.cached_path
@@ -1535,15 +1538,40 @@ module Scint
           full_name = cache.full_name(entry.spec)
           next unless File.basename(source_dir) == full_name
           next unless Dir.exist?(source_dir)
-          next if Dir.exist?(File.join(gems_dir, full_name))
 
-          source_dir
+          dest_dir = File.join(gems_dir, full_name)
+          next if Dir.exist?(dest_dir)
+
+          manifest = cached_manifest_for_prelink(entry.spec, cache, source_dir)
+          if manifest && manifest["files"].is_a?(Array)
+            manifest_jobs << [source_dir, dest_dir, manifest["files"]]
+          else
+            fallback_sources << source_dir
+          end
         end
-        return if sources.empty?
 
-        FS.clone_many_trees(sources, gems_dir)
+        return if manifest_jobs.empty? && fallback_sources.empty?
+
+        manifest_jobs.each do |source_dir, dest_dir, entries|
+          FS.materialize_from_manifest(source_dir, dest_dir, entries)
+        end
+
+        FS.clone_many_trees(fallback_sources, gems_dir) unless fallback_sources.empty?
       rescue StandardError => e
         $stderr.puts("bulk prelink warning: #{e.message}") if ENV["SCINT_DEBUG"]
+      end
+
+      def cached_manifest_for_prelink(spec, cache, source_dir)
+        cached_path = cache.cached_path(spec)
+        return nil unless File.expand_path(source_dir) == File.expand_path(cached_path)
+
+        manifest = Cache::Validity.read_manifest(cache.cached_manifest_path(spec))
+        return nil unless manifest
+        return nil unless Cache::Validity.manifest_matches?(manifest, spec, Platform.abi_key, cache)
+
+        manifest
+      rescue StandardError
+        nil
       end
 
       def load_cached_gemspec(spec, cache, extracted_path)

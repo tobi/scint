@@ -73,6 +73,51 @@ module Scint
       hardlink_tree(src_dir, dst_dir)
     end
 
+    # Materialize a tree using a manifest to avoid directory scans.
+    # Manifest entries must be hashes with "path" and "type" keys.
+    def materialize_from_manifest(src_dir, dst_dir, entries)
+      src_dir = src_dir.to_s
+      dst_dir = dst_dir.to_s
+      entries = Array(entries)
+      raise Errno::ENOENT, src_dir unless Dir.exist?(src_dir)
+      mkdir_p(dst_dir)
+
+      entries.each do |entry|
+        rel = entry["path"].to_s
+        next if rel.empty? || rel.start_with?("/") || rel.include?("..")
+
+        src_path = File.join(src_dir, rel)
+        dst_path = File.join(dst_dir, rel)
+
+        case entry["type"]
+        when "dir"
+          mkdir_p(dst_path)
+        when "symlink"
+          mkdir_p(File.dirname(dst_path))
+          next if File.exist?(dst_path) || File.symlink?(dst_path)
+
+          target = File.readlink(src_path)
+          begin
+            File.symlink(target, dst_path)
+          rescue Errno::EEXIST
+            next
+          end
+        else
+          mkdir_p(File.dirname(dst_path))
+          next if File.exist?(dst_path)
+
+          begin
+            clonefile(src_path, dst_path)
+          rescue Errno::EEXIST
+            next
+          rescue SystemCallError
+            next if File.exist?(dst_path)
+            raise
+          end
+        end
+      end
+    end
+
     # Clone many source directories into one destination parent directory.
     # This is significantly faster than one process per gem on large warm
     # installs because it batches cp invocations while preserving CoW/reflink.
