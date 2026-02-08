@@ -1408,9 +1408,6 @@ module Scint
           from_cache: true,
         )
         Installer::Linker.link_files(prepared, bundle_path)
-        # If this gem has a cached native build, materialize it during link.
-        # This lets reinstalling into a fresh .bundle skip build_ext entirely.
-        Installer::ExtensionBuilder.link_cached_build(prepared, bundle_path, cache)
       end
 
       def build_extensions(entry, cache, bundle_path, progress = nil, compile_slots: 1)
@@ -1436,12 +1433,15 @@ module Scint
           output_tail: ->(lines) { progress&.on_build_tail(spec.name, lines) },
         )
 
+        ruby_dir = Platform.ruby_install_dir(bundle_path)
+        bundle_gem_dir = File.join(ruby_dir, "gems", SpecUtils.full_name(spec))
+        if Dir.exist?(bundle_gem_dir)
+          Installer::ExtensionBuilder.sync_extensions_into_gem(extracted, bundle_gem_dir)
+          File.write(File.join(bundle_gem_dir, Installer::ExtensionBuilder::BUILD_MARKER), "")
+        end
+
         return unless promote_after_build
 
-        cached_ext = cache.ext_path(spec)
-        if Dir.exist?(cached_ext)
-          Installer::ExtensionBuilder.sync_extensions_into_gem(cached_ext, extracted)
-        end
         promote_assembled_gem(spec, cache, extracted, gemspec, extensions: true)
       rescue StandardError
         if promote_after_build && extracted && Dir.exist?(extracted)

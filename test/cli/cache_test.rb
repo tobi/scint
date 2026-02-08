@@ -192,18 +192,17 @@ class CLICacheTest < Minitest::Test
     with_tmpdir do |dir|
       with_env("XDG_CACHE_HOME", dir) do
         root = File.join(dir, "scint")
-        inbound = File.join(root, "inbound")
-        extracted = File.join(root, "extracted")
-        ext = File.join(root, "ext")
+        inbound_gems = File.join(root, "inbound", "gems")
+        abi = Scint::Platform.abi_key
+        cached_abi = File.join(root, "cached", abi)
 
-        FileUtils.mkdir_p(inbound)
-        FileUtils.mkdir_p(extracted)
-        FileUtils.mkdir_p(ext)
+        FileUtils.mkdir_p(inbound_gems)
+        FileUtils.mkdir_p(cached_abi)
 
-        File.write(File.join(inbound, "rack-3.0.0.gem"), "data")
-        File.write(File.join(inbound, "puma-6.0.0.gem"), "data")
-        File.write(File.join(extracted, "rack-3.0.0"), "data")
-        File.write(File.join(ext, "rack-3.0.0"), "data")
+        File.write(File.join(inbound_gems, "rack-3.0.0.gem"), "data")
+        File.write(File.join(inbound_gems, "puma-6.0.0.gem"), "data")
+        FileUtils.mkdir_p(File.join(cached_abi, "rack-3.0.0"))
+        File.write(File.join(cached_abi, "rack-3.0.0.spec.marshal"), "data")
 
         out, _err = with_captured_io do
           status = Scint::CLI::Cache.new(["clean", "rack"]).run
@@ -212,8 +211,8 @@ class CLICacheTest < Minitest::Test
 
         assert_includes out, "Removed 3 entries matching: rack"
         # puma should remain
-        assert_includes Dir.children(inbound), "puma-6.0.0.gem"
-        refute_includes Dir.children(inbound), "rack-3.0.0.gem"
+        assert_includes Dir.children(inbound_gems), "puma-6.0.0.gem"
+        refute_includes Dir.children(inbound_gems), "rack-3.0.0.gem"
       end
     end
   end

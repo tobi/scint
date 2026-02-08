@@ -545,8 +545,7 @@ class CLIInstallTest < Minitest::Test
         )
         Scint::Cache::Manifest.write(cache.cached_manifest_path(spec), manifest)
 
-        FileUtils.mkdir_p(cache.ext_path(spec))
-        File.write(File.join(cache.ext_path(spec), "gem.build_complete"), "")
+        File.write(File.join(cached_dir, Scint::Installer::ExtensionBuilder::BUILD_MARKER), "")
 
         plan = Scint::Installer::Planner.plan(resolved, File.join(dir, ".bundle"), cache)
         assert_equal :link, plan.first.action
@@ -600,8 +599,7 @@ class CLIInstallTest < Minitest::Test
         )
         Scint::Cache::Manifest.write(cache.cached_manifest_path(spec), manifest)
 
-        FileUtils.mkdir_p(cache.ext_path(spec))
-        File.write(File.join(cache.ext_path(spec), "gem.build_complete"), "")
+        File.write(File.join(cached_dir, Scint::Installer::ExtensionBuilder::BUILD_MARKER), "")
 
         plan = Scint::Installer::Planner.plan(resolved, File.join(dir, ".bundle"), cache)
         assert_equal :link, plan.first.action
@@ -655,8 +653,7 @@ class CLIInstallTest < Minitest::Test
         )
         Scint::Cache::Manifest.write(cache.cached_manifest_path(spec), manifest)
 
-        FileUtils.mkdir_p(cache.ext_path(spec))
-        File.write(File.join(cache.ext_path(spec), "gem.build_complete"), "")
+        File.write(File.join(cached_dir, Scint::Installer::ExtensionBuilder::BUILD_MARKER), "")
 
         plan = Scint::Installer::Planner.plan(resolved, File.join(dir, ".bundle"), cache)
         assert_equal :link, plan.first.action
@@ -764,7 +761,6 @@ class CLIInstallTest < Minitest::Test
       cached_manifest = cache.cached_manifest_path(spec)
       spec_cache = cache.spec_cache_path(spec)
       extracted = cache.extracted_path(spec)
-      global_ext = cache.ext_path(spec)
       local_gem = File.join(ruby_dir, "gems", full)
       local_spec = File.join(ruby_dir, "specifications", "#{full}.gemspec")
       local_ext = File.join(ruby_dir, "extensions",
@@ -787,8 +783,7 @@ class CLIInstallTest < Minitest::Test
       File.write(spec_cache, "meta")
       FileUtils.mkdir_p(extracted)
       File.write(File.join(extracted, "x"), "x")
-      FileUtils.mkdir_p(global_ext)
-      File.write(File.join(global_ext, "gem.build_complete"), "")
+      File.write(File.join(cached, Scint::Installer::ExtensionBuilder::BUILD_MARKER), "")
       FileUtils.mkdir_p(local_gem)
       File.write(File.join(local_gem, "rack.rb"), "")
       FileUtils.mkdir_p(File.dirname(local_spec))
@@ -811,7 +806,6 @@ class CLIInstallTest < Minitest::Test
       refute File.exist?(cached_manifest)
       refute File.exist?(spec_cache)
       refute Dir.exist?(extracted)
-      refute Dir.exist?(global_ext)
       refute Dir.exist?(local_gem)
       refute File.exist?(local_spec)
       refute Dir.exist?(local_ext)
@@ -843,22 +837,15 @@ class CLIInstallTest < Minitest::Test
       FileUtils.mkdir_p(File.dirname(cache.cached_spec_path(spec)))
       File.binwrite(cache.cached_spec_path(spec), Marshal.dump(gemspec))
 
-      global_ext = cache.ext_path(spec)
-      FileUtils.mkdir_p(global_ext)
-      File.write(File.join(global_ext, "ffi_ext.so"), "bin")
-      File.write(File.join(global_ext, "gem.build_complete"), "")
+      File.write(File.join(cached, "lib", "ffi_ext.so"), "bin")
+      File.write(File.join(cached, Scint::Installer::ExtensionBuilder::BUILD_MARKER), "")
 
       entry = Scint::PlanEntry.new(spec: spec, action: :link, cached_path: cached, gem_path: nil)
       install.send(:link_gem_files, entry, cache, bundle_path)
 
-      local_ext = File.join(
-        ruby_dir,
-        "extensions",
-        Scint::Platform.gem_arch,
-        Scint::Platform.extension_api_version,
-        cache.full_name(spec),
-      )
-      assert File.exist?(File.join(local_ext, "ffi_ext.so"))
+      local_gem = File.join(ruby_dir, "gems", cache.full_name(spec))
+      assert File.exist?(File.join(local_gem, "lib", "ffi_ext.so"))
+      assert File.exist?(File.join(local_gem, Scint::Installer::ExtensionBuilder::BUILD_MARKER))
       refute Dir.exist?(File.join(cache.install_ruby_dir, "gems", cache.full_name(spec)))
     end
   end

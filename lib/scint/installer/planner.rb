@@ -89,15 +89,10 @@ module Scint
         return false unless ExtensionBuilder.needs_build?(spec, source_dir)
 
         full = cache_layout.full_name(spec)
-        ext_install_dir = File.join(
-          ruby_dir,
-          "extensions",
-          Platform.gem_arch,
-          Platform.extension_api_version,
-          full,
-        )
+        gem_dir = File.join(ruby_dir, "gems", full)
+        marker = File.join(gem_dir, ExtensionBuilder::BUILD_MARKER)
 
-        !Dir.exist?(ext_install_dir)
+        !File.exist?(marker)
       end
 
       # Rough size estimate for download ordering.

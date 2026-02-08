@@ -122,7 +122,7 @@ module Scint
       end
 
       def extension_build_complete?(spec, layout, abi_key)
-        marker = File.join(layout.ext_path(spec, abi_key), "gem.build_complete")
+        marker = File.join(layout.cached_path(spec, abi_key), Installer::ExtensionBuilder::BUILD_MARKER)
         File.exist?(marker)
       rescue StandardError
         false

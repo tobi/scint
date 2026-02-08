@@ -176,17 +176,45 @@ module Scint
 
       def clear_packages(packages)
         removed = 0
-        %w[inbound extracted ext].each do |subdir|
-          subdir_path = File.join(cache_root, subdir)
-          next unless Dir.exist?(subdir_path)
 
-          Dir.children(subdir_path).each do |entry|
-            if packages.any? { |pkg| entry.start_with?(pkg) }
-              FileUtils.rm_rf(File.join(subdir_path, entry))
+        packages.each do |pkg|
+          # inbound gems
+          Dir.glob(File.join(cache_root, "inbound", "gems", "#{pkg}-*.gem")).each do |path|
+            FileUtils.rm_rf(path)
+            removed += 1
+          end
+
+          # assembling + cached (per-ABI)
+          %w[assembling cached].each do |subdir|
+            Dir.glob(File.join(cache_root, subdir, "*", "#{pkg}-*")) do |path|
+              FileUtils.rm_rf(path)
+              removed += 1
+            end
+            Dir.glob(File.join(cache_root, subdir, "*", "#{pkg}-*.spec.marshal")) do |path|
+              FileUtils.rm_rf(path)
+              removed += 1
+            end
+            Dir.glob(File.join(cache_root, subdir, "*", "#{pkg}-*.manifest")) do |path|
+              FileUtils.rm_rf(path)
               removed += 1
             end
           end
+
+          # legacy directories (extracted/ext)
+          Dir.glob(File.join(cache_root, "extracted", "#{pkg}-*")) do |path|
+            FileUtils.rm_rf(path)
+            removed += 1
+          end
+          Dir.glob(File.join(cache_root, "extracted", "#{pkg}-*.spec.marshal")) do |path|
+            FileUtils.rm_rf(path)
+            removed += 1
+          end
+          Dir.glob(File.join(cache_root, "ext", "*", "#{pkg}-*")) do |path|
+            FileUtils.rm_rf(path)
+            removed += 1
+          end
         end
+
         removed
       end
 
