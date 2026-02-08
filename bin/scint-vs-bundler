@@ -1,26 +1,63 @@
 #!/usr/bin/env bash
 # Benchmark: stock bundler vs scint, cold and warm caches.
 #
-# Cold = fresh install dir, no caches.
-# Warm = fresh install dir, but gem download caches are warm from the cold run.
+# Persistent cache layout:
+#   /tmp/scint-tests/bundler/<project-key>/...   (reused between runs)
+#   /tmp/scint-tests/scint/<project-key>/...     (recreated every run)
+#   /tmp/scint-tests/runs/<project-key>/<run-id> (per-run logs/artifacts)
+#   /tmp/scint-tests/timings.yml                 (latest timings per project)
 #
-# No copying needed — warm runs just get a new BUNDLE_PATH while keeping
-# the same GEM_HOME / GEM_PATH / global cache so downloads are already cached.
+# Bundler baseline is reused if present. Pass --force to rebuild it.
+# Scint baseline is always rebuilt each run.
 #
-# Creates an isolated tmp directory for all outputs. Clean up with:
-#   rm -rf "$TMPROOT"
-#
-# Usage: ./bin/scint-vs-bundler [/path/to/project]
+# Usage:
+#   ./bin/scint-vs-bundler [--force] [/path/to/project]
 #   Default project: current working directory
 
 set -euo pipefail
 
+usage() {
+  cat <<'USAGE'
+Usage: ./bin/scint-vs-bundler [--force] [/path/to/project]
+
+Options:
+  --force     Rebuild bundler baseline even if cached under /tmp/scint-tests
+  -h, --help  Show help
+USAGE
+}
+
+FORCE=0
+PROJECT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force)
+      FORCE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      if [[ -n "$PROJECT" ]]; then
+        echo "Unexpected extra argument: $1" >&2
+        usage
+        exit 2
+      fi
+      PROJECT="$1"
+      shift
+      ;;
+  esac
+done
+
+PROJECT="${PROJECT:-$PWD}"
+PROJECT="$(cd "$PROJECT" && pwd)"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PROJECT="${1:-$PWD}"
 SCINT_BIN="$REPO_ROOT/bin/scint"
-TMPBASE="${TMPDIR:-/tmp}"
-TMPROOT="$(mktemp -d "${TMPBASE%/}/scint-bench-XXXXXX")"
+TEST_ROOT="/tmp/scint-tests"
+RUN_ID="$(date +%Y%m%d-%H%M%S)"
 RUBY_API_DIR="$(ruby -rrbconfig -e 'print RbConfig::CONFIG["ruby_version"]')"
 LOCKFILE="$PROJECT/Gemfile.lock"
 
@@ -39,23 +76,39 @@ if [[ ! -f "$LOCKFILE" ]]; then
   exit 1
 fi
 
-# Each run gets its own BUNDLE_PATH (install destination).
-# GEM_HOME/GEM_PATH stay shared so download caches persist between cold→warm.
-# Scint uses XDG_CACHE_HOME for its global cache — redirect to tmpdir.
-BUNDLER_COLD="$TMPROOT/bundler-cold"
-BUNDLER_WARM="$TMPROOT/bundler-warm"
-BUNDLER_GEM_HOME="$TMPROOT/bundler-gem-home"
-SCINT_COLD="$TMPROOT/scint-cold"
-SCINT_WARM="$TMPROOT/scint-warm"
-SCINT_GEM_HOME="$TMPROOT/scint-gem-home"
-SCINT_XDG_CACHE="$TMPROOT/scint-cache"
-LOGS="$TMPROOT/logs"
-mkdir -p "$BUNDLER_COLD" "$BUNDLER_WARM" "$BUNDLER_GEM_HOME" \
-         "$SCINT_COLD" "$SCINT_WARM" "$SCINT_GEM_HOME" "$SCINT_XDG_CACHE" "$LOGS"
+PROJECT_BASENAME="$(basename "$PROJECT" | tr -c 'A-Za-z0-9._-' '_')"
+PROJECT_HASH="$(ruby -rdigest -e 'print Digest::SHA256.hexdigest(ARGV[0])[0,12]' "$PROJECT")"
+PROJECT_KEY="${PROJECT_BASENAME}-${PROJECT_HASH}"
+
+BUNDLER_ROOT="$TEST_ROOT/bundler/$PROJECT_KEY"
+BUNDLER_COLD="$BUNDLER_ROOT/cold"
+BUNDLER_WARM="$BUNDLER_ROOT/warm"
+BUNDLER_GEM_HOME="$BUNDLER_ROOT/gem-home"
+BUNDLER_LOGS="$BUNDLER_ROOT/logs"
+
+SCINT_ROOT="$TEST_ROOT/scint/$PROJECT_KEY"
+SCINT_COLD="$SCINT_ROOT/cold"
+SCINT_WARM="$SCINT_ROOT/warm"
+SCINT_GEM_HOME="$SCINT_ROOT/gem-home"
+SCINT_XDG_CACHE="$SCINT_ROOT/cache"
+
+RUN_DIR="$TEST_ROOT/runs/$PROJECT_KEY/$RUN_ID"
+RUN_LOGS="$RUN_DIR/logs"
+mkdir -p "$RUN_LOGS"
+
+TIMINGS_FILE="$TEST_ROOT/timings.yml"
+mkdir -p "$TEST_ROOT"
+
+SYSTEM_GEM_DIR="$(ruby -e 'puts Gem.default_dir')"
 
 echo "=== Benchmark: bundler vs scint ==="
-echo "Project:  $PROJECT"
-echo "Tmp root: $TMPROOT"
+echo "Project:          $PROJECT"
+echo "Project key:      $PROJECT_KEY"
+echo "Test root:        $TEST_ROOT"
+echo "Bundler root:     $BUNDLER_ROOT"
+echo "Scint root:       $SCINT_ROOT (recreated each run)"
+echo "Run dir:          $RUN_DIR"
+echo "Force bundler:    $FORCE"
 echo ""
 
 # Prepare lockfile baseline:
@@ -72,7 +125,7 @@ if git -C "$PROJECT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   fi
 fi
 
-LOCKFILE_BEFORE="$TMPROOT/Gemfile.lock.before"
+LOCKFILE_BEFORE="$RUN_DIR/Gemfile.lock.before"
 cp "$LOCKFILE" "$LOCKFILE_BEFORE"
 
 # Helper: time a command, capture output, return elapsed seconds
@@ -94,37 +147,59 @@ run_timed() {
   echo "$elapsed" > "${logfile}.time"
 }
 
-# ── 1. Cold bundler ──────────────────────────────────────────────
-echo ""
-echo "════════════════════════════════════════"
-echo " 1/4  Bundler (cold)"
-echo "════════════════════════════════════════"
-SYSTEM_GEM_DIR="$(ruby -e 'puts Gem.default_dir')"
-run_timed "bundler install (cold)" "$LOGS/bundler-cold.log" \
-  env BUNDLE_PATH="$BUNDLER_COLD" \
-      GEM_HOME="$BUNDLER_GEM_HOME" \
-      GEM_PATH="$BUNDLER_GEM_HOME:$SYSTEM_GEM_DIR" \
-      BUNDLE_DISABLE_SHARED_GEMS=1 \
-  bundle install --jobs=8
+bundler_ready=0
+if [[ -d "$BUNDLER_COLD" && -d "$BUNDLER_WARM" && -f "$BUNDLER_LOGS/bundler-cold.log.time" && -f "$BUNDLER_LOGS/bundler-warm.log.time" ]]; then
+  bundler_ready=1
+fi
 
-# ── 2. Warm bundler (new install dir, same gem cache) ────────────
-echo ""
-echo "════════════════════════════════════════"
-echo " 2/4  Bundler (warm)"
-echo "════════════════════════════════════════"
-run_timed "bundler install (warm)" "$LOGS/bundler-warm.log" \
-  env BUNDLE_PATH="$BUNDLER_WARM" \
-      GEM_HOME="$BUNDLER_GEM_HOME" \
-      GEM_PATH="$BUNDLER_GEM_HOME:$SYSTEM_GEM_DIR" \
-      BUNDLE_DISABLE_SHARED_GEMS=1 \
-  bundle install --jobs=8
+if [[ "$FORCE" -eq 1 ]]; then
+  echo "Forcing bundler baseline rebuild..."
+  rm -rf "$BUNDLER_ROOT"
+  bundler_ready=0
+fi
+
+bundler_reused=0
+if [[ "$bundler_ready" -eq 0 ]]; then
+  mkdir -p "$BUNDLER_COLD" "$BUNDLER_WARM" "$BUNDLER_GEM_HOME" "$BUNDLER_LOGS"
+
+  # ── 1. Cold bundler ──────────────────────────────────────────────
+  echo ""
+  echo "════════════════════════════════════════"
+  echo " 1/4  Bundler (cold)"
+  echo "════════════════════════════════════════"
+  run_timed "bundler install (cold)" "$BUNDLER_LOGS/bundler-cold.log" \
+    env BUNDLE_PATH="$BUNDLER_COLD" \
+        GEM_HOME="$BUNDLER_GEM_HOME" \
+        GEM_PATH="$BUNDLER_GEM_HOME:$SYSTEM_GEM_DIR" \
+        BUNDLE_DISABLE_SHARED_GEMS=1 \
+    bundle install --jobs=8
+
+  # ── 2. Warm bundler (new install dir, same gem cache) ────────────
+  echo ""
+  echo "════════════════════════════════════════"
+  echo " 2/4  Bundler (warm)"
+  echo "════════════════════════════════════════"
+  run_timed "bundler install (warm)" "$BUNDLER_LOGS/bundler-warm.log" \
+    env BUNDLE_PATH="$BUNDLER_WARM" \
+        GEM_HOME="$BUNDLER_GEM_HOME" \
+        GEM_PATH="$BUNDLER_GEM_HOME:$SYSTEM_GEM_DIR" \
+        BUNDLE_DISABLE_SHARED_GEMS=1 \
+    bundle install --jobs=8
+else
+  bundler_reused=1
+  echo "Reusing cached bundler baseline at: $BUNDLER_ROOT"
+fi
+
+# Always rebuild scint baselines for fresh scint timings.
+rm -rf "$SCINT_ROOT"
+mkdir -p "$SCINT_COLD" "$SCINT_WARM" "$SCINT_GEM_HOME" "$SCINT_XDG_CACHE"
 
 # ── 3. Cold scint ────────────────────────────────────────────────
 echo ""
 echo "════════════════════════════════════════"
 echo " 3/4  Scint (cold)"
 echo "════════════════════════════════════════"
-run_timed "scint install (cold)" "$LOGS/scint-cold.log" \
+run_timed "scint install (cold)" "$RUN_LOGS/scint-cold.log" \
   env BUNDLE_PATH="$SCINT_COLD" \
       GEM_HOME="$SCINT_GEM_HOME" \
       GEM_PATH="$SCINT_GEM_HOME:$SYSTEM_GEM_DIR" \
@@ -136,7 +211,7 @@ echo ""
 echo "════════════════════════════════════════"
 echo " 4/4  Scint (warm)"
 echo "════════════════════════════════════════"
-run_timed "scint install (warm)" "$LOGS/scint-warm.log" \
+run_timed "scint install (warm)" "$RUN_LOGS/scint-warm.log" \
   env BUNDLE_PATH="$SCINT_WARM" \
       GEM_HOME="$SCINT_GEM_HOME" \
       GEM_PATH="$SCINT_GEM_HOME:$SYSTEM_GEM_DIR" \
@@ -149,15 +224,18 @@ echo "════════════════════════�
 echo " Results"
 echo "════════════════════════════════════════"
 
-bc=$(cat "$LOGS/bundler-cold.log.time")
-bw=$(cat "$LOGS/bundler-warm.log.time")
-sc=$(cat "$LOGS/scint-cold.log.time")
-sw=$(cat "$LOGS/scint-warm.log.time")
+bc=$(cat "$BUNDLER_LOGS/bundler-cold.log.time")
+bw=$(cat "$BUNDLER_LOGS/bundler-warm.log.time")
+sc=$(cat "$RUN_LOGS/scint-cold.log.time")
+sw=$(cat "$RUN_LOGS/scint-warm.log.time")
 
 printf "  %-20s %8ss\n" "Bundler (cold):" "$bc"
 printf "  %-20s %8ss\n" "Bundler (warm):" "$bw"
 printf "  %-20s %8ss\n" "Scint (cold):" "$sc"
 printf "  %-20s %8ss\n" "Scint (warm):" "$sw"
+if [[ "$bundler_reused" -eq 1 ]]; then
+  echo "  Bundler timings reused from cache."
+fi
 echo ""
 
 cold_speedup=$(ruby -e "puts ($bc.to_f / $sc.to_f).round(1)")
@@ -171,7 +249,7 @@ echo "════════════════════════�
 echo " Gemfile.lock drift"
 echo "════════════════════════════════════════"
 
-LOCK_DIFF="$LOGS/gemfile-lock.diff"
+LOCK_DIFF="$RUN_LOGS/gemfile-lock.diff"
 if cmp -s "$LOCKFILE_BEFORE" "$LOCKFILE"; then
   echo "  Gemfile.lock unchanged ✓"
 else
@@ -187,7 +265,6 @@ else
   before_lines=$(wc -l < "$LOCKFILE_BEFORE" | tr -d ' ')
   change_pct=$(ruby -e "before=$before_lines; changed=$changed_lines; puts(before > 0 ? ((changed.to_f / before) * 100).round(2) : 0.0)")
 
-  # Significant if either absolute or relative churn crosses threshold.
   significant=false
   if (( changed_lines >= 50 )); then
     significant=true
@@ -210,15 +287,13 @@ echo "════════════════════════�
 echo " Directory comparison"
 echo "════════════════════════════════════════"
 
-DIFF_LOG="$LOGS/diff-report.txt"
+DIFF_LOG="$RUN_LOGS/diff-report.txt"
 > "$DIFF_LOG"
 
-# Compare installed gem directories
 bundler_gems="$BUNDLER_COLD/ruby/$RUBY_API_DIR/gems"
 scint_gems="$SCINT_COLD/ruby/$RUBY_API_DIR/gems"
 
 if [[ -d "$bundler_gems" && -d "$scint_gems" ]]; then
-  # Gem directories present in each
   bundler_gem_list=$(cd "$bundler_gems" && ls -1 | sort)
   scint_gem_list=$(cd "$scint_gems" && ls -1 | sort)
 
@@ -246,7 +321,6 @@ if [[ -d "$bundler_gems" && -d "$scint_gems" ]]; then
     echo "$only_scint" | sed 's/^/    /'
   fi
 
-  # Compare gemspec counts
   bundler_specs="$BUNDLER_COLD/ruby/$RUBY_API_DIR/specifications"
   scint_specs="$SCINT_COLD/ruby/$RUBY_API_DIR/specifications"
   if [[ -d "$bundler_specs" && -d "$scint_specs" ]]; then
@@ -257,7 +331,6 @@ if [[ -d "$bundler_gems" && -d "$scint_gems" ]]; then
     echo "  Scint gemspecs:   $ss_count"
   fi
 
-  # Compare bin directories
   bundler_bin="$BUNDLER_COLD/ruby/$RUBY_API_DIR/bin"
   scint_bin_dir="$SCINT_COLD/ruby/$RUBY_API_DIR/bin"
   if [[ -d "$bundler_bin" && -d "$scint_bin_dir" ]]; then
@@ -279,7 +352,6 @@ if [[ -d "$bundler_gems" && -d "$scint_gems" ]]; then
     fi
   fi
 
-  # Check a few random gems for file count differences
   echo ""
   echo "  File count spot-check (first 10 shared gems):"
   echo "$in_both" | head -10 | while read -r gem; do
@@ -292,7 +364,6 @@ if [[ -d "$bundler_gems" && -d "$scint_gems" ]]; then
     fi
   done
 
-  # Disk size comparison
   echo ""
   bundler_size=$(du -sh "$BUNDLER_COLD" 2>/dev/null | cut -f1)
   scint_size=$(du -sh "$SCINT_COLD" 2>/dev/null | cut -f1)
@@ -304,6 +375,50 @@ else
   echo "  Scint:   $scint_gems (exists: $(test -d "$scint_gems" && echo yes || echo no))"
 fi
 
+mkdir -p "$(dirname "$TIMINGS_FILE")"
+env TIMINGS_FILE="$TIMINGS_FILE" \
+    PROJECT_KEY="$PROJECT_KEY" \
+    PROJECT_PATH="$PROJECT" \
+    RUN_ID="$RUN_ID" \
+    BUNDLER_REUSED="$bundler_reused" \
+    BC="$bc" BW="$bw" SC="$sc" SW="$sw" \
+    COLD_SPEEDUP="$cold_speedup" WARM_SPEEDUP="$warm_speedup" \
+    TEST_ROOT="$TEST_ROOT" BUNDLER_ROOT="$BUNDLER_ROOT" SCINT_ROOT="$SCINT_ROOT" RUN_DIR="$RUN_DIR" \
+  ruby <<'RUBY'
+require 'yaml'
+
+file = ENV.fetch('TIMINGS_FILE')
+data = File.exist?(file) ? (YAML.load_file(file) || {}) : {}
+data['projects'] ||= {}
+
+data['projects'][ENV.fetch('PROJECT_KEY')] = {
+  'project_path' => ENV.fetch('PROJECT_PATH'),
+  'updated_at' => Time.now.utc.strftime('%Y-%m-%dT%H:%M:%SZ'),
+  'last_run_id' => ENV.fetch('RUN_ID'),
+  'bundler_reused' => ENV.fetch('BUNDLER_REUSED') == '1',
+  'timings_seconds' => {
+    'bundler_cold' => ENV.fetch('BC').to_f,
+    'bundler_warm' => ENV.fetch('BW').to_f,
+    'scint_cold' => ENV.fetch('SC').to_f,
+    'scint_warm' => ENV.fetch('SW').to_f,
+  },
+  'speedup' => {
+    'cold' => ENV.fetch('COLD_SPEEDUP').to_f,
+    'warm' => ENV.fetch('WARM_SPEEDUP').to_f,
+  },
+  'paths' => {
+    'test_root' => ENV.fetch('TEST_ROOT'),
+    'bundler_root' => ENV.fetch('BUNDLER_ROOT'),
+    'scint_root' => ENV.fetch('SCINT_ROOT'),
+    'run_dir' => ENV.fetch('RUN_DIR'),
+  },
+}
+
+File.write(file, YAML.dump(data))
+RUBY
+
 echo ""
-echo "All logs and data in: $TMPROOT"
-echo "Clean up: rm -rf $TMPROOT"
+echo "All run logs and data in: $RUN_DIR"
+echo "Bundler cache root:       $BUNDLER_ROOT"
+echo "Scint cache root:         $SCINT_ROOT"
+echo "Timings YAML:             $TIMINGS_FILE"
