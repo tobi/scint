@@ -24,6 +24,7 @@ require_relative "../gem/package"
 require_relative "../gem/extractor"
 require_relative "../cache/layout"
 require_relative "../cache/metadata_store"
+require_relative "../cache/validity"
 require_relative "../installer/planner"
 require_relative "../installer/linker"
 require_relative "../installer/preparer"
@@ -58,6 +59,7 @@ module Scint
         start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
         cache = Scint::Cache::Layout.new
+        cache_telemetry = Scint::Cache::Telemetry.new
         bundle_path = @path || ENV["BUNDLER_PATH"] || ".bundle"
         bundle_display = display_bundle_path(bundle_path)
         bundle_path = File.expand_path(bundle_path)
@@ -115,7 +117,7 @@ module Scint
           force_purge_artifacts(resolved, bundle_path, cache) if @force
 
           # 7. Plan: diff resolved vs installed
-          plan = Installer::Planner.plan(resolved, bundle_path, cache)
+          plan = Installer::Planner.plan(resolved, bundle_path, cache, telemetry: cache_telemetry)
           total_gems = resolved.size
           updated_gems = plan.count { |e| e.action != :skip }
           cached_gems = total_gems - updated_gems
@@ -192,9 +194,13 @@ module Scint
           end
         ensure
           begin
-            scheduler.shutdown
+            cache_telemetry.warn_if_needed(cache_root: cache.root)
           ensure
-            close_download_pool
+            begin
+              scheduler.shutdown
+            ensure
+              close_download_pool
+            end
           end
         end
       end
@@ -1483,13 +1489,15 @@ module Scint
         sources = entries.filter_map do |entry|
           next unless entry.action == :link || entry.action == :build_ext
 
-          extracted = cache.extracted_path(entry.spec)
+          source_dir = entry.cached_path
+          next unless source_dir
+
           full_name = cache.full_name(entry.spec)
-          next unless File.basename(extracted) == full_name
-          next unless Dir.exist?(extracted)
+          next unless File.basename(source_dir) == full_name
+          next unless Dir.exist?(source_dir)
           next if Dir.exist?(File.join(gems_dir, full_name))
 
-          extracted
+          source_dir
         end
         return if sources.empty?
 
@@ -1499,20 +1507,23 @@ module Scint
       end
 
       def load_cached_gemspec(spec, cache, extracted_path)
-        path = cache.spec_cache_path(spec)
-        return nil unless File.exist?(path)
+        paths = [cache.cached_spec_path(spec), cache.spec_cache_path(spec)]
 
-        data = File.binread(path)
-        gemspec = if data.start_with?("---")
-          Gem::Specification.from_yaml(data)
-        else
-          begin
-            Marshal.load(data)
-          rescue StandardError
+        paths.each do |path|
+          next unless File.exist?(path)
+
+          data = File.binread(path)
+          gemspec = if data.start_with?("---")
             Gem::Specification.from_yaml(data)
+          else
+            begin
+              Marshal.load(data)
+            rescue StandardError
+              Gem::Specification.from_yaml(data)
+            end
           end
+          return gemspec if cached_gemspec_valid?(gemspec, extracted_path)
         end
-        return gemspec if cached_gemspec_valid?(gemspec, extracted_path)
 
         nil
       rescue StandardError

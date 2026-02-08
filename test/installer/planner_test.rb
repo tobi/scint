@@ -1,12 +1,47 @@
 # frozen_string_literal: true
 
 require_relative "../test_helper"
+require "json"
 require "scint/installer/planner"
 require "scint/cache/layout"
+require "scint/cache/validity"
 require "scint/source/path"
 
 class PlannerTest < Minitest::Test
   Spec = Struct.new(:name, :version, :platform, :has_extensions, :size, :source, keyword_init: true)
+
+  def write_cached_entry(layout, spec, manifest: true, manifest_version: 1, ext_name: nil)
+    cached_dir = layout.cached_path(spec)
+    FileUtils.mkdir_p(cached_dir)
+    FileUtils.mkdir_p(File.dirname(layout.cached_spec_path(spec)))
+    File.binwrite(layout.cached_spec_path(spec), Marshal.dump({ "name" => spec.name }))
+
+    if manifest
+      data = {
+        "version" => manifest_version,
+        "full_name" => layout.full_name(spec),
+        "abi" => Scint::Platform.abi_key,
+        "source" => { "type" => "rubygems", "uri" => "https://rubygems.org" },
+        "files" => [],
+        "build" => { "extensions" => false },
+      }
+      File.write(layout.cached_manifest_path(spec), JSON.generate(data))
+    end
+
+    if ext_name
+      ext_dir = File.join(cached_dir, "ext", ext_name)
+      FileUtils.mkdir_p(ext_dir)
+      File.write(File.join(ext_dir, "extconf.rb"), "")
+    end
+
+    cached_dir
+  end
+
+  def write_ext_complete(layout, spec)
+    ext_dir = layout.ext_path(spec)
+    FileUtils.mkdir_p(ext_dir)
+    File.write(File.join(ext_dir, "gem.build_complete"), "")
+  end
 
   def test_plan_one_marks_skip_when_already_installed
     with_tmpdir do |dir|
@@ -88,17 +123,34 @@ class PlannerTest < Minitest::Test
     end
   end
 
-  def test_plan_one_marks_link_when_extracted_cache_exists
+  def test_plan_one_marks_link_when_cached_entry_exists
     with_tmpdir do |dir|
       bundle_path = File.join(dir, ".bundle")
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = Spec.new(name: "rack", version: "2.2.8", platform: "ruby", has_extensions: false)
 
-      FileUtils.mkdir_p(layout.extracted_path(spec))
+      cached_dir = write_cached_entry(layout, spec)
 
       entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
       assert_equal :link, entry.action
-      assert_equal layout.extracted_path(spec), entry.cached_path
+      assert_equal cached_dir, entry.cached_path
+    end
+  end
+
+  def test_plan_one_uses_legacy_cached_entry_without_manifest
+    with_tmpdir do |dir|
+      bundle_path = File.join(dir, ".bundle")
+      layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      spec = Spec.new(name: "rack", version: "2.2.8", platform: "ruby", has_extensions: false)
+
+      cached_dir = write_cached_entry(layout, spec, manifest: false)
+      telemetry = Scint::Cache::Telemetry.new
+
+      entry = Scint::Installer::Planner.plan([spec], bundle_path, layout, telemetry: telemetry).first
+      assert_equal :link, entry.action
+      assert_equal cached_dir, entry.cached_path
+
+      assert_equal 1, telemetry.counts["cache.manifest.missing"]
     end
   end
 
@@ -108,7 +160,7 @@ class PlannerTest < Minitest::Test
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = Spec.new(name: "ffi", version: "1.17.0", platform: "ruby", has_extensions: true)
 
-      FileUtils.mkdir_p(layout.extracted_path(spec))
+      write_cached_entry(layout, spec)
 
       entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
       assert_equal :link, entry.action
@@ -189,7 +241,7 @@ class PlannerTest < Minitest::Test
       small = Spec.new(name: "small", version: "1.0.0", platform: "ruby", has_extensions: false, size: 10)
       cached = Spec.new(name: "cached", version: "1.0.0", platform: "ruby", has_extensions: false, size: 100)
 
-      FileUtils.mkdir_p(layout.extracted_path(cached))
+      write_cached_entry(layout, cached)
 
       entries = Scint::Installer::Planner.plan([small, cached, big], bundle_path, layout)
 
@@ -472,7 +524,7 @@ class PlannerTest < Minitest::Test
       big = Spec.new(name: "big", version: "1.0.0", platform: "ruby", has_extensions: false, size: 100)
       small = Spec.new(name: "small", version: "1.0.0", platform: "ruby", has_extensions: false, size: 10)
       cached = Spec.new(name: "cached", version: "1.0.0", platform: "ruby", has_extensions: false)
-      FileUtils.mkdir_p(layout.extracted_path(cached))
+      write_cached_entry(layout, cached)
 
       entries = Scint::Installer::Planner.plan([small, cached, builtin, big], bundle_path, layout)
 
