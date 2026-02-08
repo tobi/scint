@@ -48,3 +48,32 @@ When optimizing, prioritize:
 2. Reusing compiled extension outputs across projects/runs.
 3. Keeping git/source assembly deterministic and cache-safe.
 4. Maintaining high parallelism in fetch/extract/install while capping compile concurrency for machine stability.
+
+## Primary Benchmark KPI
+
+The most important benchmark signal is install runtime, reported in minutes/seconds, with this baseline model:
+
+1. `bundler cold` is the reference baseline (`1.00x`).
+2. Always report:
+   - `bundler warm`
+   - `scint cold`
+   - `scint warm`
+3. For each non-baseline timing, report relative factor vs `bundler cold`:
+   - `relative_speedup = bundler_cold_seconds / phase_seconds`
+4. Success criteria emphasize reducing `scint warm` first, then `scint cold`, while preserving correctness and lockfile parity.
+
+### Comparison Table Rules
+
+When rendering benchmark comparison tables:
+
+1. Use concise human time formatting:
+   - examples: `57s`, `3.2s`, `1m 11s`
+   - avoid padded clock formatting like `00:57.08`
+2. Keep `bundler cold` as baseline (`1.00x`).
+3. Show relative performance as "higher is faster" vs baseline:
+   - `speedup = bundler_cold_seconds / phase_seconds`
+   - display as `N.NNx faster` when `speedup >= 1`
+   - display as `N.NNx slower` when `speedup < 1` (using inverse)
+4. Exclude rows where any required benchmark phase failed:
+   - `bundler cold`, `bundler warm`, `scint cold`, `scint warm` must all have `rc=0`
+5. Do not mix failed runs into the main comparison table.

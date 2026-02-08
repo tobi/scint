@@ -18,21 +18,27 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: ./bin/scint-vs-bundler [--force] [/path/to/project]
+Usage: ./bin/scint-vs-bundler [--force] [--test-root PATH] [/path/to/project]
 
 Options:
   --force     Rebuild bundler baseline even if cached under /tmp/scint-tests
+  --test-root Override benchmark workspace root (default: /tmp/scint-tests)
   -h, --help  Show help
 USAGE
 }
 
 FORCE=0
 PROJECT=""
+TEST_ROOT_OVERRIDE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --force)
       FORCE=1
       shift
+      ;;
+    --test-root)
+      TEST_ROOT_OVERRIDE="${2:-}"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -56,7 +62,7 @@ PROJECT="$(cd "$PROJECT" && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SCINT_BIN="$REPO_ROOT/bin/scint"
-TEST_ROOT="/tmp/scint-tests"
+TEST_ROOT="${TEST_ROOT_OVERRIDE:-/tmp/scint-tests}"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 RUBY_API_DIR="$(ruby -rrbconfig -e 'print RbConfig::CONFIG["ruby_version"]')"
 LOCKFILE="$PROJECT/Gemfile.lock"
@@ -138,13 +144,18 @@ run_timed() {
   local start end_time elapsed
   start=$(ruby -e 'puts Process.clock_gettime(Process::CLOCK_MONOTONIC)')
 
-  # Run in the project directory, tee to both log and stdout
-  (cd "$PROJECT" && "$@") 2>&1 | tee "$logfile" || true
+  # Run in the project directory, tee to both log and stdout.
+  # Keep going on failures but persist exit codes for reporting.
+  set +e
+  (cd "$PROJECT" && "$@") 2>&1 | tee "$logfile"
+  local cmd_rc=${PIPESTATUS[0]}
+  set -e
 
   end_time=$(ruby -e 'puts Process.clock_gettime(Process::CLOCK_MONOTONIC)')
   elapsed=$(ruby -e "puts (($end_time - $start)).round(2)")
-  echo "  Elapsed: ${elapsed}s (log: $logfile)"
+  echo "  Elapsed: ${elapsed}s (rc: ${cmd_rc}, log: $logfile)"
   echo "$elapsed" > "${logfile}.time"
+  echo "$cmd_rc" > "${logfile}.rc"
 }
 
 bundler_ready=0
@@ -228,11 +239,19 @@ bc=$(cat "$BUNDLER_LOGS/bundler-cold.log.time")
 bw=$(cat "$BUNDLER_LOGS/bundler-warm.log.time")
 sc=$(cat "$RUN_LOGS/scint-cold.log.time")
 sw=$(cat "$RUN_LOGS/scint-warm.log.time")
+bc_rc=$(cat "$BUNDLER_LOGS/bundler-cold.log.rc")
+bw_rc=$(cat "$BUNDLER_LOGS/bundler-warm.log.rc")
+sc_rc=$(cat "$RUN_LOGS/scint-cold.log.rc")
+sw_rc=$(cat "$RUN_LOGS/scint-warm.log.rc")
 
 printf "  %-20s %8ss\n" "Bundler (cold):" "$bc"
 printf "  %-20s %8ss\n" "Bundler (warm):" "$bw"
 printf "  %-20s %8ss\n" "Scint (cold):" "$sc"
 printf "  %-20s %8ss\n" "Scint (warm):" "$sw"
+printf "  %-20s %8s\n" "Bundler cold rc:" "$bc_rc"
+printf "  %-20s %8s\n" "Bundler warm rc:" "$bw_rc"
+printf "  %-20s %8s\n" "Scint cold rc:" "$sc_rc"
+printf "  %-20s %8s\n" "Scint warm rc:" "$sw_rc"
 if [[ "$bundler_reused" -eq 1 ]]; then
   echo "  Bundler timings reused from cache."
 fi
@@ -382,6 +401,7 @@ env TIMINGS_FILE="$TIMINGS_FILE" \
     RUN_ID="$RUN_ID" \
     BUNDLER_REUSED="$bundler_reused" \
     BC="$bc" BW="$bw" SC="$sc" SW="$sw" \
+    BC_RC="$bc_rc" BW_RC="$bw_rc" SC_RC="$sc_rc" SW_RC="$sw_rc" \
     COLD_SPEEDUP="$cold_speedup" WARM_SPEEDUP="$warm_speedup" \
     TEST_ROOT="$TEST_ROOT" BUNDLER_ROOT="$BUNDLER_ROOT" SCINT_ROOT="$SCINT_ROOT" RUN_DIR="$RUN_DIR" \
   ruby <<'RUBY'
@@ -401,6 +421,12 @@ data['projects'][ENV.fetch('PROJECT_KEY')] = {
     'bundler_warm' => ENV.fetch('BW').to_f,
     'scint_cold' => ENV.fetch('SC').to_f,
     'scint_warm' => ENV.fetch('SW').to_f,
+  },
+  'status' => {
+    'bundler_cold_rc' => ENV.fetch('BC_RC').to_i,
+    'bundler_warm_rc' => ENV.fetch('BW_RC').to_i,
+    'scint_cold_rc' => ENV.fetch('SC_RC').to_i,
+    'scint_warm_rc' => ENV.fetch('SW_RC').to_i,
   },
   'speedup' => {
     'cold' => ENV.fetch('COLD_SPEEDUP').to_f,
@@ -422,3 +448,12 @@ echo "All run logs and data in: $RUN_DIR"
 echo "Bundler cache root:       $BUNDLER_ROOT"
 echo "Scint cache root:         $SCINT_ROOT"
 echo "Timings YAML:             $TIMINGS_FILE"
+
+overall_rc=0
+for rc in "$bc_rc" "$bw_rc" "$sc_rc" "$sw_rc"; do
+  if [[ "$rc" != "0" ]]; then
+    overall_rc=1
+    break
+  fi
+done
+exit "$overall_rc"
