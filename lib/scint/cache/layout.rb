@@ -113,6 +113,10 @@ module Scint
         File.join(base, "scint")
       end
 
+      # Slug rules are defined in README.md (Cache Validity + Manifest Specification).
+      # - Index slugs prefer host/path when available, otherwise fall back to a hash.
+      # - Hash slugs are deterministic but must be paired with manifest checks for
+      #   collision detection.
       def slugify_uri(str)
         uri = URI.parse(str) rescue nil
         if uri && uri.host
@@ -125,6 +129,9 @@ module Scint
         end
       end
 
+      # Git slugs are SHA256 of the normalized URI string (uri.to_s), truncated
+      # to 16 hex chars. Callers must validate `source.uri` in the manifest to
+      # detect collisions and fall back to a longer hash if needed.
       def git_slug(uri)
         Digest::SHA256.hexdigest(uri.to_s)[0, 16]
       end

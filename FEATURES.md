@@ -10,4 +10,8 @@
 - the installation process involves compilation. We attempt to have compilation happen while its not blocking other operations, but also only one compilation at a time
 - we have a book keeping object that governs the worker pools and that's present during each step (fetch, extract, compile, install) and recieves the tasks for each phase from the workers. 
 - i suspect that we need to fork of a worker for compilation which we then have to communicate with via some rpc format. simple "-> CALL method, <- RESULT:\n...." type line protocol through stdin/out might work well enough there. 
+- cache validity is defined by cached tree + spec marshal + versioned manifest, scoped by ABI (with `gem.build_complete` for native extensions)
+- cached manifests are versioned JSON with deterministic ordering and a file list for fast materialization
+- git cache slugs are deterministic hashes of the normalized source URI with collision detection + telemetry
+- legacy cached entries without a manifest remain read-compatible but emit telemetry for deprecation
 
