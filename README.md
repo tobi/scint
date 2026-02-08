@@ -64,57 +64,46 @@ Defaults:
 1. Local install/runtime directory: `.bundle/`
 2. Global cache root: `~/.cache/scint` (or `XDG_CACHE_HOME`)
 
-## Install Architecture
+## Install Architecture (Target)
 
-Scint has a strict phase contract. Resolution/planning decides *what* to do; the phases below define *how* install work executes:
+Scint should have one clear cache lifecycle:
 
-1. Fetch
-   Download index data and source payloads into global cache (`~/.cache/scint/inbound`).
-2. Source Assembly (when needed)
-   Materialize source trees that are not directly usable yet (for example git checkouts with submodules).
-3. Extract
-   Expand `.gem` payloads into `~/.cache/scint/extracted`.
-4. Cache Assembly
-   Normalize cache layout so extracted artifacts are complete and reusable across projects/runs.
-5. Compile (when needed)
-   Build native extensions once into global extension cache (`~/.cache/scint/ext/<abi>/...`).
-6. Install/Materialize
-   Copy/clone/link from global cache into destination (`.bundle` or `BUNDLE_PATH`) using filesystem acceleration (hardlink/CoW/reflink when available).
+1. `inbound`
+2. `assembling`
+3. `cached`
+4. `materialize`
 
-Warm-path expectation:
+Resolution/planning still decides *what* to install; this pipeline defines *how* each artifact becomes globally reusable.
 
-1. If global extracted/ext caches are warm and valid, install should skip fetch/extract/compile.
-2. If `.bundle` is deleted, rerun should primarily redo phase 6 (materialization), not heavy rebuild work.
-3. The materialization step should be near-IO-bound and as close to instantaneous as filesystem capabilities allow.
+### Phase Contract
+
+1. Fetch into `inbound`
+   - Gem payloads go to `inbound/gems/`.
+   - Git repositories go to `inbound/gits/` using deterministic names (for example `https_github_com__tobi__try`).
+2. Assemble into `assembling`
+   - For `.gem` sources: unpack into `assembling/<abi>/<full_name>/`.
+   - For git sources: fetch/checkout/submodules in `inbound/gits`, then export/copy the selected tree into `assembling/<abi>/<full_name>/`.
+3. Compile in `assembling`
+   - Native extension build happens inside the assembling directory so successful outputs are part of the final cached tree.
+4. Promote atomically to `cached`
+   - On success, move `assembling/<abi>/<full_name>/` to `cached/<abi>/<full_name>/`.
+   - Write `cached/<abi>/<full_name>.spec.marshal`.
+   - Write optional manifest metadata for fast materialization.
+5. Materialize to project path (`.bundle` or `BUNDLE_PATH`)
+   - Use clonefile/reflink/hardlink/copy fallback from `cached/<abi>/...`.
+   - Do not rebuild if cached artifact is already complete.
+
+This gives one primary truth source for warm installs: `cached/<abi>`.
 
 ```mermaid
 flowchart LR
-    A[Resolve + Plan] --> B[Fetch]
-    B --> C[Assemble Sources]
-    C --> D[Extract to Global Cache]
-    D --> E[Assemble in Cache]
-    E --> F[Compile if Needed]
-    F --> G[Install to .bundle/BUNDLE_PATH]
-    G --> H[Write Runtime + Lockfile]
-
-    subgraph GC["Global Cache (~/.cache/scint)"]
-      B
-      C
-      D
-      E
-      F
-    end
-
-    subgraph PR["Project Runtime (.bundle)"]
-      G
-      H
-    end
+    A[Resolve + Plan] --> B[Fetch to inbound]
+    B --> C[Assemble in assembling]
+    C --> D[Compile in assembling]
+    D --> E[Promote to cached]
+    E --> F[Materialize to .bundle]
+    F --> G[Write Runtime + Lockfile]
 ```
-
-Manifest direction:
-
-1. A per-gem file manifest can make phase 6 deterministic and cheap by removing repeated file discovery.
-2. This manifest should be owned by global cache metadata and consumed by the materializer.
 
 ## Scheduler as Session Object
 
@@ -165,23 +154,49 @@ stateDiagram-v2
     failed --> [*]
 ```
 
-## Data Layout
+## Data Layout (Target)
 
 Global cache (`~/.cache/scint`):
 
-1. `inbound/` downloaded gem files
-2. `extracted/` unpacked gem trees
-3. `ext/` compiled extension cache keyed by ABI
-4. `index/` source metadata/index cache
-5. `git/` cached git repositories
+```text
+~/.cache/scint/
+  inbound/
+    gems/
+      <full_name>.gem
+    gits/
+      <deterministic_repo_slug>/
+  assembling/
+    <ruby-abi>/
+      <full_name>/
+  cached/
+    <ruby-abi>/
+      <full_name>/
+      <full_name>.spec.marshal
+      <full_name>.manifest
+  index/
+```
+
+Example ABI key and gem directory:
+
+1. `cached/ruby-3.4.5-arm64-darwin24/zlib-3.2.1/`
+2. `cached/ruby-3.4.5-arm64-darwin24/zlib-3.2.1.spec.marshal`
 
 Project-local runtime (`.bundle/`):
 
-1. `ruby/<major.minor.0>/gems/` linked gem trees
+1. `ruby/<major.minor.0>/gems/` materialized gem trees
 2. `ruby/<major.minor.0>/specifications/` gemspecs
 3. `ruby/<major.minor.0>/bin/` gem binstubs
 4. `bin/` project-level wrappers
 5. `scint.lock.marshal` runtime lock for `scint exec`
+
+## Warm Path Guarantees
+
+Required behavior:
+
+1. If `cached/<abi>/<full_name>/` exists and is valid, no fetch/extract/compile occurs for that gem.
+2. Deleting only `.bundle/` should trigger only materialization work.
+3. Materialization should be IO-bound and close to instantaneous on warm cache.
+4. Incomplete assemblies must never be promoted; promotion is atomic.
 
 ## Concurrency Model
 
