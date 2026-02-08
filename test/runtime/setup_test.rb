@@ -67,4 +67,53 @@ class RuntimeSetupTest < Minitest::Test
       end
     end
   end
+
+  def test_setup_hydrates_loaded_specs_from_runtime_lock
+    with_tmpdir do |dir|
+      bundle_dir = File.join(dir, ".bundle")
+      lock_path = File.join(bundle_dir, "scint.lock.marshal")
+      FileUtils.mkdir_p(bundle_dir)
+      File.binwrite(lock_path, Marshal.dump({ "mini_racer" => { version: "0.19.1", load_paths: [] } }))
+
+      fake_spec = Struct.new(:version, :full_name).new(Gem::Version.new("0.19.1"), "mini_racer-0.19.1")
+      old_loaded_specs = Gem.loaded_specs.dup
+      Gem.loaded_specs.delete("mini_racer")
+
+      finder = lambda do |name, *args|
+        if name == "mini_racer" && (args.empty? || args.first == "0.19.1")
+          [fake_spec]
+        else
+          []
+        end
+      end
+
+      Gem::Specification.stub(:find_all_by_name, finder) do
+        Scint::Runtime::Setup.setup(lock_path)
+      end
+
+      assert_equal fake_spec, Gem.loaded_specs["mini_racer"]
+    ensure
+      Gem.loaded_specs.replace(old_loaded_specs) if old_loaded_specs
+    end
+  end
+
+  def test_setup_skips_loaded_specs_when_spec_lookup_fails
+    with_tmpdir do |dir|
+      bundle_dir = File.join(dir, ".bundle")
+      lock_path = File.join(bundle_dir, "scint.lock.marshal")
+      FileUtils.mkdir_p(bundle_dir)
+      File.binwrite(lock_path, Marshal.dump({ "ghost" => { version: "1.0.0", load_paths: [] } }))
+
+      old_loaded_specs = Gem.loaded_specs.dup
+      Gem.loaded_specs.delete("ghost")
+
+      Gem::Specification.stub(:find_all_by_name, []) do
+        Scint::Runtime::Setup.setup(lock_path)
+      end
+
+      assert_nil Gem.loaded_specs["ghost"]
+    ensure
+      Gem.loaded_specs.replace(old_loaded_specs) if old_loaded_specs
+    end
+  end
 end

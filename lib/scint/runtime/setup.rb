@@ -29,6 +29,7 @@ module Scint
         $LOAD_PATH.unshift(*paths)
 
         ENV["BUNDLE_GEMFILE"] ||= find_gemfile(File.dirname(lock_path))
+        hydrate_loaded_specs(lock_data)
 
         lock_data
       end
@@ -39,7 +40,34 @@ module Scint
         File.exist?(gemfile) ? gemfile : nil
       end
 
-      private_class_method :find_gemfile
+      def hydrate_loaded_specs(lock_data)
+        return unless defined?(Gem) && Gem.respond_to?(:loaded_specs)
+
+        lock_data.each do |name, info|
+          gem_name = name.to_s
+          next if gem_name.empty? || Gem.loaded_specs[gem_name]
+
+          version = info.is_a?(Hash) ? info[:version] : nil
+          spec = find_installed_spec(gem_name, version)
+          Gem.loaded_specs[gem_name] = spec if spec
+        end
+      rescue StandardError
+        # Best-effort compatibility with gems expecting Gem.loaded_specs.
+      end
+
+      def find_installed_spec(gem_name, version)
+        version_req = version.to_s.strip
+        if !version_req.empty?
+          exact = Gem::Specification.find_all_by_name(gem_name, version_req)
+          return exact.find { |spec| spec.version.to_s == version_req } || exact.first
+        end
+
+        Gem::Specification.find_all_by_name(gem_name).max_by(&:version)
+      rescue StandardError
+        nil
+      end
+
+      private_class_method :find_gemfile, :hydrate_loaded_specs, :find_installed_spec
     end
   end
 end

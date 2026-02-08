@@ -104,6 +104,8 @@ module Bundler
         end
       end
 
+      return true if require_matching_basename(name)
+
       raise last_error if last_error
     end
 
@@ -163,6 +165,86 @@ module Bundler
         entry == "-rbundler/setup" || entry.end_with?("/bundler/setup")
       end
       filtered.join(" ")
+    end
+
+    def require_matching_basename(name)
+      target = normalize_basename(name)
+      return false if target.empty?
+
+      exact_candidates = []
+      fuzzy_candidates = []
+
+      $LOAD_PATH.each do |load_dir|
+        next unless File.directory?(load_dir)
+
+        Dir.children(load_dir).sort.each do |entry|
+          next unless entry.end_with?(".rb")
+
+          basename = entry.delete_suffix(".rb")
+          normalized = normalize_basename(basename)
+          if normalized == target
+            exact_candidates << basename
+          elsif compatible_basename?(target, normalized)
+            fuzzy_candidates << [basename, normalized]
+          end
+        end
+      rescue StandardError
+        next
+      end
+
+      exact_candidates.uniq.each do |candidate|
+        begin
+          Kernel.require(candidate)
+          return true
+        rescue LoadError
+          next
+        end
+      end
+
+      fuzzy_candidates
+        .uniq
+        .sort_by { |_basename, normalized| [((target.length - normalized.length).abs), -normalized.length] }
+        .map(&:first)
+        .each do |candidate|
+          begin
+            Kernel.require(candidate)
+            return true
+          rescue LoadError
+            next
+          end
+        end
+
+      false
+    end
+
+    def normalize_basename(name)
+      name.to_s.downcase.gsub(/[^a-z0-9]/, "")
+    end
+
+    def compatible_basename?(target, normalized)
+      return false if target.length < 4 || normalized.length < 4
+
+      target_variants = basename_variants(target)
+      normalized_variants = basename_variants(normalized)
+      return true if (target_variants & normalized_variants).any?
+
+      target_variants.any? do |t|
+        normalized_variants.any? { |n| t.start_with?(n) || n.start_with?(t) }
+      end
+    end
+
+    def basename_variants(name)
+      value = name.to_s.downcase
+      variants = [value]
+
+      plural_to_s = value.sub(/ties\z/, "s")
+      plural_to_y = value.sub(/ies\z/, "y")
+      singular = value.sub(/s\z/, "")
+
+      variants << plural_to_s unless plural_to_s == value
+      variants << plural_to_y unless plural_to_y == value
+      variants << singular unless singular == value
+      variants.uniq.select { |v| v.length >= 4 }
     end
   end
 end
