@@ -23,10 +23,28 @@ module Scint
         File.join(@root, "inbound")
       end
 
+      def inbound_gems_dir
+        File.join(inbound_dir, "gems")
+      end
+
+      def inbound_gits_dir
+        File.join(inbound_dir, "gits")
+      end
+
+      def assembling_dir
+        File.join(@root, "assembling")
+      end
+
+      def cached_dir
+        File.join(@root, "cached")
+      end
+
+      # Legacy extracted cache (read-compat only).
       def extracted_dir
         File.join(@root, "extracted")
       end
 
+      # Legacy extension cache (read-compat only).
       def ext_dir
         File.join(@root, "ext")
       end
@@ -36,7 +54,7 @@ module Scint
       end
 
       def git_dir
-        File.join(inbound_dir, "git")
+        inbound_gits_dir
       end
 
       # Isolated gem home used while compiling native extensions during install.
@@ -52,17 +70,36 @@ module Scint
       # -- Per-spec paths ------------------------------------------------------
 
       def inbound_path(spec)
-        File.join(inbound_dir, "#{full_name(spec)}.gem")
+        File.join(inbound_gems_dir, "#{full_name(spec)}.gem")
       end
 
+      def assembling_path(spec, abi_key = Platform.abi_key)
+        File.join(assembling_dir, abi_key, full_name(spec))
+      end
+
+      def cached_path(spec, abi_key = Platform.abi_key)
+        File.join(cached_dir, abi_key, full_name(spec))
+      end
+
+      def cached_spec_path(spec, abi_key = Platform.abi_key)
+        File.join(cached_dir, abi_key, "#{full_name(spec)}.spec.marshal")
+      end
+
+      def cached_manifest_path(spec, abi_key = Platform.abi_key)
+        File.join(cached_dir, abi_key, "#{full_name(spec)}.manifest")
+      end
+
+      # Legacy extracted cache (read-compat only).
       def extracted_path(spec)
         File.join(extracted_dir, full_name(spec))
       end
 
+      # Legacy extracted gemspec cache (read-compat only).
       def spec_cache_path(spec)
         File.join(extracted_dir, "#{full_name(spec)}.spec.marshal")
       end
 
+      # Legacy extension cache (read-compat only).
       def ext_path(spec, abi_key = Platform.abi_key)
         File.join(ext_dir, abi_key, full_name(spec))
       end
@@ -133,7 +170,15 @@ module Scint
       # to 16 hex chars. Callers must validate `source.uri` in the manifest to
       # detect collisions and fall back to a longer hash if needed.
       def git_slug(uri)
-        Digest::SHA256.hexdigest(uri.to_s)[0, 16]
+        normalized = normalize_uri(uri)
+        Digest::SHA256.hexdigest(normalized)[0, 16]
+      end
+
+      def normalize_uri(uri)
+        return uri.to_s if uri.is_a?(URI)
+        URI.parse(uri.to_s).to_s
+      rescue URI::InvalidURIError
+        uri.to_s
       end
     end
   end
