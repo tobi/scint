@@ -1111,10 +1111,12 @@ module Scint
       end
 
       def compile_slots_for(worker_count)
-        # Keep native builds serialized to avoid build-env races and reduce
-        # memory/CPU spikes from concurrent extension compiles.
-        _ = worker_count
-        1
+        # Keep compile parallelism conservative: at most 2 native builds.
+        # Small pools stay single-lane; larger pools can run two builds.
+        workers = worker_count.to_i
+        return 1 if workers <= 6
+
+        2
       end
 
       def install_task_limits(worker_count, compile_slots)

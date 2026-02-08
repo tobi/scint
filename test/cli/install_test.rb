@@ -274,21 +274,23 @@ class CLIInstallTest < Minitest::Test
     install = Scint::CLI::Install.new([])
     compile_slots = install.send(:compile_slots_for, 8)
     limits = install.send(:install_task_limits, 8, compile_slots)
-    assert_equal 1, compile_slots
-    assert_equal 6, limits[:download]
-    assert_equal 6, limits[:extract]
-    assert_equal 6, limits[:link]
-    assert_equal 1, limits[:build_ext]
+    assert_equal 2, compile_slots
+    assert_equal 5, limits[:download]
+    assert_equal 5, limits[:extract]
+    assert_equal 5, limits[:link]
+    assert_equal 2, limits[:build_ext]
     assert_equal 1, limits[:binstub]
   end
 
-  def test_compile_slots_for_uses_single_compile_lane
+  def test_compile_slots_for_caps_at_two_lanes
     install = Scint::CLI::Install.new([])
 
     assert_equal 1, install.send(:compile_slots_for, 1)
     assert_equal 1, install.send(:compile_slots_for, 2)
     assert_equal 1, install.send(:compile_slots_for, 3)
-    assert_equal 1, install.send(:compile_slots_for, 20)
+    assert_equal 1, install.send(:compile_slots_for, 6)
+    assert_equal 2, install.send(:compile_slots_for, 7)
+    assert_equal 2, install.send(:compile_slots_for, 20)
   end
 
   def test_enqueue_install_dag_download_entry_schedules_build_after_extract
