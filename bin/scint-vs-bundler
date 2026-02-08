@@ -101,9 +101,9 @@ bw_rc=$(cat "$BUNDLER_DIR/warm.log.rc")
 
 # ── scint cold + warm (via scint-test-and-report) ────────────────
 echo ""
-"$REPORT" --clean-all "$PROJECT"
+"$REPORT" --clean-all "$PROJECT" || true
 echo ""
-"$REPORT" "$PROJECT"
+"$REPORT" "$PROJECT" || true
 
 # ── read scint timings from JSONL ────────────────────────────────
 TIMINGS="$RUNS_ROOT/timings.jsonl"
