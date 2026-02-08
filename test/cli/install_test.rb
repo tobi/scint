@@ -205,8 +205,8 @@ class CLIInstallTest < Minitest::Test
       native = fake_spec(name: "ffi", version: "1.17.0", has_extensions: true)
       java_only = fake_spec(name: "concurrent-ruby", version: "1.3.6", has_extensions: true)
 
-      native_entry = Scint::PlanEntry.new(spec: native, action: :build_ext, cached_path: nil, gem_path: nil)
-      java_entry = Scint::PlanEntry.new(spec: java_only, action: :build_ext, cached_path: nil, gem_path: nil)
+      native_entry = Scint::PlanEntry.new(spec: native, action: :build_ext, cached_path: cache.cached_path(native), gem_path: nil)
+      java_entry = Scint::PlanEntry.new(spec: java_only, action: :build_ext, cached_path: cache.cached_path(java_only), gem_path: nil)
 
       ext_dir = File.join(cache.cached_path(native), "ext", "ffi_c")
       FileUtils.mkdir_p(ext_dir)
@@ -2483,6 +2483,9 @@ class CLIInstallTest < Minitest::Test
       refute_nil extract
       refute_nil link
 
+      assembling = cache.assembling_path(spec)
+      FileUtils.mkdir_p(assembling)
+
       # Call follow_up - no extensions, should enqueue binstub without build_ext
       extract[:follow_up].call(nil)
       binstub = scheduler.enqueued.find { |e| e[:type] == :binstub }
@@ -3247,6 +3250,64 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
+  def test_run_cold_then_warm_uses_cached_without_download_or_build
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        cache_root = File.join(dir, "xdg-cache")
+        bundle_path = File.join(dir, ".bundle")
+        File.write("Gemfile", "source \"https://rubygems.org\"\ngem \"demo\"\n")
+
+        spec = fake_spec(name: "demo", version: "1.0.0")
+        resolved = [spec]
+
+        with_env("XDG_CACHE_HOME", cache_root) do
+          install = Scint::CLI::Install.new(["--path", bundle_path, "-j", "1"])
+          install.stub(:resolve, resolved) do
+            install.stub(:adjust_meta_gems, resolved) do
+              install.stub(:dedupe_resolved_specs, resolved) do
+                install.stub(:download_gem, lambda { |entry, cache|
+                  dest = cache.inbound_path(entry.spec)
+                  FileUtils.mkdir_p(File.dirname(dest))
+                  create_fake_gem(dest, name: entry.spec.name, version: entry.spec.version,
+                                      files: { "lib/demo.rb" => "module Demo; end\n" })
+                }) do
+                  result = install.run
+                  assert_equal 0, result
+                end
+              end
+            end
+          end
+
+          cache_dir = File.join(cache_root, "scint")
+          assert Dir.exist?(File.join(cache_dir, "inbound"))
+          assert Dir.exist?(File.join(cache_dir, "cached"))
+          refute Dir.exist?(File.join(cache_dir, "extracted"))
+          refute Dir.exist?(File.join(cache_dir, "ext"))
+
+          FileUtils.rm_rf(bundle_path)
+
+          install = Scint::CLI::Install.new(["--path", bundle_path, "-j", "1"])
+          install.stub(:resolve, resolved) do
+            install.stub(:adjust_meta_gems, resolved) do
+              install.stub(:dedupe_resolved_specs, resolved) do
+                install.stub(:download_gem, ->(*_) { raise "download should not run on warm install" }) do
+                  install.stub(:build_extensions, ->(*_) { raise "build should not run on warm install" }) do
+                    install.stub(:link_gem_files, ->(*_) { }) do
+                      install.stub(:write_runtime_config, nil) do
+                        result = install.run
+                        assert_equal 0, result
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
   # --- run method with failures ---
 
   def test_run_returns_one_on_install_errors
@@ -3891,6 +3952,9 @@ class CLIInstallTest < Minitest::Test
 
       # Verify follow_up was set on extract (for binstub/build_ext)
       refute_nil extract_job[:follow_up]
+
+      assembling = cache.assembling_path(spec)
+      FileUtils.mkdir_p(assembling)
 
       # Trigger the follow_up to get binstub enqueued (line 699-701)
       extract_job[:follow_up].call(nil)
