@@ -62,6 +62,18 @@ The most important benchmark signal is install runtime, reported in minutes/seco
    - `relative_speedup = bundler_cold_seconds / phase_seconds`
 4. Success criteria emphasize reducing `scint warm` first, then `scint cold`, while preserving correctness and lockfile parity.
 
+## Testing Against Real Projects
+
+Always use `bin/scint-test-and-report` when testing against real Ruby projects.
+
+- Run data is **append-only** in `/tmp/scint-runs/`. Never delete that directory.
+- Each run appends one JSONL line to `/tmp/scint-runs/timings.jsonl` and creates a per-run log file.
+- Use `bin/scint-vs-bundler` for bundler-vs-scint comparison on a single project.
+- Use `bin/scint-bench-matrix` to run across multiple projects in a directory.
+- The real-world test suite lives at `/home/tobi/src/ruby-tests/` with `{project}-setup.sh` and `{project}-test.sh` hooks alongside each project subdirectory.
+- Setup scripts reset projects to pristine state (`git checkout`, `git clean`, remove `.bundle`).
+- Test scripts are smoke checks (app boot, require load) — they do not require databases or external services.
+
 ### Comparison Table Rules
 
 When rendering benchmark comparison tables:

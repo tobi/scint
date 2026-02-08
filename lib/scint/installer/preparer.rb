@@ -222,10 +222,15 @@ module Scint
         pattern = File.join(extracted_dir, "*.gemspec")
         candidates = Dir.glob(pattern)
         if candidates.any?
+          version = spec.respond_to?(:version) ? spec.version.to_s : nil
+          old_version = ENV["VERSION"]
           begin
+            ENV["VERSION"] = version if version && !ENV["VERSION"]
             ::Gem::Specification.load(candidates.first)
-          rescue StandardError
+          rescue SystemExit, StandardError
             nil
+          ensure
+            ENV["VERSION"] = old_version
           end
         end
       end

@@ -453,7 +453,7 @@ module Scint
           begin
             spec = Gem::Specification.load(gs)
             return spec if spec
-          rescue StandardError
+          rescue SystemExit, StandardError
             nil
           end
         end
@@ -722,7 +722,7 @@ module Scint
         Dir.chdir(File.dirname(absolute_gemspec)) do
           Gem::Specification.load(absolute_gemspec)
         end
-      rescue StandardError
+      rescue SystemExit, StandardError
         nil
       end
 
@@ -1567,10 +1567,21 @@ module Scint
         candidates = Dir.glob(pattern)
         return nil if candidates.empty?
 
+        load_gemspec_file(candidates.first, spec)
+      end
+
+      # Load a .gemspec file, temporarily injecting VERSION env var for gems
+      # like kgio/unicorn that use `ENV["VERSION"] or abort` in their gemspec.
+      def load_gemspec_file(path, spec = nil)
+        version = spec.respond_to?(:version) ? spec.version.to_s : nil
+        old_version = ENV["VERSION"]
         begin
-          Gem::Specification.load(candidates.first)
-        rescue StandardError
+          ENV["VERSION"] = version if version && !ENV["VERSION"]
+          Gem::Specification.load(path)
+        rescue SystemExit, StandardError
           nil
+        ensure
+          ENV["VERSION"] = old_version
         end
       end
 
@@ -2171,7 +2182,7 @@ module Scint
         gemspec = Gem::Specification.load(spec_file)
         paths = Array(gemspec&.require_paths).reject(&:empty?)
         paths.empty? ? ["lib"] : paths
-      rescue StandardError
+      rescue SystemExit, StandardError
         ["lib"]
       end
 
