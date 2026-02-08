@@ -784,6 +784,50 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
+  def test_link_gem_files_uses_manifest_for_cached_materialization
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      bundle_path = File.join(dir, ".bundle")
+      ruby_dir = ruby_bundle_dir(bundle_path)
+
+      spec = fake_spec(name: "demo", version: "1.0.0")
+      cached = cache.cached_path(spec)
+      FileUtils.mkdir_p(File.join(cached, "lib"))
+      File.write(File.join(cached, "lib", "demo.rb"), "module Demo; end\n")
+
+      gemspec = Gem::Specification.new do |s|
+        s.name = "demo"
+        s.version = Gem::Version.new("1.0.0")
+        s.summary = "demo"
+        s.authors = ["test"]
+        s.require_paths = ["lib"]
+      end
+      FileUtils.mkdir_p(File.dirname(cache.cached_spec_path(spec)))
+      File.binwrite(cache.cached_spec_path(spec), Marshal.dump(gemspec))
+
+      manifest = Scint::Cache::Manifest.build(
+        spec: spec,
+        gem_dir: cached,
+        abi_key: Scint::Platform.abi_key,
+        source: { "type" => "rubygems", "uri" => "https://rubygems.org" },
+        extensions: false,
+      )
+      Scint::Cache::Manifest.write(cache.cached_manifest_path(spec), manifest)
+
+      entry = Scint::PlanEntry.new(spec: spec, action: :link, cached_path: cached, gem_path: nil)
+      clone_called = false
+
+      Scint::FS.stub(:clone_tree, lambda { |_src, _dst| clone_called = true }) do
+        install.send(:link_gem_files, entry, cache, bundle_path)
+      end
+
+      linked_file = File.join(ruby_dir, "gems", cache.full_name(spec), "lib", "demo.rb")
+      assert File.exist?(linked_file)
+      refute clone_called
+    end
+  end
+
   def test_sync_build_env_dependencies_copies_declared_deps_and_rake
     with_tmpdir do |dir|
       cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
