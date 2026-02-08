@@ -43,17 +43,22 @@ module Scint
     class Install
       RUNTIME_LOCK = "scint.lock.marshal"
 
-      def initialize(argv = [])
+      def initialize(argv = [], without: nil, with: nil)
         @argv = argv
         @jobs = nil
         @path = nil
         @verbose = false
         @force = false
+        @without_groups = nil
+        @with_groups = nil
         @download_pool = nil
         @download_pool_lock = Thread::Mutex.new
         @gemspec_cache = {}
         @gemspec_cache_lock = Thread::Mutex.new
         parse_options
+        # Allow programmatic override (for tests)
+        @without_groups = Array(without).map(&:to_sym) if without
+        @with_groups = Array(with).map(&:to_sym) if with
       end
 
       def _tmark(label, t0)
@@ -128,6 +133,7 @@ module Scint
 
           resolved = resolve(gemfile, lockfile, cache)
           resolved = dedupe_resolved_specs(adjust_meta_gems(resolved))
+          resolved = filter_excluded_gems(resolved, gemfile)
           force_purge_artifacts(resolved, bundle_path, cache) if @force
 
           _t = _tmark("resolve", _t)
@@ -255,6 +261,91 @@ module Scint
         end
         seen.values
       end
+
+      # Determine which gem names should be excluded based on group settings.
+      # A gem is excluded if ALL of its group memberships are in excluded groups.
+      # Gems appearing in any non-excluded group are kept.
+      def excluded_gem_names(gemfile, resolved: nil)
+        excluded_groups = compute_excluded_groups(gemfile)
+        return Set.new if excluded_groups.empty?
+
+        # Build map: gem_name => set of all groups it appears in (across all declarations)
+        gem_groups = Hash.new { |h, k| h[k] = Set.new }
+        gemfile.dependencies.each do |dep|
+          dep.groups.each { |g| gem_groups[dep.name] << g }
+        end
+
+        # A gem is directly excluded if ALL its groups are excluded
+        directly_excluded = Set.new
+        gem_groups.each do |name, groups|
+          directly_excluded << name if groups.subset?(excluded_groups)
+        end
+
+        # If we have resolved specs, also exclude transitive-only deps
+        if resolved && directly_excluded.any?
+          exclude_transitive_deps(directly_excluded, resolved, gem_groups)
+        else
+          directly_excluded
+        end
+      end
+
+      # Filter resolved specs, removing gems that belong only to excluded groups.
+      def filter_excluded_gems(resolved, gemfile)
+        excluded = excluded_gem_names(gemfile, resolved: resolved)
+        return resolved if excluded.empty?
+
+        resolved.reject { |spec| excluded.include?(spec.name) }
+      end
+
+      private
+
+      def compute_excluded_groups(gemfile)
+        optional = Set.new(Array(gemfile.optional_groups))
+        without = Set.new(Array(@without_groups))
+        with = Set.new(Array(@with_groups))
+
+        # Optional groups are excluded by default unless explicitly included via --with
+        excluded = optional - with
+        # --without adds more groups to exclude
+        excluded.merge(without)
+        excluded
+      end
+
+      # Walk the dependency graph to find transitive deps that are ONLY
+      # reachable through excluded gems. Shared deps are kept.
+      def exclude_transitive_deps(directly_excluded, resolved, gem_groups)
+        # Build dependency graph: name => [dep_names]
+        dep_graph = {}
+        resolved.each do |spec|
+          dep_names = Array(spec.dependencies).filter_map do |dep|
+            if dep.is_a?(Hash)
+              dep[:name] || dep["name"]
+            elsif dep.respond_to?(:name)
+              dep.name
+            end
+          end
+          dep_graph[spec.name] = dep_names
+        end
+
+        all_names = Set.new(resolved.map(&:name))
+
+        # Start from Gemfile deps that are NOT excluded, then walk transitive deps
+        included_roots = gem_groups.keys.reject { |n| directly_excluded.include?(n) }
+
+        # BFS from included roots to find all reachable gems
+        reachable = Set.new
+        queue = included_roots.dup
+        while (name = queue.shift)
+          next if reachable.include?(name)
+          reachable << name
+          (dep_graph[name] || []).each { |dep| queue << dep }
+        end
+
+        # Everything not reachable from included roots is excluded
+        all_names - reachable
+      end
+
+      public
 
       # Install scint into the bundle by copying our own lib tree.
       # No download needed — we know exactly where we are.
@@ -2362,6 +2453,12 @@ module Scint
           when "--path"
             @path = @argv[i + 1]
             i += 2
+          when "--without"
+            @without_groups = @argv[i + 1]&.split(/[\s:,]+/)&.map(&:to_sym) || []
+            i += 2
+          when "--with"
+            @with_groups = @argv[i + 1]&.split(/[\s:,]+/)&.map(&:to_sym) || []
+            i += 2
           when "--verbose"
             @verbose = true
             i += 1
@@ -2371,6 +2468,32 @@ module Scint
           else
             i += 1
           end
+        end
+
+        # Also read BUNDLE_WITHOUT / BUNDLE_WITH env vars (Bundler compat)
+        if !@without_groups && ENV["BUNDLE_WITHOUT"]
+          @without_groups = ENV["BUNDLE_WITHOUT"].split(/[\s:,]+/).map(&:to_sym)
+        end
+        if !@with_groups && ENV["BUNDLE_WITH"]
+          @with_groups = ENV["BUNDLE_WITH"].split(/[\s:,]+/).map(&:to_sym)
+        end
+
+        # Read from .bundle/config if present
+        load_bundle_config_groups if !@without_groups && !@with_groups
+      end
+
+      def load_bundle_config_groups
+        config_path = File.join(".bundle", "config")
+        return unless File.exist?(config_path)
+
+        config = YAML.safe_load(File.read(config_path)) rescue nil
+        return unless config.is_a?(Hash)
+
+        if config["BUNDLE_WITHOUT"] && !@without_groups
+          @without_groups = config["BUNDLE_WITHOUT"].to_s.split(/[\s:]+/).map(&:to_sym)
+        end
+        if config["BUNDLE_WITH"] && !@with_groups
+          @with_groups = config["BUNDLE_WITH"].to_s.split(/[\s:]+/).map(&:to_sym)
         end
       end
     end

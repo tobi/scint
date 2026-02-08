@@ -4778,6 +4778,158 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
+  # --- Group filtering (excluded_gem_names / without groups) ---
+
+  def test_excluded_gem_names_skips_optional_group_gems
+    install = Scint::CLI::Install.new([])
+    gemfile = make_gemfile_result(
+      dependencies: [
+        make_dep("rack", groups: [:default]),
+        make_dep("trilogy", groups: [:migrations]),
+        make_dep("extralite-bundle", groups: [:migrations]),
+        make_dep("minitest", groups: [:test]),
+      ],
+      optional_groups: [:migrations],
+    )
+
+    excluded = install.send(:excluded_gem_names, gemfile)
+    assert_includes excluded, "trilogy"
+    assert_includes excluded, "extralite-bundle"
+    refute_includes excluded, "rack"
+    refute_includes excluded, "minitest"
+  end
+
+  def test_excluded_gem_names_with_bundle_without
+    install = Scint::CLI::Install.new([], without: [:test, :development])
+    gemfile = make_gemfile_result(
+      dependencies: [
+        make_dep("rack", groups: [:default]),
+        make_dep("minitest", groups: [:test]),
+        make_dep("debug", groups: [:development]),
+        make_dep("puma", groups: [:default]),
+      ],
+      optional_groups: [],
+    )
+
+    excluded = install.send(:excluded_gem_names, gemfile)
+    assert_includes excluded, "minitest"
+    assert_includes excluded, "debug"
+    refute_includes excluded, "rack"
+    refute_includes excluded, "puma"
+  end
+
+  def test_excluded_gem_names_gem_in_both_excluded_and_included_groups
+    install = Scint::CLI::Install.new([], without: [:test])
+    gemfile = make_gemfile_result(
+      dependencies: [
+        make_dep("rack", groups: [:default]),
+        make_dep("rake", groups: [:default]),
+        make_dep("rake", groups: [:test]),  # also in :test
+      ],
+      optional_groups: [],
+    )
+
+    excluded = install.send(:excluded_gem_names, gemfile)
+    # rake is in both :default and :test — should NOT be excluded
+    refute_includes excluded, "rake"
+    refute_includes excluded, "rack"
+  end
+
+  def test_excluded_gem_names_optional_group_overridden_by_with
+    install = Scint::CLI::Install.new([], with: [:migrations])
+    gemfile = make_gemfile_result(
+      dependencies: [
+        make_dep("rack", groups: [:default]),
+        make_dep("trilogy", groups: [:migrations]),
+      ],
+      optional_groups: [:migrations],
+    )
+
+    excluded = install.send(:excluded_gem_names, gemfile)
+    # migrations is optional but explicitly included via --with
+    refute_includes excluded, "trilogy"
+  end
+
+  def test_excluded_gem_names_empty_when_no_groups_excluded
+    install = Scint::CLI::Install.new([])
+    gemfile = make_gemfile_result(
+      dependencies: [
+        make_dep("rack", groups: [:default]),
+        make_dep("minitest", groups: [:test]),
+      ],
+      optional_groups: [],
+    )
+
+    excluded = install.send(:excluded_gem_names, gemfile)
+    assert_empty excluded
+  end
+
+  def test_excluded_gem_names_skips_transitive_deps_of_excluded_gems
+    # When a gem is excluded, its unique dependencies should also be excluded
+    install = Scint::CLI::Install.new([], without: [:test])
+    gemfile = make_gemfile_result(
+      dependencies: [
+        make_dep("rack", groups: [:default]),
+        make_dep("rspec", groups: [:test]),
+      ],
+      optional_groups: [],
+    )
+    # rspec depends on rspec-core which nobody else needs
+    resolved = [
+      fake_spec(name: "rack", version: "2.2.8"),
+      fake_spec(name: "rspec", version: "3.13", dependencies: [{ name: "rspec-core" }]),
+      fake_spec(name: "rspec-core", version: "3.13"),
+    ]
+
+    excluded = install.send(:excluded_gem_names, gemfile, resolved: resolved)
+    assert_includes excluded, "rspec"
+    assert_includes excluded, "rspec-core"
+    refute_includes excluded, "rack"
+  end
+
+  def test_excluded_gem_names_keeps_shared_transitive_deps
+    install = Scint::CLI::Install.new([], without: [:test])
+    gemfile = make_gemfile_result(
+      dependencies: [
+        make_dep("rails", groups: [:default]),
+        make_dep("rspec-rails", groups: [:test]),
+      ],
+      optional_groups: [],
+    )
+    # Both rails and rspec-rails depend on activesupport
+    resolved = [
+      fake_spec(name: "rails", version: "7.0", dependencies: [{ name: "activesupport" }]),
+      fake_spec(name: "rspec-rails", version: "6.0", dependencies: [{ name: "activesupport" }, { name: "rspec-core" }]),
+      fake_spec(name: "activesupport", version: "7.0"),
+      fake_spec(name: "rspec-core", version: "3.13"),
+    ]
+
+    excluded = install.send(:excluded_gem_names, gemfile, resolved: resolved)
+    assert_includes excluded, "rspec-rails"
+    assert_includes excluded, "rspec-core"
+    # activesupport is needed by rails (:default) — must NOT be excluded
+    refute_includes excluded, "activesupport"
+    refute_includes excluded, "rails"
+  end
+
+  def test_filter_resolved_specs_removes_excluded_gems
+    install = Scint::CLI::Install.new([])
+    gemfile = make_gemfile_result(
+      dependencies: [
+        make_dep("rack", groups: [:default]),
+        make_dep("trilogy", groups: [:migrations]),
+      ],
+      optional_groups: [:migrations],
+    )
+    resolved = [
+      fake_spec(name: "rack", version: "2.2.8"),
+      fake_spec(name: "trilogy", version: "2.9.0"),
+    ]
+
+    filtered = install.send(:filter_excluded_gems, resolved, gemfile)
+    assert_equal ["rack"], filtered.map(&:name)
+  end
+
   private
 
   def init_git_repo(root_dir, files)
@@ -4826,5 +4978,19 @@ class CLIInstallTest < Minitest::Test
     status = Object.new
     status.define_singleton_method(:success?) { success }
     status
+  end
+
+  def make_dep(name, groups: [:default])
+    Scint::Gemfile::Dependency.new(name, groups: groups)
+  end
+
+  def make_gemfile_result(dependencies:, optional_groups: [])
+    Scint::Gemfile::ParseResult.new(
+      dependencies: dependencies,
+      sources: [{ type: :rubygems, uri: "https://rubygems.org" }],
+      ruby_version: nil,
+      platforms: [],
+      optional_groups: optional_groups.map(&:to_sym),
+    )
   end
 end

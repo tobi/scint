@@ -6,7 +6,7 @@ require_relative "../source/path"
 module Scint
   module Gemfile
     # Result of parsing a Gemfile.
-    ParseResult = Struct.new(:dependencies, :sources, :ruby_version, :platforms, keyword_init: true)
+    ParseResult = Struct.new(:dependencies, :sources, :ruby_version, :platforms, :optional_groups, keyword_init: true)
 
     # Evaluates a Gemfile using instance_eval, just like stock bundler.
     # Supports the full Gemfile DSL: source, gem, group, platforms, git_source,
@@ -20,14 +20,16 @@ module Scint
           sources: parser.parsed_sources.uniq,
           ruby_version: parser.parsed_ruby_version,
           platforms: parser.parsed_platforms,
+          optional_groups: parser.parsed_optional_groups,
         )
       end
 
       # Accessors that don't collide with DSL method names
-      def parsed_dependencies;  @dependencies;  end
-      def parsed_sources;       @sources;       end
-      def parsed_ruby_version;  @ruby_version;  end
-      def parsed_platforms;     @declared_platforms; end
+      def parsed_dependencies;    @dependencies;      end
+      def parsed_sources;         @sources;           end
+      def parsed_ruby_version;    @ruby_version;      end
+      def parsed_platforms;       @declared_platforms; end
+      def parsed_optional_groups; @optional_groups;   end
 
       def initialize(gemfile_path)
         @gemfile_path = File.expand_path(gemfile_path)
@@ -39,6 +41,7 @@ module Scint
         @current_source_options = {}
         @ruby_version = nil
         @declared_platforms = []
+        @optional_groups = []
 
         add_default_git_sources
       end
@@ -167,7 +170,11 @@ module Scint
 
       def group(*names, **opts, &blk)
         old_groups = @current_groups.dup
-        @current_groups.concat(names.map(&:to_sym))
+        group_syms = names.map(&:to_sym)
+        @current_groups.concat(group_syms)
+        if opts[:optional]
+          group_syms.each { |g| @optional_groups << g unless @optional_groups.include?(g) }
+        end
         yield
       ensure
         @current_groups = old_groups

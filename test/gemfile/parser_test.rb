@@ -714,4 +714,105 @@ class GemfileParserTest < Minitest::Test
       refute dep.source_options.key?(:ref), "Simple repo name should not set a ref"
     end
   end
+
+  # --- Optional groups ---
+
+  def test_group_optional_true_recorded_in_parsed_result
+    with_tmpdir do |dir|
+      gemfile = File.join(dir, "Gemfile")
+      File.write(gemfile, <<~RUBY)
+        source "https://rubygems.org"
+        gem "rack"
+
+        group :migrations, optional: true do
+          gem "trilogy"
+          gem "extralite-bundle"
+        end
+
+        group :test do
+          gem "minitest"
+        end
+      RUBY
+
+      result = Scint::Gemfile::Parser.parse(gemfile)
+      assert_includes result.optional_groups, :migrations
+      refute_includes result.optional_groups, :test
+      refute_includes result.optional_groups, :default
+    end
+  end
+
+  def test_multiple_optional_groups
+    with_tmpdir do |dir|
+      gemfile = File.join(dir, "Gemfile")
+      File.write(gemfile, <<~RUBY)
+        source "https://rubygems.org"
+        group :migrations, optional: true do
+          gem "trilogy"
+        end
+        group :generic_import, optional: true do
+          gem "redcarpet"
+        end
+        group :test do
+          gem "rspec"
+        end
+      RUBY
+
+      result = Scint::Gemfile::Parser.parse(gemfile)
+      assert_includes result.optional_groups, :migrations
+      assert_includes result.optional_groups, :generic_import
+      assert_equal 2, result.optional_groups.size
+    end
+  end
+
+  def test_optional_group_gems_get_correct_group_assignment
+    with_tmpdir do |dir|
+      gemfile = File.join(dir, "Gemfile")
+      File.write(gemfile, <<~RUBY)
+        source "https://rubygems.org"
+        group :migrations, optional: true do
+          gem "trilogy"
+        end
+      RUBY
+
+      result = Scint::Gemfile::Parser.parse(gemfile)
+      trilogy = result.dependencies.find { |d| d.name == "trilogy" }
+      assert_equal [:migrations], trilogy.groups
+    end
+  end
+
+  def test_gem_in_both_optional_and_default_groups
+    with_tmpdir do |dir|
+      gemfile = File.join(dir, "Gemfile")
+      File.write(gemfile, <<~RUBY)
+        source "https://rubygems.org"
+        gem "zeitwerk"
+        group :migrations, optional: true do
+          gem "zeitwerk"
+        end
+      RUBY
+
+      result = Scint::Gemfile::Parser.parse(gemfile)
+      # zeitwerk appears twice; one in :default, one in :migrations
+      zeitwerk_deps = result.dependencies.select { |d| d.name == "zeitwerk" }
+      all_groups = zeitwerk_deps.flat_map(&:groups).uniq
+      assert_includes all_groups, :default
+      assert_includes all_groups, :migrations
+    end
+  end
+
+  def test_no_optional_groups_returns_empty
+    with_tmpdir do |dir|
+      gemfile = File.join(dir, "Gemfile")
+      File.write(gemfile, <<~RUBY)
+        source "https://rubygems.org"
+        gem "rack"
+        group :test do
+          gem "minitest"
+        end
+      RUBY
+
+      result = Scint::Gemfile::Parser.parse(gemfile)
+      assert_empty result.optional_groups
+    end
+  end
 end
