@@ -155,7 +155,7 @@ module Scint
         env = build_env(gem_dir, build_ruby_dir, make_jobs)
 
         if File.exist?(File.join(ext_dir, "extconf.rb"))
-          compile_extconf(ext_dir, build_dir, install_dir, env, make_jobs, output_tail)
+          compile_extconf(ext_dir, gem_dir, build_dir, install_dir, env, make_jobs, output_tail)
         elsif File.exist?(File.join(ext_dir, "CMakeLists.txt"))
           compile_cmake(ext_dir, build_dir, install_dir, env, make_jobs, output_tail)
         elsif File.exist?(File.join(ext_dir, "Rakefile"))
@@ -165,17 +165,39 @@ module Scint
         end
       end
 
-      def compile_extconf(ext_dir, build_dir, install_dir, env, make_jobs, output_tail = nil)
-        # Build from a cloned source tree so extconf scripts that assume
-        # relative paths (e.g. Dir.chdir("src")) still work out-of-tree.
-        FS.clone_tree(ext_dir, build_dir)
+      def compile_extconf(ext_dir, gem_dir, build_dir, install_dir, env, make_jobs, output_tail = nil)
+        # Build from a cloned full gem tree when extconf is nested under ext/.
+        # Some gems (e.g. debug) load files from ../../lib during extconf.
+        build_ext_dir = clone_source_for_extconf(ext_dir, gem_dir, build_dir)
+        extconf = File.join(build_ext_dir, "extconf.rb")
 
-        run_cmd(env, RbConfig.ruby, File.join(build_dir, "extconf.rb"),
+        run_cmd(env, RbConfig.ruby, extconf,
                 "--with-opt-dir=#{RbConfig::CONFIG["prefix"]}",
-                chdir: build_dir, output_tail: output_tail)
-        run_cmd(env, "make", "-j#{make_jobs}", "-C", build_dir, output_tail: output_tail)
+                chdir: build_ext_dir, output_tail: output_tail)
+        run_cmd(env, "make", "-j#{make_jobs}", "-C", build_ext_dir, output_tail: output_tail)
         run_cmd(env, "make", "install", "DESTDIR=", "sitearchdir=#{install_dir}", "sitelibdir=#{install_dir}",
-                chdir: build_dir, output_tail: output_tail)
+                chdir: build_ext_dir, output_tail: output_tail)
+      end
+
+      def clone_source_for_extconf(ext_dir, gem_dir, build_dir)
+        gem_root = gem_dir.to_s.sub(%r{/\z}, "")
+        ext_path = ext_dir.to_s
+
+        if ext_path == gem_root
+          FS.clone_tree(gem_root, build_dir)
+          return build_dir
+        end
+
+        nested_prefix = "#{gem_root}/"
+        if !gem_root.empty? && ext_path.start_with?(nested_prefix)
+          FS.clone_tree(gem_root, build_dir)
+          rel_ext = ext_path[nested_prefix.length..]
+          return File.join(build_dir, rel_ext)
+        end
+
+        # Fallback for atypical layouts where ext_dir isn't inside gem_dir.
+        FS.clone_tree(ext_path, build_dir)
+        build_dir
       end
 
       def compile_cmake(ext_dir, build_dir, install_dir, env, make_jobs, output_tail = nil)
@@ -309,6 +331,7 @@ module Scint
       end
 
       private_class_method :find_extension_dirs, :compile_extension,
+                           :clone_source_for_extconf,
                            :compile_extconf, :compile_cmake, :compile_rake,
                            :find_rake_executable, :link_extensions, :build_env, :run_cmd,
                            :spec_full_name, :ruby_install_dir, :prebuilt_missing_for_ruby?

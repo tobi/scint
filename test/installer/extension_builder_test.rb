@@ -261,6 +261,7 @@ class ExtensionBuilderTest < Minitest::Test
         Scint::Installer::ExtensionBuilder.send(
           :compile_extconf,
           ext_dir,
+          ext_dir,
           build_dir,
           install_dir,
           { "MAKEFLAGS" => "-j5" },
@@ -289,6 +290,7 @@ class ExtensionBuilderTest < Minitest::Test
         Scint::Installer::ExtensionBuilder.send(
           :compile_extconf,
           ext_dir,
+          ext_dir,
           build_dir,
           install_dir,
           {},
@@ -298,6 +300,38 @@ class ExtensionBuilderTest < Minitest::Test
 
       assert File.exist?(File.join(build_dir, "extconf.rb"))
       assert_equal File.join(build_dir, "extconf.rb"), calls[0][1]
+    end
+  end
+
+  def test_compile_extconf_clones_full_gem_tree_for_nested_ext
+    with_tmpdir do |dir|
+      gem_dir = File.join(dir, "debug-gem")
+      ext_dir = File.join(gem_dir, "ext", "debug")
+      build_dir = File.join(dir, "build")
+      install_dir = File.join(dir, "install")
+      FileUtils.mkdir_p(ext_dir)
+      FileUtils.mkdir_p(File.join(gem_dir, "lib", "debug"))
+      File.write(File.join(gem_dir, "lib", "debug", "version.rb"), "module DEBUGGER__; VERSION = 'x'; end\n")
+      File.write(File.join(ext_dir, "extconf.rb"), "puts 'ok'\n")
+
+      calls = []
+      Scint::Installer::ExtensionBuilder.stub(:run_cmd, ->(_env, *cmd, **opts) { calls << { cmd: cmd, opts: opts } }) do
+        Scint::Installer::ExtensionBuilder.send(
+          :compile_extconf,
+          ext_dir,
+          gem_dir,
+          build_dir,
+          install_dir,
+          {},
+          2,
+        )
+      end
+
+      mirrored_ext = File.join(build_dir, "ext", "debug")
+      assert File.exist?(File.join(build_dir, "lib", "debug", "version.rb"))
+      assert_equal File.join(mirrored_ext, "extconf.rb"), calls[0][:cmd][1]
+      assert_equal mirrored_ext, calls[0][:opts][:chdir]
+      assert_equal ["make", "-j2", "-C", mirrored_ext], calls[1][:cmd]
     end
   end
 
@@ -384,7 +418,7 @@ class ExtensionBuilderTest < Minitest::Test
 
   def test_compile_extension_routes_to_extconf
     calls = []
-    Scint::Installer::ExtensionBuilder.stub(:compile_extconf, ->(ext_dir, build_dir, install_dir, env, make_jobs, output_tail) { calls << :extconf }) do
+    Scint::Installer::ExtensionBuilder.stub(:compile_extconf, ->(ext_dir, gem_dir, build_dir, install_dir, env, make_jobs, output_tail) { calls << :extconf }) do
       with_tmpdir do |dir|
         ext_dir = File.join(dir, "ext")
         FileUtils.mkdir_p(ext_dir)

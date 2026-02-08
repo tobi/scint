@@ -22,6 +22,7 @@ SCINT_BIN="$REPO_ROOT/bin/scint"
 TMPBASE="${TMPDIR:-/tmp}"
 TMPROOT="$(mktemp -d "${TMPBASE%/}/scint-bench-XXXXXX")"
 RUBY_API_DIR="$(ruby -rrbconfig -e 'print RbConfig::CONFIG["ruby_version"]')"
+LOCKFILE="$PROJECT/Gemfile.lock"
 
 if [[ ! -x "$SCINT_BIN" ]]; then
   echo "scint binary not found at: $SCINT_BIN" >&2
@@ -30,6 +31,11 @@ fi
 
 if [[ ! -f "$PROJECT/Gemfile" ]]; then
   echo "Gemfile not found in project: $PROJECT" >&2
+  exit 1
+fi
+
+if [[ ! -f "$LOCKFILE" ]]; then
+  echo "Gemfile.lock not found in project: $PROJECT" >&2
   exit 1
 fi
 
@@ -51,6 +57,23 @@ echo "=== Benchmark: bundler vs scint ==="
 echo "Project:  $PROJECT"
 echo "Tmp root: $TMPROOT"
 echo ""
+
+# Prepare lockfile baseline:
+# 1) If in git, discard any pre-existing local Gemfile.lock edits.
+# 2) Snapshot clean baseline for post-run drift comparison.
+if git -C "$PROJECT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if git -C "$PROJECT" ls-files --error-unmatch Gemfile.lock >/dev/null 2>&1; then
+    if ! git -C "$PROJECT" diff --quiet -- Gemfile.lock || ! git -C "$PROJECT" diff --cached --quiet -- Gemfile.lock; then
+      echo "Resetting local Gemfile.lock changes before benchmark..."
+      git -C "$PROJECT" restore --staged --worktree -- Gemfile.lock
+    fi
+  else
+    echo "Gemfile.lock is not tracked; skipping pre-run lockfile reset."
+  fi
+fi
+
+LOCKFILE_BEFORE="$TMPROOT/Gemfile.lock.before"
+cp "$LOCKFILE" "$LOCKFILE_BEFORE"
 
 # Helper: time a command, capture output, return elapsed seconds
 run_timed() {
@@ -141,6 +164,45 @@ cold_speedup=$(ruby -e "puts ($bc.to_f / $sc.to_f).round(1)")
 warm_speedup=$(ruby -e "puts ($bw.to_f / $sw.to_f).round(1)")
 echo "  Cold speedup: ${cold_speedup}x"
 echo "  Warm speedup: ${warm_speedup}x"
+
+# ── Lockfile drift check ─────────────────────────────────────────
+echo ""
+echo "════════════════════════════════════════"
+echo " Gemfile.lock drift"
+echo "════════════════════════════════════════"
+
+LOCK_DIFF="$LOGS/gemfile-lock.diff"
+if cmp -s "$LOCKFILE_BEFORE" "$LOCKFILE"; then
+  echo "  Gemfile.lock unchanged ✓"
+else
+  diff -u "$LOCKFILE_BEFORE" "$LOCKFILE" > "$LOCK_DIFF" || true
+
+  numstat_line="$(git diff --no-index --numstat "$LOCKFILE_BEFORE" "$LOCKFILE" 2>/dev/null | tail -n 1 || true)"
+  added="$(echo "$numstat_line" | awk '{print $1}')"
+  deleted="$(echo "$numstat_line" | awk '{print $2}')"
+  [[ "$added" =~ ^[0-9]+$ ]] || added=0
+  [[ "$deleted" =~ ^[0-9]+$ ]] || deleted=0
+
+  changed_lines=$((added + deleted))
+  before_lines=$(wc -l < "$LOCKFILE_BEFORE" | tr -d ' ')
+  change_pct=$(ruby -e "before=$before_lines; changed=$changed_lines; puts(before > 0 ? ((changed.to_f / before) * 100).round(2) : 0.0)")
+
+  # Significant if either absolute or relative churn crosses threshold.
+  significant=false
+  if (( changed_lines >= 50 )); then
+    significant=true
+  elif ruby -e "exit(($change_pct >= 5.0) ? 0 : 1)"; then
+    significant=true
+  fi
+
+  if [[ "$significant" == "true" ]]; then
+    echo "  Gemfile.lock changed significantly ⚠"
+  else
+    echo "  Gemfile.lock changed (small)"
+  fi
+  echo "  +$added / -$deleted lines (${change_pct}% of baseline)"
+  echo "  Full diff: $LOCK_DIFF"
+fi
 
 # ── Directory comparison ─────────────────────────────────────────
 echo ""
