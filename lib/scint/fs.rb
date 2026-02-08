@@ -73,6 +73,44 @@ module Scint
       hardlink_tree(src_dir, dst_dir)
     end
 
+    # Clone many source directories into one destination parent directory.
+    # This is significantly faster than one process per gem on large warm
+    # installs because it batches cp invocations while preserving CoW/reflink.
+    # Returns the number of source trees requested.
+    def clone_many_trees(src_dirs, dst_parent, chunk_size: 64)
+      dst_parent = dst_parent.to_s
+      mkdir_p(dst_parent)
+
+      sources = Array(src_dirs).map(&:to_s).uniq
+      sources.select! { |src| Dir.exist?(src) }
+      return 0 if sources.empty?
+
+      copied = 0
+      sources.each_slice([chunk_size.to_i, 1].max) do |slice|
+        pending = slice.reject do |src|
+          Dir.exist?(File.join(dst_parent, File.basename(src)))
+        end
+        next if pending.empty?
+
+        ok = false
+        if Platform.macos?
+          ok = system("cp", "-cR", *pending, dst_parent, [:out, :err] => File::NULL)
+        elsif Platform.linux?
+          ok = system("cp", "--reflink=always", "-R", *pending, dst_parent, [:out, :err] => File::NULL)
+        end
+
+        unless ok
+          pending.each do |src|
+            clone_tree(src, File.join(dst_parent, File.basename(src)))
+          end
+        end
+
+        copied += pending.length
+      end
+
+      copied
+    end
+
     # Recursively hardlink all files from src_dir into dst_dir.
     # Directory structure is recreated; files are hardlinked.
     def hardlink_tree(src_dir, dst_dir)

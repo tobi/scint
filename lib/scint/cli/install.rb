@@ -49,6 +49,8 @@ module Scint
         @force = false
         @download_pool = nil
         @download_pool_lock = Thread::Mutex.new
+        @gemspec_cache = {}
+        @gemspec_cache_lock = Thread::Mutex.new
         parse_options
       end
 
@@ -121,6 +123,10 @@ module Scint
 
           # Scale up for download/install phase based on actual work count
           scheduler.scale_workers(to_install.size)
+
+          # Warm-cache accelerator: pre-materialize cache-backed gem trees in
+          # batches so install workers avoid one cp process per gem.
+          bulk_prelink_gem_files(to_install, cache, bundle_path)
 
           if to_install.empty?
             # Keep lock artifacts aligned even when everything is already installed.
@@ -1391,8 +1397,15 @@ module Scint
       end
 
       def load_gemspec(extracted_path, spec, cache)
+        cache_key = "#{cache.full_name(spec)}@#{extracted_path}"
+        cached_value = @gemspec_cache_lock.synchronize { @gemspec_cache[cache_key] }
+        return cached_value if cached_value
+
         cached = load_cached_gemspec(spec, cache, extracted_path)
-        return cached if cached
+        if cached
+          @gemspec_cache_lock.synchronize { @gemspec_cache[cache_key] = cached }
+          return cached
+        end
 
         inbound = cache.inbound_path(spec)
         return nil unless File.exist?(inbound)
@@ -1400,10 +1413,36 @@ module Scint
         begin
           metadata = GemPkg::Package.new.read_metadata(inbound)
           cache_gemspec(spec, metadata, cache)
+          @gemspec_cache_lock.synchronize { @gemspec_cache[cache_key] = metadata }
           metadata
         rescue StandardError
           nil
         end
+      end
+
+      def bulk_prelink_gem_files(entries, cache, bundle_path)
+        # Keep small installs simple; batching is for large warm-path runs.
+        return if entries.length < 32
+
+        ruby_dir = File.join(bundle_path, "ruby", RUBY_VERSION.split(".")[0, 2].join(".") + ".0")
+        gems_dir = File.join(ruby_dir, "gems")
+
+        sources = entries.filter_map do |entry|
+          next unless entry.action == :link || entry.action == :build_ext
+
+          extracted = cache.extracted_path(entry.spec)
+          full_name = cache.full_name(entry.spec)
+          next unless File.basename(extracted) == full_name
+          next unless Dir.exist?(extracted)
+          next if Dir.exist?(File.join(gems_dir, full_name))
+
+          extracted
+        end
+        return if sources.empty?
+
+        FS.clone_many_trees(sources, gems_dir)
+      rescue StandardError => e
+        $stderr.puts("bulk prelink warning: #{e.message}") if ENV["SCINT_DEBUG"]
       end
 
       def load_cached_gemspec(spec, cache, extracted_path)

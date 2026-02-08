@@ -66,44 +66,55 @@ Defaults:
 
 ## Install Architecture
 
-Scint install is phase-oriented. Each phase has explicit responsibilities and feeds the next phase.
+Scint has a strict phase contract. Resolution/planning decides *what* to do; the phases below define *how* install work executes:
 
-1. Parse inputs (`Gemfile`, optional `Gemfile.lock`)
-2. Fetch source metadata (indexes, git clones)
-3. Resolve dependency graph
-4. Plan actions (`skip`, `link`, `download`, `build_ext`)
-5. Download/extract/cache artifacts
-6. Link into local `.bundle` runtime
-7. Build native extensions after link phase is ready
-8. Write outputs (`Gemfile.lock`, runtime lock, warnings/summary)
+1. Fetch
+   Download index data and source payloads into global cache (`~/.cache/scint/inbound`).
+2. Source Assembly (when needed)
+   Materialize source trees that are not directly usable yet (for example git checkouts with submodules).
+3. Extract
+   Expand `.gem` payloads into `~/.cache/scint/extracted`.
+4. Cache Assembly
+   Normalize cache layout so extracted artifacts are complete and reusable across projects/runs.
+5. Compile (when needed)
+   Build native extensions once into global extension cache (`~/.cache/scint/ext/<abi>/...`).
+6. Install/Materialize
+   Copy/clone/link from global cache into destination (`.bundle` or `BUNDLE_PATH`) using filesystem acceleration (hardlink/CoW/reflink when available).
+
+Warm-path expectation:
+
+1. If global extracted/ext caches are warm and valid, install should skip fetch/extract/compile.
+2. If `.bundle` is deleted, rerun should primarily redo phase 6 (materialization), not heavy rebuild work.
+3. The materialization step should be near-IO-bound and as close to instantaneous as filesystem capabilities allow.
 
 ```mermaid
 flowchart LR
-    A[Gemfile + Gemfile.lock] --> B[Parse + Source Discovery]
-    B --> C[Fetch Indexes / Clone Git]
-    C --> D[Resolve Graph]
-    D --> E[Planner]
-    E -->|skip| F[Already Installed]
-    E -->|link| G[Link from Extracted Cache]
-    E -->|download| H[Download .gem]
-    H --> I[Extract + Cache Metadata]
-    I --> G
-    G --> J[All Links Complete]
-    J --> K[Native Extension Build]
-    K --> L[Runtime + Lockfile Write]
-    L --> M[Done]
+    A[Resolve + Plan] --> B[Fetch]
+    B --> C[Assemble Sources]
+    C --> D[Extract to Global Cache]
+    D --> E[Assemble in Cache]
+    E --> F[Compile if Needed]
+    F --> G[Install to .bundle/BUNDLE_PATH]
+    G --> H[Write Runtime + Lockfile]
 
-    subgraph GlobalCache["Global Cache (~/.cache/scint)"]
-      H
-      I
+    subgraph GC["Global Cache (~/.cache/scint)"]
+      B
+      C
+      D
+      E
+      F
     end
 
-    subgraph ProjectRuntime["Project Runtime (.bundle)"]
+    subgraph PR["Project Runtime (.bundle)"]
       G
-      K
-      L
+      H
     end
 ```
+
+Manifest direction:
+
+1. A per-gem file manifest can make phase 6 deterministic and cheap by removing repeated file discovery.
+2. This manifest should be owned by global cache metadata and consumed by the materializer.
 
 ## Scheduler as Session Object
 

@@ -235,6 +235,72 @@ class FSTest < Minitest::Test
     end
   end
 
+  def test_clone_many_trees_batches_cp_calls_on_macos
+    with_tmpdir do |dir|
+      src_a = File.join(dir, "a")
+      src_b = File.join(dir, "b")
+      src_c = File.join(dir, "c")
+      dst = File.join(dir, "dst")
+      [src_a, src_b, src_c].each do |src|
+        FileUtils.mkdir_p(src)
+        File.write(File.join(src, "x.txt"), File.basename(src))
+      end
+
+      calls = []
+      Scint::Platform.stub(:macos?, true) do
+        Scint::Platform.stub(:linux?, false) do
+          Scint::FS.stub(:system, lambda { |*args|
+            calls << args
+            # cp -cR src... dst {redir}
+            sources = args[2..-3]
+            destination = args[-2]
+            FileUtils.mkdir_p(destination)
+            sources.each { |src| FileUtils.cp_r(src, destination) }
+            true
+          }) do
+            copied = Scint::FS.clone_many_trees([src_a, src_b, src_c], dst, chunk_size: 2)
+            assert_equal 3, copied
+          end
+        end
+      end
+
+      assert_equal 2, calls.length
+      assert File.exist?(File.join(dst, "a", "x.txt"))
+      assert File.exist?(File.join(dst, "b", "x.txt"))
+      assert File.exist?(File.join(dst, "c", "x.txt"))
+    end
+  end
+
+  def test_clone_many_trees_falls_back_to_clone_tree_when_cp_fails
+    with_tmpdir do |dir|
+      src_a = File.join(dir, "a")
+      src_b = File.join(dir, "b")
+      dst = File.join(dir, "dst")
+      [src_a, src_b].each do |src|
+        FileUtils.mkdir_p(src)
+        File.write(File.join(src, "x.txt"), File.basename(src))
+      end
+
+      fallback_calls = []
+      Scint::Platform.stub(:macos?, true) do
+        Scint::FS.stub(:system, ->(*_args) { false }) do
+          Scint::FS.stub(:clone_tree, lambda { |src, out|
+            fallback_calls << [src, out]
+            FileUtils.mkdir_p(out)
+            FileUtils.cp_r(File.join(src, "."), out)
+          }) do
+            copied = Scint::FS.clone_many_trees([src_a, src_b], dst, chunk_size: 10)
+            assert_equal 2, copied
+          end
+        end
+      end
+
+      assert_equal 2, fallback_calls.length
+      assert File.exist?(File.join(dst, "a", "x.txt"))
+      assert File.exist?(File.join(dst, "b", "x.txt"))
+    end
+  end
+
   def test_atomic_move_handles_cross_device_rename
     with_tmpdir do |dir|
       src = File.join(dir, "src.txt")

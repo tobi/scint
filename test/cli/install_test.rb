@@ -59,6 +59,42 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
+  def test_load_gemspec_memoizes_within_install_run
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      spec = fake_spec(name: "rack", version: "2.2.8")
+
+      cached = Gem::Specification.new do |s|
+        s.name = "rack"
+        s.version = Gem::Version.new("2.2.8")
+        s.authors = ["a"]
+        s.summary = "rack"
+        s.require_paths = ["lib"]
+      end
+      FileUtils.mkdir_p(File.dirname(cache.spec_cache_path(spec)))
+      File.binwrite(cache.spec_cache_path(spec), Marshal.dump(cached))
+
+      extracted = cache.extracted_path(spec)
+      FileUtils.mkdir_p(File.join(extracted, "lib"))
+      File.write(File.join(extracted, "lib", "rack.rb"), "")
+
+      reads = 0
+      original = File.method(:binread)
+      File.stub(:binread, lambda { |path, *args|
+        reads += 1 if path == cache.spec_cache_path(spec)
+        original.call(path, *args)
+      }) do
+        first = install.send(:load_gemspec, extracted, spec, cache)
+        second = install.send(:load_gemspec, extracted, spec, cache)
+        assert_equal "rack", first.name
+        assert_equal "rack", second.name
+      end
+
+      assert_equal 1, reads
+    end
+  end
+
   def test_load_gemspec_falls_back_to_inbound_metadata
     with_tmpdir do |dir|
       cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
@@ -123,6 +159,40 @@ class CLIInstallTest < Minitest::Test
 
       install.send(:enqueue_link_after_download, scheduler, entry, cache, File.join(dir, ".bundle"))
       assert_equal :link, scheduler.enqueued.last[:type]
+    end
+  end
+
+  def test_bulk_prelink_gem_files_batches_cache_materialization
+    with_tmpdir do |dir|
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      install = Scint::CLI::Install.new([])
+      bundle_path = File.join(dir, ".bundle")
+
+      link_a = fake_spec(name: "rack", version: "2.2.8")
+      link_b = fake_spec(name: "i18n", version: "1.14.7")
+
+      FileUtils.mkdir_p(cache.extracted_path(link_a))
+      FileUtils.mkdir_p(cache.extracted_path(link_b))
+
+      entries = []
+      31.times do |i|
+        spec = fake_spec(name: "skip-#{i}", version: "1.0.0")
+        entries << Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
+      end
+      entries << Scint::PlanEntry.new(spec: link_a, action: :link, cached_path: cache.extracted_path(link_a), gem_path: nil)
+      entries << Scint::PlanEntry.new(spec: link_b, action: :build_ext, cached_path: cache.extracted_path(link_b), gem_path: nil)
+
+      calls = []
+      Scint::FS.stub(:clone_many_trees, lambda { |sources, dst_parent, chunk_size: 64|
+        calls << { sources: sources, dst_parent: dst_parent, chunk_size: chunk_size }
+        2
+      }) do
+        install.send(:bulk_prelink_gem_files, entries, cache, bundle_path)
+      end
+
+      assert_equal 1, calls.length
+      assert_equal [cache.extracted_path(link_a), cache.extracted_path(link_b)].sort, calls.first[:sources].sort
+      assert_equal File.join(bundle_path, "ruby", "#{RUBY_VERSION.split(".")[0, 2].join(".")}.0", "gems"), calls.first[:dst_parent]
     end
   end
 
