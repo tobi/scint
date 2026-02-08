@@ -212,6 +212,77 @@ Project-local runtime (`.bundle/`):
 4. `bin/` project-level wrappers
 5. `scint.lock.marshal` runtime lock for `scint exec`
 
+## Cache Validity + Manifest Specification (Draft)
+
+### Cache validity criteria
+
+A cached artifact is considered valid only when *all* of the following are true:
+
+1. `cached/<abi>/<full_name>/` exists and is a fully materialized tree.
+2. `cached/<abi>/<full_name>.spec.marshal` exists and loads successfully.
+3. `cached/<abi>/<full_name>.manifest` exists, parses, and its `version` is supported.
+4. Manifest fields `full_name` and `abi` match the requested spec/ABI.
+5. If the gem has native extensions, `ext/<abi>/<full_name>/gem.build_complete` exists.
+
+Any failure means the cache entry is *invalid* and must be rebuilt (fetch/assemble/compile).
+
+### Manifest schema
+
+The manifest is a single UTF-8 JSON object written to
+`cached/<abi>/<full_name>.manifest`. It is versioned and deterministically
+serialized for repeatable cache reuse.
+
+**Serialization rules**:
+
+- Top-level keys sorted lexicographically.
+- Array ordering is deterministic (see `files` below).
+- JSON is emitted without extra whitespace (canonical/minified).
+- No timestamps or host-specific values are stored.
+
+**Schema (version 1)**:
+
+- `version` (Integer, required): schema version (starting at `1`).
+- `full_name` (String, required): `name-version(-platform)`.
+- `abi` (String, required): Ruby ABI key (e.g. `ruby-3.4.5-arm64-darwin24`).
+- `source` (Object, required):
+  - `type` (String): `rubygems`, `git`, or `path`.
+  - `uri` (String): canonical source URI.
+  - `revision` (String, git only): resolved commit SHA.
+  - `path` (String, path only): absolute source path.
+- `files` (Array, required): sorted by `path` ascending. Each entry is:
+  - `path` (String): relative to the cached root.
+  - `type` (String): `file`, `dir`, or `symlink`.
+  - `mode` (Integer): numeric permission bits (e.g. `755`).
+  - `size` (Integer): bytes (directories use `0`).
+  - `sha256` (String, optional): content hash for files/symlinks.
+- `build` (Object, required):
+  - `extensions` (Boolean): whether the gem builds native extensions.
+  - `ext_complete` (String, optional): completion marker path when extensions exist.
+
+### Git slug normalization + collisions
+
+Git cache directories use a deterministic slug derived from the source URI:
+
+1. Normalize the URI to a stable string form (`uri.to_s`; callers should pass a
+   parsed URI for consistent normalization).
+2. Compute `sha256(normalized_uri)`, use the first 16 hex characters.
+
+**Collision handling**: when a slug directory already exists, validate that the
+manifest `source.uri` matches the normalized URI. If it does not, treat it as a
+collision, emit telemetry, and fall back to a longer hash (e.g. full 64 hex) or
+an additional suffix.
+
+### Legacy read-compat + telemetry
+
+Legacy cache entries that lack a manifest (or use an unsupported schema version)
+remain *read-compatible* for now:
+
+- Treat the entry as valid only if the cached tree + `.spec.marshal` exist and
+  the gemspec loads cleanly.
+- Emit telemetry counters (per run) such as `cache.manifest.missing`,
+  `cache.manifest.unsupported`, and `cache.manifest.collision`.
+- Log a single warning per run with counts and cache root to guide deprecation.
+
 ## Warm Path Guarantees
 
 Required behavior:
