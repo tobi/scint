@@ -213,22 +213,10 @@ class LinkerTest < Minitest::Test
 
   def test_infer_bindir_returns_current_bindir_when_no_exe_or_bin_match
     with_tmpdir do |dir|
-      bundle_path = File.join(dir, ".bundle")
       extracted = File.join(dir, "cache", "tool-1.0.0")
       # Create a lib dir but no exe/ or bin/ dir with the executable
       FileUtils.mkdir_p(File.join(extracted, "lib"))
       File.write(File.join(extracted, "lib", "tool.rb"), "module Tool; end\n")
-
-      spec = fake_spec(name: "tool", version: "1.0.0")
-      gemspec = Gem::Specification.new do |s|
-        s.name = "tool"
-        s.version = Gem::Version.new("1.0.0")
-        s.authors = ["a"]
-        s.summary = "tool"
-        s.executables = ["toolcmd"]
-        s.bindir = "custom_bin"
-      end
-      prepared = Prepared.new(spec: spec, extracted_path: extracted, gemspec: gemspec, from_cache: true)
 
       result = Scint::Installer::Linker.send(:infer_bindir, extracted, ["toolcmd"], "custom_bin")
       assert_equal "custom_bin", result

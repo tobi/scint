@@ -179,9 +179,7 @@ class FetcherTest < Minitest::Test
   def test_connection_for_creates_new_connection_when_not_started
     fetcher = Scint::Downloader::Fetcher.new
 
-    fake_http = FakeHTTP.new([])
     started = false
-    original_new = Net::HTTP.method(:new)
 
     Net::HTTP.stub(:new, lambda { |host, port|
       http = Object.new

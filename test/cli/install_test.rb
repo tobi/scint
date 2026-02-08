@@ -1742,7 +1742,7 @@ class CLIInstallTest < Minitest::Test
   def test_git_source_ref_uses_branch_when_no_revision
     install = Scint::CLI::Install.new([])
     source = Scint::Source::Git.new(uri: "https://github.com/demo/demo.git", branch: "develop")
-    uri, rev = install.send(:git_source_ref, source)
+    _uri, rev = install.send(:git_source_ref, source)
     assert_equal "develop", rev
   end
 
@@ -1825,6 +1825,59 @@ class CLIInstallTest < Minitest::Test
         install.send(:write_lockfile, resolved, gemfile)
         content = File.read("Gemfile.lock")
         assert_includes content, "rack"
+      end
+    end
+  end
+
+  def test_write_lockfile_with_gemspec_keeps_transitive_components_out_of_dependencies
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        FileUtils.mkdir_p("components")
+        File.write("Gemfile", <<~RUBY)
+          source "https://rubygems.org"
+          gemspec
+        RUBY
+        File.write("root.gemspec", <<~RUBY)
+          Gem::Specification.new do |s|
+            s.name = "root"
+            s.version = "1.0.0"
+            s.summary = "root"
+            s.authors = ["scint"]
+            s.files = []
+            s.add_dependency "child", "= 1.0.0"
+          end
+        RUBY
+        File.write("components/child.gemspec", <<~RUBY)
+          Gem::Specification.new do |s|
+            s.name = "child"
+            s.version = "1.0.0"
+            s.summary = "child"
+            s.authors = ["scint"]
+            s.files = []
+          end
+        RUBY
+
+        install = Scint::CLI::Install.new([])
+        gemfile = Scint::Gemfile::Parser.parse("Gemfile")
+        resolved = [
+          fake_spec(
+            name: "root",
+            version: "1.0.0",
+            source: File.expand_path("."),
+            dependencies: [{ name: "child", version_reqs: ["= 1.0.0"] }],
+          ),
+          fake_spec(name: "child", version: "1.0.0", source: File.expand_path("components")),
+        ]
+
+        install.send(:write_lockfile, resolved, gemfile)
+        parsed = Scint::Lockfile::Parser.parse("Gemfile.lock")
+
+        assert_includes parsed.dependencies.keys, "root"
+        refute_includes(
+          parsed.dependencies.keys,
+          "child",
+          "transitive gemspec dependencies should be in SPECS only, not DEPENDENCIES",
+        )
       end
     end
   end
@@ -2946,6 +2999,7 @@ class CLIInstallTest < Minitest::Test
                           begin
                             result = install.run
                             assert_equal 0, result
+                            assert started
                             output = $stdout.string
                             assert_includes output, "gems installed total"
                           ensure
@@ -3214,7 +3268,7 @@ class CLIInstallTest < Minitest::Test
       install = Scint::CLI::Install.new([])
       install.instance_variable_set(:@credentials, Scint::Credentials.new)
 
-      lockfile = Scint::Lockfile::LockfileData.new(
+      _lockfile = Scint::Lockfile::LockfileData.new(
         specs: [
           { name: "rack", version: "2.2.8" },
           { name: "puma", version: "6.0.0" },

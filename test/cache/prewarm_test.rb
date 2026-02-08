@@ -189,8 +189,6 @@ class CachePrewarmTest < Minitest::Test
   def test_default_downloader_factory_creates_pool
     with_tmpdir do |dir|
       cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
-      spec = fake_spec(name: "rack", version: "2.2.8", source: "https://rubygems.org/")
-
       # Use default factory (no downloader_factory: arg) so line 24 is hit
       prewarm = Scint::Cache::Prewarm.new(cache_layout: cache, jobs: 1)
 

@@ -28,9 +28,11 @@ require "scint/fs"
 module LegacyStub
   def stub(method_name, value = nil)
     sc = singleton_class
+    own_method = sc.instance_methods(false).include?(method_name) || sc.private_instance_methods(false).include?(method_name)
     had_method = sc.method_defined?(method_name) || sc.private_method_defined?(method_name)
-    original = method(method_name) if had_method
+    original = method(method_name) if own_method && had_method
 
+    sc.send(:remove_method, method_name) if own_method
     sc.send(:define_method, method_name) do |*args, **kwargs, &block|
       if value.respond_to?(:call)
         value.call(*args, **kwargs, &block)
@@ -41,8 +43,10 @@ module LegacyStub
 
     yield
   ensure
-    sc.send(:remove_method, method_name) rescue nil
-    sc.send(:define_method, method_name, original) if had_method
+    if sc.instance_methods(false).include?(method_name) || sc.private_instance_methods(false).include?(method_name)
+      sc.send(:remove_method, method_name)
+    end
+    sc.send(:define_method, method_name, original) if own_method && original
   end
 end
 

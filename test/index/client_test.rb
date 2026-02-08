@@ -470,6 +470,7 @@ class IndexClientTest < Minitest::Test
         info_body
       }) do
         results = client.prefetch(["newgem"], worker_count: 1)
+        assert_kind_of Hash, results
 
         # Verify that binary info was written (line 116)
         binary_cached = cache.read_binary_info("newgem", "checksum123")

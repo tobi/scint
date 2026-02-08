@@ -506,6 +506,10 @@ class ProgressTest < Minitest::Test
       # For the IO.console branch, we need it to raise StandardError.
       # We can do this by temporarily stubbing IO.console.
       original_console = IO.method(:console)
+      singleton = IO.singleton_class
+      if singleton.method_defined?(:console) || singleton.private_method_defined?(:console)
+        singleton.send(:remove_method, :console)
+      end
       IO.define_singleton_method(:console) do |*|
         raise StandardError, "no console available"
       end
@@ -516,6 +520,9 @@ class ProgressTest < Minitest::Test
         assert_operator width, :>=, Scint::Progress::MIN_RENDER_WIDTH
         assert_operator width, :<=, Scint::Progress::MAX_LINE_LEN
       ensure
+        if singleton.method_defined?(:console) || singleton.private_method_defined?(:console)
+          singleton.send(:remove_method, :console)
+        end
         IO.define_singleton_method(:console, original_console)
       end
     end

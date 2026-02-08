@@ -342,8 +342,6 @@ class PlannerTest < Minitest::Test
   def test_local_source_path_with_hash_spec_source_key
     with_tmpdir do |dir|
       with_cwd(dir) do
-        bundle_path = File.join(dir, ".bundle")
-        layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
         local_dir = File.join(dir, "vendor", "hashgem")
         FileUtils.mkdir_p(local_dir)
 

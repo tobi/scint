@@ -110,7 +110,9 @@ module Scint
 
           next unless container.method_defined?(original_name) || container.private_method_defined?(original_name)
 
-          container.send(:alias_method, method_name, original_name)
+          with_silenced_warnings do
+            container.send(:alias_method, method_name, original_name)
+          end
           container.send(:remove_method, original_name)
 
           visibility = entry[:visibility]
@@ -146,12 +148,21 @@ module Scint
         visibility = method_visibility(container, method_name)
 
         container.send(:alias_method, original_name, method_name)
-        container.send(:define_method, method_name) do |*args, **kwargs, &block|
-          Scint::Debug::IOTrace.log(op_name, args: args, kwargs: kwargs)
-          if kwargs.empty?
-            send(original_name, *args, &block)
-          else
-            send(original_name, *args, **kwargs, &block)
+        if container.instance_methods(false).include?(method_name) ||
+           container.private_instance_methods(false).include?(method_name) ||
+           container.protected_instance_methods(false).include?(method_name)
+          container.send(:remove_method, method_name)
+        elsif container.method_defined?(method_name) || container.private_method_defined?(method_name) || container.protected_method_defined?(method_name)
+          container.send(:undef_method, method_name)
+        end
+        with_silenced_warnings do
+          container.send(:define_method, method_name) do |*args, **kwargs, &block|
+            Scint::Debug::IOTrace.log(op_name, args: args, kwargs: kwargs)
+            if kwargs.empty?
+              send(original_name, *args, &block)
+            else
+              send(original_name, *args, **kwargs, &block)
+            end
           end
         end
 
@@ -171,6 +182,14 @@ module Scint
         return :public if container.method_defined?(method_name)
 
         nil
+      end
+
+      def with_silenced_warnings
+        verbose = $VERBOSE
+        $VERBOSE = nil
+        yield
+      ensure
+        $VERBOSE = verbose
       end
 
       def disable_unlocked
