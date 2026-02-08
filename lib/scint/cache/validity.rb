@@ -54,14 +54,14 @@ module Scint
           return false unless legacy_spec_loadable?(spec_path)
         end
 
-        return true unless extensions_required?(spec, cached_dir)
-
-        extension_build_complete?(spec, layout, abi_key)
+        true
       end
 
-      def source_path_for(spec, layout, abi_key: Platform.abi_key, telemetry: nil)
+      def source_path_for(spec, layout, abi_key: Platform.abi_key, telemetry: nil, allow_legacy: false)
         cached_dir = layout.cached_path(spec, abi_key)
         return cached_dir if cached_valid?(spec, layout, abi_key: abi_key, telemetry: telemetry)
+
+        return nil unless allow_legacy
 
         legacy = layout.extracted_path(spec)
         return nil unless legacy_extracted_valid?(spec, legacy, layout)

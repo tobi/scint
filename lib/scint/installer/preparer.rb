@@ -73,16 +73,6 @@ module Scint
               gemspec: gemspec,
               from_cache: false,
             )
-          elsif File.directory?(@layout.extracted_path(spec))
-            # Legacy extracted cache
-            extracted = @layout.extracted_path(spec)
-            gemspec = load_cached_spec(spec) || read_gemspec_from_extracted(extracted, spec)
-            already_cached << PreparedGem.new(
-              spec: spec,
-              extracted_path: extracted,
-              gemspec: gemspec,
-              from_cache: true,
-            )
           elsif File.exist?(inbound)
             # Downloaded but not extracted
             already_cached << extract_gem(spec, inbound)
@@ -156,16 +146,6 @@ module Scint
           )
         end
 
-        extracted = @layout.extracted_path(spec)
-        if File.directory?(extracted)
-          gemspec = load_cached_spec(spec) || read_gemspec_from_extracted(extracted, spec)
-          return PreparedGem.new(
-            spec: spec,
-            extracted_path: extracted,
-            gemspec: gemspec,
-            from_cache: true,
-          )
-        end
 
         unless File.exist?(inbound)
           uri = gem_download_uri(entry)
@@ -218,14 +198,13 @@ module Scint
 
       def load_cached_spec(spec)
         path = @layout.cached_spec_path(spec)
-        if File.exist?(path)
-          return Marshal.load(File.binread(path))
-        end
+        return nil unless File.exist?(path)
 
-        legacy = @layout.spec_cache_path(spec)
-        return nil unless File.exist?(legacy)
-        Marshal.load(File.binread(legacy))
-      rescue ArgumentError, TypeError, EOFError
+        data = File.binread(path)
+        return Gem::Specification.from_yaml(data) if data.start_with?("---")
+
+        Marshal.load(data)
+      rescue ArgumentError, TypeError, EOFError, StandardError
         nil
       end
 

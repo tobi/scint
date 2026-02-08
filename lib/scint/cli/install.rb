@@ -1332,7 +1332,7 @@ module Scint
           elsif Dir.exist?(assembling)
             assembling
           else
-            cache.extracted_path(entry.spec)
+            nil
           end
 
           if git_source?(entry.spec.source) && Dir.exist?(base)
@@ -1601,7 +1601,7 @@ module Scint
       end
 
       def load_cached_gemspec(spec, cache, extracted_path)
-        paths = [cache.cached_spec_path(spec), cache.spec_cache_path(spec)]
+        paths = [cache.cached_spec_path(spec)]
 
         paths.each do |path|
           next unless File.exist?(path)
@@ -1654,7 +1654,7 @@ module Scint
       end
 
       def cache_gemspec(spec, gemspec, cache)
-        path = cache.spec_cache_path(spec)
+        path = cache.cached_spec_path(spec)
         FS.atomic_write(path, gemspec.to_yaml)
       rescue StandardError
         # Non-fatal: we'll read metadata from .gem next time.
@@ -2215,8 +2215,12 @@ module Scint
 
           # Global cache artifacts.
           FileUtils.rm_f(cache.inbound_path(spec))
-          FileUtils.rm_rf(cache.extracted_path(spec))
+          FileUtils.rm_rf(cache.assembling_path(spec))
+          FileUtils.rm_rf(cache.cached_path(spec))
+          FileUtils.rm_f(cache.cached_spec_path(spec))
+          FileUtils.rm_f(cache.cached_manifest_path(spec))
           FileUtils.rm_f(cache.spec_cache_path(spec))
+          FileUtils.rm_rf(cache.extracted_path(spec))
           FileUtils.rm_rf(cache.ext_path(spec))
 
           # Local bundle artifacts.

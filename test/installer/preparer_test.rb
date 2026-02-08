@@ -3,6 +3,7 @@
 require_relative "../test_helper"
 require "scint/installer/preparer"
 require "scint/cache/layout"
+require "scint/cache/manifest"
 
 class PreparerTest < Minitest::Test
   FakeDownloadPool = Struct.new(:batch_results, :download_calls, :download_batch_items, :closed, keyword_init: true) do
@@ -70,15 +71,30 @@ class PreparerTest < Minitest::Test
     Scint::Installer::PlanEntry.new(spec: spec, action: :download, cached_path: cached_path, gem_path: gem_path)
   end
 
-  def test_prepare_uses_existing_extracted_cache_and_cached_spec
+  def test_prepare_uses_existing_cached_dir_and_cached_spec
     with_tmpdir do |dir|
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = fake_spec(name: "rack", version: "2.2.8")
 
-      extracted = layout.extracted_path(spec)
-      FileUtils.mkdir_p(extracted)
-      cached_spec = { "ok" => true }
-      File.binwrite(layout.spec_cache_path(spec), Marshal.dump(cached_spec))
+      cached = layout.cached_path(spec)
+      FileUtils.mkdir_p(File.join(cached, "lib"))
+      File.write(File.join(cached, "lib", "rack.rb"), "")
+      cached_spec = Gem::Specification.new do |s|
+        s.name = "rack"
+        s.version = Gem::Version.new("2.2.8")
+        s.summary = "rack"
+        s.require_paths = ["lib"]
+      end
+      FileUtils.mkdir_p(File.dirname(layout.cached_spec_path(spec)))
+      File.binwrite(layout.cached_spec_path(spec), Marshal.dump(cached_spec))
+      manifest = Scint::Cache::Manifest.build(
+        spec: spec,
+        gem_dir: cached,
+        abi_key: Scint::Platform.abi_key,
+        source: { "type" => "rubygems", "uri" => "https://rubygems.org" },
+        extensions: false,
+      )
+      Scint::Cache::Manifest.write(layout.cached_manifest_path(spec), manifest)
 
       pool = FakeDownloadPool.new
       package = FakePackage.new(gemspec: { "unused" => true })
@@ -88,21 +104,21 @@ class PreparerTest < Minitest::Test
 
       assert_equal 1, result.size
       assert_equal true, result.first.from_cache
-      assert_equal cached_spec, result.first.gemspec
+      assert_equal "rack", result.first.gemspec.name
       assert_equal [], pool.download_batch_items
       assert_equal [], package.extract_calls
       assert_equal true, pool.closed
     end
   end
 
-  def test_prepare_uses_extracted_gemspec_when_cached_spec_missing
+  def test_prepare_uses_assembling_when_present
     with_tmpdir do |dir|
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = fake_spec(name: "rack", version: "2.2.8")
 
-      extracted = layout.extracted_path(spec)
-      FileUtils.mkdir_p(extracted)
-      File.write(File.join(extracted, "rack.gemspec"), <<~RUBY)
+      assembling = layout.assembling_path(spec)
+      FileUtils.mkdir_p(assembling)
+      File.write(File.join(assembling, "rack.gemspec"), <<~RUBY)
         Gem::Specification.new do |s|
           s.name = "rack"
           s.version = "2.2.8"
@@ -118,13 +134,14 @@ class PreparerTest < Minitest::Test
       result = preparer.prepare([plan_entry(spec)])
       gemspec = result.first.gemspec
 
-      assert_equal true, result.first.from_cache
+      assert_equal false, result.first.from_cache
+      assert_equal assembling, result.first.extracted_path
       assert_equal "rack", gemspec.name
       assert_equal Gem::Version.new("2.2.8"), gemspec.version
     end
   end
 
-  def test_prepare_extracts_when_inbound_exists_but_not_extracted
+  def test_prepare_extracts_when_inbound_exists_but_not_cached
     with_tmpdir do |dir|
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = fake_spec(name: "rack", version: "2.2.8")
@@ -140,8 +157,9 @@ class PreparerTest < Minitest::Test
 
       assert_equal false, result.first.from_cache
       assert_equal inbound, package.extract_calls.first.first
-      assert File.directory?(layout.extracted_path(spec))
-      assert File.exist?(layout.spec_cache_path(spec))
+      assert Dir.exist?(layout.cached_path(spec))
+      assert File.exist?(layout.cached_spec_path(spec))
+      assert File.exist?(layout.cached_manifest_path(spec))
       assert_equal true, pool.closed
     end
   end
@@ -236,7 +254,7 @@ class PreparerTest < Minitest::Test
       preparer = new_preparer(layout, pool: FakeDownloadPool.new, package: FakePackage.new(gemspec: {}))
       spec = fake_spec(name: "rack", version: "2.2.8")
 
-      path = layout.spec_cache_path(spec)
+      path = layout.cached_spec_path(spec)
       FileUtils.mkdir_p(File.dirname(path))
       File.binwrite(path, "bad marshal")
 
@@ -244,15 +262,30 @@ class PreparerTest < Minitest::Test
     end
   end
 
-  def test_prepare_one_uses_cached_extracted_directory
+  def test_prepare_one_uses_cached_directory
     with_tmpdir do |dir|
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = fake_spec(name: "rack", version: "2.2.8")
 
-      extracted = layout.extracted_path(spec)
-      FileUtils.mkdir_p(extracted)
-      cached_spec = { "cached" => true }
-      File.binwrite(layout.spec_cache_path(spec), Marshal.dump(cached_spec))
+      cached = layout.cached_path(spec)
+      FileUtils.mkdir_p(File.join(cached, "lib"))
+      File.write(File.join(cached, "lib", "rack.rb"), "")
+      cached_spec = Gem::Specification.new do |s|
+        s.name = "rack"
+        s.version = Gem::Version.new("2.2.8")
+        s.summary = "rack"
+        s.require_paths = ["lib"]
+      end
+      FileUtils.mkdir_p(File.dirname(layout.cached_spec_path(spec)))
+      File.binwrite(layout.cached_spec_path(spec), Marshal.dump(cached_spec))
+      manifest = Scint::Cache::Manifest.build(
+        spec: spec,
+        gem_dir: cached,
+        abi_key: Scint::Platform.abi_key,
+        source: { "type" => "rubygems", "uri" => "https://rubygems.org" },
+        extensions: false,
+      )
+      Scint::Cache::Manifest.write(layout.cached_manifest_path(spec), manifest)
 
       pool = FakeDownloadPool.new
       package = FakePackage.new(gemspec: {})
@@ -261,8 +294,8 @@ class PreparerTest < Minitest::Test
       result = preparer.prepare_one(plan_entry(spec))
 
       assert_equal true, result.from_cache
-      assert_equal cached_spec, result.gemspec
-      assert_equal extracted, result.extracted_path
+      assert_equal "rack", result.gemspec.name
+      assert_equal cached, result.extracted_path
     end
   end
 
@@ -271,17 +304,25 @@ class PreparerTest < Minitest::Test
       layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
       spec = fake_spec(name: "rack", version: "2.2.8")
 
-      # Pre-create extracted path to simulate race condition
-      extracted = layout.extracted_path(spec)
-      FileUtils.mkdir_p(extracted)
-      File.write(File.join(extracted, "rack.gemspec"), <<~RUBY)
-        Gem::Specification.new do |s|
-          s.name = "rack"
-          s.version = "2.2.8"
-          s.summary = "rack"
-          s.authors = ["a"]
-        end
-      RUBY
+      cached = layout.cached_path(spec)
+      FileUtils.mkdir_p(File.join(cached, "lib"))
+      File.write(File.join(cached, "lib", "rack.rb"), "")
+      cached_spec = Gem::Specification.new do |s|
+        s.name = "rack"
+        s.version = Gem::Version.new("2.2.8")
+        s.summary = "rack"
+        s.require_paths = ["lib"]
+      end
+      FileUtils.mkdir_p(File.dirname(layout.cached_spec_path(spec)))
+      File.binwrite(layout.cached_spec_path(spec), Marshal.dump(cached_spec))
+      manifest = Scint::Cache::Manifest.build(
+        spec: spec,
+        gem_dir: cached,
+        abi_key: Scint::Platform.abi_key,
+        source: { "type" => "rubygems", "uri" => "https://rubygems.org" },
+        extensions: false,
+      )
+      Scint::Cache::Manifest.write(layout.cached_manifest_path(spec), manifest)
 
       pool = FakeDownloadPool.new
       package = FakePackage.new(gemspec: {})
@@ -291,7 +332,7 @@ class PreparerTest < Minitest::Test
       result = preparer.send(:extract_gem, spec, "/dummy.gem")
 
       assert_equal true, result.from_cache
-      assert_equal extracted, result.extracted_path
+      assert_equal cached, result.extracted_path
     end
   end
 
