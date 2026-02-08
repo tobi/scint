@@ -7,6 +7,7 @@ module Scint
   module Installer
     module Planner
       module_function
+      PATH_GLOB_DEFAULT = "{,*,*/*}.gemspec"
 
       # Compare resolved specs against what's already installed.
       # Returns an Array of PlanEntry with action set to one of:
@@ -127,7 +128,33 @@ module Scint
         return nil if source_str.end_with?(".git") || source_str.include?(".git/")
 
         absolute = File.expand_path(source_str, Dir.pwd)
-        Dir.exist?(absolute) ? absolute : nil
+        return nil unless Dir.exist?(absolute)
+
+        spec_name =
+          if spec.respond_to?(:name)
+            spec.name.to_s
+          else
+            spec[:name].to_s
+          end
+        return absolute if spec_name.empty?
+        return absolute if File.exist?(File.join(absolute, "#{spec_name}.gemspec"))
+
+        glob =
+          if source.respond_to?(:glob) && !source.glob.to_s.empty?
+            source.glob.to_s
+          else
+            PATH_GLOB_DEFAULT
+          end
+
+        Dir.glob(File.join(absolute, glob)).each do |path|
+          return File.dirname(path) if File.basename(path, ".gemspec") == spec_name
+        end
+
+        Dir.glob(File.join(absolute, "**", "*.gemspec")).each do |path|
+          return File.dirname(path) if File.basename(path, ".gemspec") == spec_name
+        end
+
+        absolute
       end
 
       private_class_method :plan_one, :needs_ext_build?, :extension_link_missing?,

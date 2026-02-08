@@ -2413,6 +2413,24 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
+  def test_extracted_path_for_entry_resolves_path_source_monorepo_subdir
+    with_tmpdir do |dir|
+      install = Scint::CLI::Install.new([])
+      cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+      monorepo = File.join(dir, "repo")
+      subdir = File.join(monorepo, "actionpack")
+      FileUtils.mkdir_p(subdir)
+      File.write(File.join(subdir, "actionpack.gemspec"), "Gem::Specification.new\n")
+
+      source = Scint::Source::Path.new(path: monorepo, glob: "{,*/}*.gemspec")
+      spec = fake_spec(name: "actionpack", version: "8.2.0.alpha", source: source)
+      entry = Scint::PlanEntry.new(spec: spec, action: :link, cached_path: monorepo, gem_path: nil)
+
+      result = install.send(:extracted_path_for_entry, entry, cache)
+      assert_equal subdir, result
+    end
+  end
+
   def test_extracted_path_for_entry_uses_cached_path_when_provided
     with_tmpdir do |dir|
       install = Scint::CLI::Install.new([])

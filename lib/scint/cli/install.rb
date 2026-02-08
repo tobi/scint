@@ -851,6 +851,22 @@ module Scint
         source_str.end_with?(".git") || source_str.include?(".git/")
       end
 
+      def path_source?(source)
+        return true if source.is_a?(Source::Path)
+
+        source_str =
+          if source.respond_to?(:path)
+            source.path.to_s
+          else
+            source.to_s
+          end
+        return false if source_str.empty?
+        return false if source_str.start_with?("http://", "https://")
+        return false if git_source?(source)
+
+        source_str.start_with?("/", ".", "~")
+      end
+
       def prepare_git_source(entry, cache)
         # Legacy helper used by tests/callers that expect git download+extract
         # in a single step.
@@ -1272,7 +1288,11 @@ module Scint
         source_str = entry.spec.source.to_s
         if source_str.start_with?("/") && Dir.exist?(source_str)
           begin
-            resolve_git_gem_subdir(source_str, entry.spec)
+            if path_source?(entry.spec.source)
+              resolve_path_gem_subdir(source_str, entry.spec)
+            else
+              resolve_git_gem_subdir(source_str, entry.spec)
+            end
           rescue InstallError
             source_str
           end
@@ -1280,6 +1300,12 @@ module Scint
           base = entry.cached_path || cache.extracted_path(entry.spec)
           if git_source?(entry.spec.source) && Dir.exist?(base)
             resolve_git_gem_subdir(base, entry.spec)
+          elsif path_source?(entry.spec.source) && Dir.exist?(base)
+            begin
+              resolve_path_gem_subdir(base, entry.spec)
+            rescue InstallError
+              base
+            end
           else
             base
           end
@@ -1305,6 +1331,31 @@ module Scint
         source_uri = source.respond_to?(:uri) ? source.uri : source.to_s
         raise InstallError,
               "Git source #{source_uri} does not contain #{name}.gemspec (glob: #{glob.inspect}); lockfile source mapping may be stale"
+      end
+
+      # For path monorepo sources, map gem name to its gemspec subdirectory.
+      def resolve_path_gem_subdir(repo_root, spec)
+        name = spec.name
+        return repo_root if File.exist?(File.join(repo_root, "#{name}.gemspec"))
+
+        source = spec.source
+        glob = source.respond_to?(:glob) ? source.glob : Source::Path::DEFAULT_GLOB
+        Dir.glob(File.join(repo_root, glob)).each do |path|
+          return File.dirname(path) if File.basename(path, ".gemspec") == name
+        end
+        Dir.glob(File.join(repo_root, "**", "*.gemspec")).each do |path|
+          return File.dirname(path) if File.basename(path, ".gemspec") == name
+        end
+
+        source_uri =
+          if source.respond_to?(:path)
+            source.path
+          elsif source.respond_to?(:uri)
+            source.uri
+          else
+            source.to_s
+          end
+        raise InstallError, "Path source #{source_uri} does not contain #{name}.gemspec (glob: #{glob.inspect})"
       end
 
       def link_gem_files(entry, cache, bundle_path)

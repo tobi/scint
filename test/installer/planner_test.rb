@@ -339,6 +339,57 @@ class PlannerTest < Minitest::Test
     end
   end
 
+  def test_plan_one_uses_path_source_subdir_for_monorepo_gem
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        bundle_path = File.join(dir, ".bundle")
+        layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+        repo_root = File.join(dir, "rails")
+        subdir = File.join(repo_root, "actionpack")
+        FileUtils.mkdir_p(subdir)
+        File.write(File.join(subdir, "actionpack.gemspec"), "Gem::Specification.new do |s| end\n")
+
+        source = Scint::Source::Path.new(path: "rails", glob: "{,*/}*.gemspec")
+        spec = Spec.new(
+          name: "actionpack",
+          version: "8.2.0.alpha",
+          platform: "ruby",
+          has_extensions: false,
+          source: source,
+        )
+
+        entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
+        assert_equal :link, entry.action
+        assert_equal File.realpath(subdir), File.realpath(entry.cached_path)
+      end
+    end
+  end
+
+  def test_plan_one_resolves_dot_path_source_to_component_subdir
+    with_tmpdir do |dir|
+      with_cwd(dir) do
+        bundle_path = File.join(dir, ".bundle")
+        layout = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
+        subdir = File.join(dir, "actionpack")
+        FileUtils.mkdir_p(subdir)
+        File.write(File.join(subdir, "actionpack.gemspec"), "Gem::Specification.new do |s| end\n")
+
+        source = Scint::Source::Path.new(path: ".", glob: "{,*/}*.gemspec")
+        spec = Spec.new(
+          name: "actionpack",
+          version: "8.2.0.alpha",
+          platform: "ruby",
+          has_extensions: false,
+          source: source,
+        )
+
+        entry = Scint::Installer::Planner.plan([spec], bundle_path, layout).first
+        assert_equal File.realpath(subdir), File.realpath(entry.cached_path)
+        refute_equal File.realpath(dir), File.realpath(entry.cached_path)
+      end
+    end
+  end
+
   def test_local_source_path_with_hash_spec_source_key
     with_tmpdir do |dir|
       with_cwd(dir) do
