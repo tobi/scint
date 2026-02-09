@@ -34,7 +34,7 @@ module Scint
       mid_up = (1..6).map { |i| lo + ((hi - lo) * (i / 7.0)).round }
       mid_down = mid_up[0..-2].reverse
       hold_dim = [lo] * 5
-      hold_bright = [hi] * 4
+      hold_bright = [hi] * 8
       (hold_dim + mid_up + hold_bright + mid_down).map { |c| "\e[38;5;#{c}m•\e[0m" }.freeze
     end
     IDLE_MARK = "•".freeze
@@ -351,9 +351,22 @@ module Scint
         "#{label} #{s[:name]}"
       end
       @active_setup = nil
-      # Clear the live timer line, write final to scrollback
-      redraw_live_block_locked([]) if @live_rows > 0
-      write_scrollback_line_locked(final)
+
+      if @live_rows > 0
+        # Overwrite the live timer line in-place with the final text,
+        # then advance cursor to the next line. No cursor-up dance.
+        rendered = fit_line(final, @render_width)
+        buf = +""
+        buf << "\e[#{@live_rows - 1}A" if @live_rows > 1
+        buf << "\r#{rendered}\e[K\r\n\r\n"
+        @output.print buf
+        @output.flush if @output.respond_to?(:flush)
+        @live_rows = 0
+        @rendered_widths = []
+      else
+        write_scrollback_line_locked(final)
+        write_scrollback_line_locked("")
+      end
       @setup_lines_printed = true
     end
 
@@ -408,15 +421,16 @@ module Scint
       [line, *detail_rows.first(MAX_DETAIL_ROWS_PER_PHASE)]
     end
 
+    LABEL_WIDTH = 10 # "Extraction".length
+
     def phase_status_line(type, active_jobs, label, completed, total, pulse)
-      w = [total.to_s.length, 4].max
-      counter = "#{DIM}(#{completed.to_s.rjust(w)}/#{total})#{RESET}"
-      base = "#{label} #{counter}"
+      padded = sprintf("%-*s", LABEL_WIDTH, label)
+      counter = "#{DIM}(%4d/%4d)#{RESET}" % [completed, total]
       if active_jobs.empty?
-        "#{pulse} #{base}"
+        "#{pulse} #{padded} #{counter}"
       else
         name = active_jobs.first[:name]
-        "#{pulse} #{base} · #{BOLD}#{name}#{RESET}"
+        "#{pulse} #{padded} #{counter} · #{BOLD}#{name}#{RESET}"
       end
     end
 
@@ -545,7 +559,7 @@ module Scint
         @setup_lines_printed = true
         "#{BOLD}#{label}#{RESET} #{name}"
       else
-        "#{GREEN}[#{@started}/#{@total.values.sum}]#{RESET} #{label} #{BOLD}#{name}#{RESET}"
+        "#{IDLE_MARK} #{label} #{BOLD}#{name}#{RESET}"
       end
     end
 
