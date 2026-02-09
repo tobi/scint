@@ -273,9 +273,11 @@ module Scint
       end
 
       def adaptive_make_jobs(compile_slots)
-        slots = [compile_slots.to_i, 1].max
-        jobs = Platform.cpu_count / slots
-        [jobs, 1].max
+        # Let make/cargo use all CPUs — the OS scheduler handles contention
+        # better than we can by capping jobs. Most C extensions are tiny
+        # (1-3 files) so extra -j is harmless, and Rust builds (cargo)
+        # ignore MAKEFLAGS anyway and use all cores.
+        Platform.cpu_count
       end
 
       def run_cmd(env, *cmd, chdir: nil, output_tail: nil)

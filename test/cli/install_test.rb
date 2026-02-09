@@ -272,30 +272,25 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
-  def test_install_task_limits_reserves_lanes_for_compile_and_binstub
+  def test_install_task_limits_uncapped
     install = Scint::CLI::Install.new([])
     compile_slots = install.send(:compile_slots_for, 8)
     limits = install.send(:install_task_limits, 8, compile_slots)
-    assert_equal 2, compile_slots
-    assert_equal 5, limits[:download]
-    assert_equal 5, limits[:extract]
-    assert_equal 5, limits[:link]
+    assert_equal 8, compile_slots
+    assert_equal 8, limits[:download]
+    assert_equal 8, limits[:extract]
+    assert_equal 8, limits[:link]
     assert_equal 8, limits[:git_clone]
-    assert_equal 2, limits[:build_ext]
+    assert_equal 8, limits[:build_ext]
     assert_equal 1, limits[:binstub]
   end
 
-  def test_compile_slots_for_scales_with_cpus
+  def test_compile_slots_for_equals_worker_count
     install = Scint::CLI::Install.new([])
-    cpus = Scint::Platform.cpu_count
-    base_slots = [cpus / 8, 2].max
 
-    # With 1 worker, compile slots are clamped to 1
     assert_equal 1, install.send(:compile_slots_for, 1)
-
-    # With enough workers, slots scale up to base_slots (cpus/8, min 2)
-    assert_equal [base_slots, 2].min, install.send(:compile_slots_for, 2)
-    assert_equal [base_slots, 20].min, install.send(:compile_slots_for, 20)
+    assert_equal 2, install.send(:compile_slots_for, 2)
+    assert_equal 20, install.send(:compile_slots_for, 20)
   end
 
   def test_compile_slots_for_honors_env_override

@@ -714,19 +714,16 @@ module Scint
       end
 
       def compile_slots_for(worker_count)
-        # Scale compile concurrency with available CPUs.
-        # Most native extensions have 1-3 source files and don't benefit from
-        # high make -j; running more concurrent builds is more effective.
+        # Let all compile jobs run concurrently — no artificial cap.
         # Each slot gets cpu_count/slots make jobs (see adaptive_make_jobs).
+        # Most C extensions are tiny (1-3 files) and finish in seconds;
+        # Rust extensions are heavy but benefit from running alongside
+        # the small ones rather than waiting behind them.
         workers = [worker_count.to_i, 1].max
         override = positive_integer_env("SCINT_COMPILE_CONCURRENCY")
         return [override, workers].min if override
 
-        cpus = Platform.cpu_count
-        # Aim for 8 make-jobs per slot → slots = cpus / 8, clamped.
-        slots = cpus / 8
-        slots = [[slots, 2].max, workers].min
-        slots
+        workers
       end
 
       def git_slots_for(worker_count)
@@ -737,20 +734,14 @@ module Scint
       end
 
       def install_task_limits(worker_count, compile_slots, git_slots = worker_count)
-        # Leave headroom for compile and binstub lanes so link/download
-        # throughput cannot fully starve them.
         workers = [worker_count.to_i, 1].max
-        io_cpu_limit = [workers - compile_slots - 1, 1].max
-        # Keep download in-flight set bounded so fail-fast exits quickly on
-        # auth/source errors instead of queueing a large burst.
-        download_limit = [io_cpu_limit, 8].min
         git_limit = [[git_slots.to_i, 1].max, workers].min
         {
-          download: download_limit,
-          extract: io_cpu_limit,
-          link: io_cpu_limit,
+          download: [workers, 8].min,
+          extract: workers,
+          link: workers,
           git_clone: git_limit,
-          build_ext: compile_slots,
+          build_ext: workers,
           binstub: 1,
         }
       end
@@ -1271,21 +1262,18 @@ module Scint
         promoter.validate_within_root!(cache.root, cached_dir, label: "cached")
 
         begin
-          result = nil
-          promoter.with_staging_dir(prefix: "cached") do |staging|
-            FS.clone_tree(assembling_path, staging)
-            manifest = build_cached_manifest(spec, cache, staging, extensions: extensions)
-            Scint::Cache::Manifest.write_dotfiles(staging, manifest)
-            spec_payload = gemspec ? gemspec.to_ruby : nil
-            result = promoter.promote_tree(
-              staging_path: staging,
-              target_path: cached_dir,
-              lock_key: lock_key,
-            )
-            if result == :promoted
-              write_cached_metadata(spec, cache, spec_payload, manifest)
-            end
-            FileUtils.rm_rf(assembling_path) if Dir.exist?(assembling_path)
+          # Write manifest + dotfiles directly into the assembling dir,
+          # then promote it in-place — avoids a full filesystem copy.
+          manifest = build_cached_manifest(spec, cache, assembling_path, extensions: extensions)
+          Scint::Cache::Manifest.write_dotfiles(assembling_path, manifest)
+          spec_payload = gemspec ? gemspec.to_ruby : nil
+          result = promoter.promote_tree(
+            staging_path: assembling_path,
+            target_path: cached_dir,
+            lock_key: lock_key,
+          )
+          if result == :promoted
+            write_cached_metadata(spec, cache, spec_payload, manifest)
           end
           result
         rescue StandardError

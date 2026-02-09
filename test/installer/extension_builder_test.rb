@@ -147,11 +147,11 @@ class ExtensionBuilderTest < Minitest::Test
     assert_includes gem_paths, source_ruby_dir
   end
 
-  def test_adaptive_make_jobs_scales_by_compile_slots
+  def test_adaptive_make_jobs_always_uses_all_cpus
     Scint::Platform.stub(:cpu_count, 12) do
       assert_equal 12, Scint::Installer::ExtensionBuilder.send(:adaptive_make_jobs, 1)
-      assert_equal 6, Scint::Installer::ExtensionBuilder.send(:adaptive_make_jobs, 2)
-      assert_equal 4, Scint::Installer::ExtensionBuilder.send(:adaptive_make_jobs, 3)
+      assert_equal 12, Scint::Installer::ExtensionBuilder.send(:adaptive_make_jobs, 2)
+      assert_equal 12, Scint::Installer::ExtensionBuilder.send(:adaptive_make_jobs, 3)
     end
   end
 
