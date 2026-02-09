@@ -62,6 +62,7 @@ module Scint
   )
 
   # Autoloads — each file is loaded on first reference
+  autoload :Bundle,      "scint/bundle"
   autoload :CLI,         "scint/cli"
   autoload :Scheduler,   "scint/scheduler"
   autoload :WorkerPool,  "scint/worker_pool"

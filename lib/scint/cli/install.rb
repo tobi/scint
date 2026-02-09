@@ -34,6 +34,7 @@ require_relative "../vendor/pub_grub"
 require_relative "../resolver/provider"
 require_relative "../resolver/resolver"
 require_relative "../credentials"
+require_relative "../bundle"
 require "open3"
 require "set"
 require "pathname"
@@ -62,6 +63,10 @@ module Scint
         @with_groups = Array(with).map(&:to_sym) if with
       end
 
+      def bundle
+        @bundle ||= Scint::Bundle.new(".", without: @without_groups, with: @with_groups)
+      end
+
       def _tmark(label, t0)
         now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         @output.puts "  [timing] #{label}: #{((now - t0) * 1000).round}ms" if ENV["SCINT_TIMING"]
@@ -88,8 +93,9 @@ module Scint
         @output.puts "  #{DIM}scint #{VERSION}, ruby #{RUBY_VERSION}#{RESET}"
         @output.puts
 
-        # 0. Build credential store from config files (~/.bundle/config, XDG scint/credentials)
+        # 0. Build credential store and Bundle instance
         @credentials = Credentials.new
+        @bundle = Scint::Bundle.new(".", without: @without_groups, with: @with_groups, credentials: @credentials)
 
         # 1. Start the scheduler with 1 worker — scale up dynamically
         scheduler = Scheduler.new(max_workers: worker_count, fail_fast: true, per_type_limits: per_type_limits,
@@ -99,7 +105,7 @@ module Scint
         begin
           _t = _tmark("startup", _t)
           # 2. Parse Gemfile
-          gemfile = Scint::Gemfile::Parser.parse("Gemfile")
+          gemfile = bundle.gemfile
 
           # Register credentials from Gemfile sources and dependencies
           @credentials.register_sources(gemfile.sources)
@@ -113,21 +119,18 @@ module Scint
           # 3. Enqueue index fetches for all sources immediately
           gemfile.sources.each do |source|
             scheduler.enqueue(:fetch_index, source[:uri] || source.to_s,
-                              -> { fetch_index(source, cache) })
+                              -> { bundle.send(:fetch_index, source, cache) })
           end
 
           # 4. Parse lockfile if it exists
-          lockfile = nil
-          if File.exist?("Gemfile.lock")
-            lockfile = Scint::Lockfile::Parser.parse("Gemfile.lock")
-            @credentials.register_lockfile_sources(lockfile.sources)
-          end
+          lockfile = bundle.lockfile
+          @credentials.register_lockfile_sources(lockfile.sources) if lockfile
 
           # 5. Enqueue git clones for git sources
           git_sources = gemfile.sources.select { |s| s.is_a?(Source::Git) }
           git_sources.each do |source|
             scheduler.enqueue(:git_clone, source.uri,
-                              -> { clone_git_source(source, cache) })
+                              -> { bundle.send(:clone_git_source, source, cache) })
           end
 
           _t = _tmark("enqueue_fetches", _t)
@@ -240,123 +243,6 @@ module Scint
 
       private
 
-      # --- Spec adjustment ---
-
-      # Post-resolution pass: remove bundler (we replace it) and inject scint.
-      # This ensures `require "bundler/setup"` loads our shim, and scint
-      # appears in the gem list just like bundler does for stock bundler.
-      def adjust_meta_gems(resolved)
-        resolved = resolved.reject { |s| s.name == "bundler" || s.name == "scint" }
-
-        scint_spec = ResolvedSpec.new(
-          name: "scint",
-          version: VERSION,
-          platform: "ruby",
-          dependencies: [],
-          source: "scint (built-in)",
-          has_extensions: false,
-          remote_uri: nil,
-          checksum: nil,
-        )
-        resolved.unshift(scint_spec)
-
-        resolved
-      end
-
-      def dedupe_resolved_specs(resolved)
-        seen = {}
-        resolved.each do |spec|
-          key = SpecUtils.full_key(spec)
-          seen[key] ||= spec
-        end
-        seen.values
-      end
-
-      # Determine which gem names should be excluded based on group settings.
-      # A gem is excluded if ALL of its group memberships are in excluded groups.
-      # Gems appearing in any non-excluded group are kept.
-      def excluded_gem_names(gemfile, resolved: nil)
-        excluded_groups = compute_excluded_groups(gemfile)
-        return Set.new if excluded_groups.empty?
-
-        # Build map: gem_name => set of all groups it appears in (across all declarations)
-        gem_groups = Hash.new { |h, k| h[k] = Set.new }
-        gemfile.dependencies.each do |dep|
-          dep.groups.each { |g| gem_groups[dep.name] << g }
-        end
-
-        # A gem is directly excluded if ALL its groups are excluded
-        directly_excluded = Set.new
-        gem_groups.each do |name, groups|
-          directly_excluded << name if groups.subset?(excluded_groups)
-        end
-
-        # If we have resolved specs, also exclude transitive-only deps
-        if resolved && directly_excluded.any?
-          exclude_transitive_deps(directly_excluded, resolved, gem_groups)
-        else
-          directly_excluded
-        end
-      end
-
-      # Filter resolved specs, removing gems that belong only to excluded groups.
-      def filter_excluded_gems(resolved, gemfile)
-        excluded = excluded_gem_names(gemfile, resolved: resolved)
-        return resolved if excluded.empty?
-
-        resolved.reject { |spec| excluded.include?(spec.name) }
-      end
-
-      private
-
-      def compute_excluded_groups(gemfile)
-        optional = Set.new(Array(gemfile.optional_groups))
-        without = Set.new(Array(@without_groups))
-        with = Set.new(Array(@with_groups))
-
-        # Optional groups are excluded by default unless explicitly included via --with
-        excluded = optional - with
-        # --without adds more groups to exclude
-        excluded.merge(without)
-        excluded
-      end
-
-      # Walk the dependency graph to find transitive deps that are ONLY
-      # reachable through excluded gems. Shared deps are kept.
-      def exclude_transitive_deps(directly_excluded, resolved, gem_groups)
-        # Build dependency graph: name => [dep_names]
-        dep_graph = {}
-        resolved.each do |spec|
-          dep_names = Array(spec.dependencies).filter_map do |dep|
-            if dep.is_a?(Hash)
-              dep[:name] || dep["name"]
-            elsif dep.respond_to?(:name)
-              dep.name
-            end
-          end
-          dep_graph[spec.name] = dep_names
-        end
-
-        all_names = Set.new(resolved.map(&:name))
-
-        # Start from Gemfile deps that are NOT excluded, then walk transitive deps
-        included_roots = gem_groups.keys.reject { |n| directly_excluded.include?(n) }
-
-        # BFS from included roots to find all reachable gems
-        reachable = Set.new
-        queue = included_roots.dup
-        while (name = queue.shift)
-          next if reachable.include?(name)
-          reachable << name
-          (dep_graph[name] || []).each { |dep| queue << dep }
-        end
-
-        # Everything not reachable from included roots is excluded
-        all_names - reachable
-      end
-
-      public
-
       # Install scint into the bundle by copying our own lib tree.
       # No download needed — we know exactly where we are.
       def install_builtin_gem(entry, bundle_path)
@@ -390,30 +276,9 @@ module Scint
         end
       end
 
-      # --- Phase implementations ---
-
-      def fetch_index(source, cache)
-        return unless source.respond_to?(:remotes)
-        # Compact index fetch is handled by the index client;
-        # we just trigger it here so the data is cached.
-        source.remotes.each do |remote|
-          cache.ensure_dir(cache.index_path(source))
-        end
-      end
-
-      def clone_git_source(source, cache)
-        return unless source.respond_to?(:uri)
-        git_dir = cache.git_path(source.uri)
-        if Dir.exist?(git_dir)
-          result = fetch_git_repo(git_dir)
-          return unless result == :reclone
-        end
-
-        clone_git_repo(source.uri, git_dir)
-      end
+      # --- Delegated to Bundle (resolution + helpers) ---
 
       def resolve(gemfile, lockfile, cache)
-        # If lockfile is up-to-date, use its specs directly
         if lockfile &&
            lockfile_current?(gemfile, lockfile) &&
            lockfile_dependency_graph_valid?(lockfile) &&
@@ -421,433 +286,90 @@ module Scint
           return lockfile_to_resolved(lockfile)
         end
 
-        # Collect all unique rubygems source URIs
-        default_uri = gemfile.sources.first&.dig(:uri) || "https://rubygems.org"
-        all_uris = Set.new([default_uri])
-        gemfile.sources.each do |src|
-          all_uris << src[:uri] if src[:type] == :rubygems && src[:uri]
-        end
-
-        # Also collect inline source: options from dependencies
-        gemfile.dependencies.each do |dep|
-          if dep.source_options[:source]
-            all_uris << dep.source_options[:source]
-          end
-        end
-
-        # Create one Index::Client per unique source URI
-        clients = {}
-        all_uris.each do |uri|
-          clients[uri] = Index::Client.new(uri, credentials: @credentials)
-        end
-        default_client = clients[default_uri]
-
-        # Build source_map: gem_name => source_uri for gems with explicit sources
-        source_map = {}
-        gemfile.dependencies.each do |dep|
-          src = dep.source_options[:source]
-          source_map[dep.name] = src if src
-        end
-
-        # Build path_gems: gem_name => { version:, dependencies:, source: }
-        # for gems with path: or git: sources (skip compact index for these)
-        path_gems = {}
-        git_source_metadata_cache = {}
-        gemfile.dependencies.each do |dep|
-          opts = dep.source_options
-          next unless opts[:path] || opts[:git]
-
-          version = "0"
-          deps = []
-
-          # Try to read version and deps from gemspec if it's a path gem
-          if opts[:path]
-            gemspec = find_gemspec(opts[:path], dep.name, glob: opts[:glob])
-            if gemspec
-              version = gemspec.version.to_s
-              deps = gemspec.dependencies
-                .select { |d| d.type == :runtime }
-                .map do |d|
-                  requirement_parts = d.requirement.requirements.map { |op, req_version| "#{op} #{req_version}" }
-                  [d.name, requirement_parts]
-                end
-            end
-          end
-
-          # For git gems, read version and dependencies from the available revision when possible.
-          if opts[:git]
-            git_source = find_matching_git_source(Array(lockfile&.sources), opts) || find_matching_git_source(gemfile.sources, opts)
-            revision_hint = git_source&.revision || git_source&.ref || opts[:ref] || opts[:branch] || opts[:tag] || "HEAD"
-            git_repo = cache&.git_path(opts[:git])
-            if git_repo && Dir.exist?(git_repo)
-              result = fetch_git_repo(git_repo)
-              clone_git_repo(opts[:git], git_repo) if result == :reclone
-            elsif git_repo
-              clone_git_repo(opts[:git], git_repo)
-            end
-            if git_repo && Dir.exist?(git_repo)
-              begin
-                resolved_revision = resolve_git_revision(git_repo, revision_hint)
-                cache_key = "#{opts[:git]}@#{resolved_revision}"
-                git_metadata = git_source_metadata_cache[cache_key]
-                unless git_metadata
-                  git_metadata = build_git_path_gems_for_revision(
-                    git_repo,
-                    resolved_revision,
-                    glob: opts[:glob],
-                    source_desc: opts[:git],
-                  )
-                  git_source_metadata_cache[cache_key] = git_metadata
-                end
-                path_gems.merge!(git_metadata)
-                current = git_metadata[dep.name]
-                if current
-                  version = current[:version]
-                  deps = current[:dependencies]
-                end
-              rescue StandardError
-                # Fall back to lockfile version below.
-              end
-            end
-
-            if lockfile && version == "0"
-              locked_spec = lockfile.specs.find { |s| s[:name] == dep.name }
-              version = locked_spec[:version] if locked_spec
-            end
-          end
-
-          source_desc = opts[:path] || opts[:git] || "local"
-          path_gems[dep.name] = { version: version, dependencies: deps, source: source_desc }
-        end
-
-        locked = {}
-        if lockfile
-          lockfile.specs.each { |s| locked[s[:name]] = s[:version] }
-        end
-
-        provider = Resolver::Provider.new(
-          default_client,
-          clients: clients,
-          source_map: source_map,
-          path_gems: path_gems,
-          locked_specs: locked,
-        )
-        resolver = Resolver::Resolver.new(
-          provider: provider,
-          dependencies: gemfile.dependencies,
-          locked_specs: locked,
-        )
-        resolver.resolve
+        bundle.send(:run_full_resolve, gemfile, lockfile, cache)
       end
 
-      def find_gemspec(path, gem_name, glob: nil)
-        return nil unless Dir.exist?(path)
-
-        glob_pattern = glob || Source::Path::DEFAULT_GLOB
-        # Look for exact match first, then any gemspec
-        candidates = [
-          File.join(path, "#{gem_name}.gemspec"),
-          *Dir.glob(File.join(path, glob_pattern)),
-          *Dir.glob(File.join(path, "*.gemspec")),
-        ].uniq
-
-        candidates.each do |gs|
-          next unless File.exist?(gs)
-          begin
-            spec = SpecUtils.load_gemspec(gs, isolate: true)
-            return spec if spec
-          rescue SystemExit, StandardError
-            nil
-          end
-        end
-        nil
+      def adjust_meta_gems(resolved)
+        bundle.send(:adjust_meta_gems, resolved)
       end
 
-      def find_git_gemspec(git_repo, revision, gem_name, glob: nil)
-        gemspec_paths = gemspec_paths_in_git_revision(git_repo, revision)
-        return nil if gemspec_paths.empty?
-
-        path = gemspec_paths[gem_name.to_s]
-        if path.nil? && glob
-          glob_regex = git_glob_to_regex(glob)
-          path = gemspec_paths.values.find { |candidate| candidate.match?(glob_regex) }
-        end
-        path ||= gemspec_paths.values.first
-        return nil if path.nil?
-
-        load_git_gemspec(git_repo, revision, path)
-      rescue StandardError
-        nil
+      def dedupe_resolved_specs(resolved)
+        bundle.send(:dedupe_resolved_specs, resolved)
       end
 
-      def build_git_path_gems_for_revision(git_repo, revision, glob: nil, source_desc: nil)
-        gemspec_paths = gemspec_paths_in_git_revision(git_repo, revision)
-        return {} if gemspec_paths.empty?
-
-        glob_regex = glob ? git_glob_to_regex(glob) : nil
-        data = {}
-
-        with_git_checkout(git_repo, revision) do |checkout_dir|
-          gemspec_paths.each_value do |path|
-            next if glob_regex && !path.match?(glob_regex)
-
-            gemspec = load_gemspec_from_checkout(checkout_dir, path)
-            next unless gemspec
-
-            deps = gemspec.dependencies
-              .select { |d| d.type == :runtime }
-              .map do |d|
-                requirement_parts = d.requirement.requirements.map { |op, req_version| "#{op} #{req_version}" }
-                [d.name, requirement_parts]
-              end
-
-            data[gemspec.name] = {
-              version: gemspec.version.to_s,
-              dependencies: deps,
-              source: source_desc || "local",
-            }
-          end
-        end
-
-        data
-      rescue StandardError
-        {}
+      def filter_excluded_gems(resolved, gemfile)
+        bundle.send(:filter_excluded_gems, resolved, gemfile)
       end
 
-      def git_glob_to_regex(glob)
-        pattern = glob.to_s
-        escaped = Regexp.escape(pattern)
-        escaped = escaped.gsub("\\*\\*", ".*")
-        escaped = escaped.gsub("\\*", "[^/]*")
-        escaped = escaped.gsub("\\?", ".")
-        /\A#{escaped}\z/
+      def excluded_gem_names(gemfile, resolved: nil)
+        bundle.excluded_gem_names(gemfile, resolved: resolved)
       end
 
       def lockfile_current?(gemfile, lockfile)
-        return false unless lockfile
-
-        locked_names = Set.new(lockfile.specs.map { |s| s[:name] })
-        gemfile.dependencies.all? do |dep|
-          next true unless dependency_relevant_for_local_platform?(dep)
-
-          locked_names.include?(dep.name)
-        end
+        bundle.send(:lockfile_current?, gemfile, lockfile)
       end
 
       def lockfile_dependency_graph_valid?(lockfile)
-        return false unless lockfile
-
-        specs = Array(lockfile.specs)
-        return false if specs.empty?
-
-        by_name = Hash.new { |h, k| h[k] = [] }
-        specs.each { |spec| by_name[spec[:name].to_s] << spec }
-
-        specs.all? do |spec|
-          Array(spec[:dependencies]).all? do |dep|
-            dep_name = dep[:name].to_s
-            # Lockfiles generally do not include a concrete "bundler" spec
-            # entry even though many gemspecs declare a runtime dependency
-            # on bundler. Treat it as externally satisfied.
-            next true if dep_name == "bundler"
-
-            dep_reqs = Array(dep[:version_reqs])
-            req = Gem::Requirement.new(dep_reqs.empty? ? [">= 0"] : dep_reqs)
-            by_name[dep_name].any? { |candidate| req.satisfied_by?(Gem::Version.new(candidate[:version].to_s)) }
-          end
-        end
-      rescue StandardError
-        false
-      end
-
-      def dependency_relevant_for_local_platform?(dependency)
-        platforms = Array(dependency.platforms).map(&:to_sym)
-        return true if platforms.empty?
-
-        platforms.any? { |platform| gemfile_platform_matches_local?(platform) }
-      end
-
-      def gemfile_platform_matches_local?(platform)
-        case platform
-        when :ruby
-          true
-        when :mri
-          RUBY_ENGINE == "ruby"
-        when :jruby
-          RUBY_ENGINE == "jruby"
-        when :truffleruby
-          RUBY_ENGINE == "truffleruby"
-        when :rbx
-          RUBY_ENGINE == "rbx"
-        when :windows, :mswin, :mswin64, :mingw, :x64_mingw, :x86_mingw, :x64_mingw_ucrt
-          Platform.windows?
-        when :linux
-          Platform.linux?
-        when :darwin, :macos
-          Platform.macos?
-        else
-          platform_name = platform.to_s.tr("_", "-")
-          spec_platform = Gem::Platform.new(platform_name)
-          spec_platform === Platform.local_platform
-        end
-      rescue StandardError
-        false
-      end
-
-      def lockfile_to_resolved(lockfile)
-        local_plat = Platform.local_platform
-
-        # Pick one best platform variant per gem+version from lockfile specs.
-        by_gem = Hash.new { |h, k| h[k] = [] }
-        lockfile.specs.each { |ls| by_gem[[ls[:name], ls[:version]]] << ls }
-
-        resolved = by_gem.map do |(_name, _version), specs|
-          best = pick_best_platform_spec(specs, local_plat)
-
-          source = best[:source]
-          source_value =
-            if source.is_a?(Source::Rubygems)
-              source.uri.to_s
-            else
-              source
-            end
-
-          ResolvedSpec.new(
-            name: best[:name],
-            version: best[:version],
-            platform: best[:platform],
-            dependencies: best[:dependencies],
-            source: source_value,
-            has_extensions: false,
-            remote_uri: nil,
-            checksum: best[:checksum],
-          )
-        end
-
-        resolved
+        bundle.send(:lockfile_dependency_graph_valid?, lockfile)
       end
 
       def lockfile_git_source_mapping_valid?(lockfile, cache)
-        return true unless lockfile && cache
+        bundle.send(:lockfile_git_source_mapping_valid?, lockfile, cache)
+      end
 
-        git_specs = Array(lockfile.specs).select { |s| s[:source].is_a?(Source::Git) }
-        return true if git_specs.empty?
+      def lockfile_to_resolved(lockfile)
+        bundle.send(:lockfile_to_resolved, lockfile)
+      end
 
-        by_source = git_specs.group_by { |s| s[:source] }
-        by_source.each do |source, specs|
-          uri, revision = git_source_ref(source)
-          git_repo = cache.git_path(uri)
-          # Do not invalidate an otherwise-usable lockfile just because this
-          # git source has not been cached yet in the current machine/session.
-          next unless Dir.exist?(git_repo)
+      def find_gemspec(path, gem_name, glob: nil)
+        bundle.send(:find_gemspec, path, gem_name, glob: glob)
+      end
 
-          resolved_revision = begin
-            resolve_git_revision(git_repo, revision)
-          rescue InstallError
-            nil
-          end
-          return false unless resolved_revision
+      def find_git_gemspec(git_repo, revision, gem_name, glob: nil)
+        bundle.send(:find_git_gemspec, git_repo, revision, gem_name, glob: glob)
+      end
 
-          gemspec_paths = gemspec_paths_in_git_revision(git_repo, resolved_revision)
-          gemspec_names = gemspec_paths.keys.to_set
-          return false if gemspec_names.empty?
-
-          specs.each do |spec|
-            return false unless gemspec_names.include?(spec[:name].to_s)
-          end
-        end
-
-        true
+      def build_git_path_gems_for_revision(git_repo, revision, glob: nil, source_desc: nil)
+        bundle.send(:build_git_path_gems_for_revision, git_repo, revision, glob: glob, source_desc: source_desc)
       end
 
       def gemspec_paths_in_git_revision(git_repo, revision)
-        out, _err, status = git_capture3(
-          "-C", git_repo,
-          "ls-tree",
-          "-r",
-          "--name-only",
-          revision,
-        )
-        return {} unless status.success?
-
-        paths = {}
-        out.each_line do |line|
-          path = line.strip
-          next unless path.end_with?(".gemspec")
-          name = File.basename(path, ".gemspec")
-          paths[name] ||= path
-        end
-        paths
-      rescue StandardError
-        {}
+        bundle.send(:gemspec_paths_in_git_revision, git_repo, revision)
       end
 
-      def runtime_dependencies_for_git_gemspec(git_repo, revision, gemspec_path)
-        spec = load_git_gemspec(git_repo, revision, gemspec_path)
-        return nil unless spec
-
-        spec.dependencies.select { |dep| dep.type == :runtime }
-      rescue StandardError
-        nil
-      end
-
-      def load_git_gemspec(git_repo, revision, gemspec_path)
-        return nil if gemspec_path.to_s.empty?
-
-        with_git_checkout(git_repo, revision) do |checkout_dir|
-          load_gemspec_from_checkout(checkout_dir, gemspec_path)
-        end
-      rescue StandardError
-        nil
-      end
-
-      def with_git_checkout(git_repo, revision)
-        _out, _err, status = git_capture3(
-          "-C", git_repo,
-          "checkout", "-f", revision,
-        )
-        return nil unless status.success?
-
-        yield git_repo if block_given?
+      def with_git_checkout(git_repo, revision, &block)
+        bundle.send(:with_git_checkout, git_repo, revision, &block)
       end
 
       def load_gemspec_from_checkout(checkout_dir, gemspec_path)
-        absolute_gemspec = File.join(checkout_dir, gemspec_path)
-        return nil unless File.exist?(absolute_gemspec)
-
-        SpecUtils.load_gemspec(absolute_gemspec, isolate: true)
-      rescue SystemExit, StandardError
-        nil
+        bundle.send(:load_gemspec_from_checkout, checkout_dir, gemspec_path)
       end
 
-      # Preference: exact platform match > compatible match > ruby > first.
+      def load_git_gemspec(git_repo, revision, gemspec_path)
+        bundle.send(:load_git_gemspec, git_repo, revision, gemspec_path)
+      end
+
       def pick_best_platform_spec(specs, local_plat)
-        return specs.first if specs.size == 1
-
-        best = nil
-        best_score = -2
-
-        specs.each do |ls|
-          platform = ls[:platform] || "ruby"
-          if platform == "ruby"
-            score = 0
-          else
-            spec_plat = Gem::Platform.new(platform)
-            if spec_plat === local_plat
-              score = spec_plat.to_s == local_plat.to_s ? 2 : 1
-            else
-              score = -1
-            end
-          end
-
-          if score > best_score
-            best = ls
-            best_score = score
-          end
-        end
-
-        best
+        bundle.send(:pick_best_platform_spec, specs, local_plat)
       end
+
+      def dependency_relevant_for_local_platform?(dep)
+        bundle.send(:dependency_relevant_for_local_platform?, dep)
+      end
+
+      def gemfile_platform_matches_local?(platform)
+        bundle.send(:gemfile_platform_matches_local?, platform)
+      end
+
+      def fetch_index(source, cache)
+        bundle.send(:fetch_index, source, cache)
+      end
+
+      def clone_git_source(source, cache)
+        bundle.send(:clone_git_source, source, cache)
+      end
+
+      # --- Phase implementations ---
 
       # Lockfiles can carry only the ruby variant for a gem version.
       # Re-check compact index for the same locked version and upgrade to the
@@ -1091,16 +613,11 @@ module Scint
       end
 
       def git_source_ref(source)
-        if source.is_a?(Source::Git)
-          revision = source.revision || source.ref || source.branch || source.tag || "HEAD"
-          return [source.uri.to_s, revision.to_s]
-        end
-
-        [source.to_s, "HEAD"]
+        bundle.git_source_ref(source)
       end
 
       def git_source_submodules?(source)
-        source.respond_to?(:submodules) && !!source.submodules
+        bundle.git_source_submodules?(source)
       end
 
       def copy_gemspec_root_files(repo_root, gem_root, dest_root, spec)
@@ -1177,55 +694,23 @@ module Scint
       end
 
       def git_mutex_for(repo_path)
-        @git_mutexes_lock ||= Thread::Mutex.new
-        @git_mutexes_lock.synchronize do
-          @git_mutexes ||= {}
-          @git_mutexes[repo_path] ||= Thread::Mutex.new
-        end
+        bundle.git_mutex_for(repo_path)
       end
 
       def clone_git_repo(uri, git_repo)
-        FS.mkdir_p(File.dirname(git_repo))
-        _out, err, status = git_capture3("clone", uri.to_s, git_repo)
-        unless status.success?
-          raise InstallError, "Git clone failed for #{uri}: #{err.to_s.strip}"
-        end
+        bundle.clone_git_repo(uri, git_repo)
       end
 
       def fetch_git_repo(git_repo)
-        # Detect stale bare repos left by older scint versions and nuke them
-        # so the caller falls through to a fresh clone.
-        if Dir.exist?(git_repo) && !File.exist?(File.join(git_repo, ".git"))
-          FileUtils.rm_rf(git_repo)
-          return :reclone
-        end
-
-        _out, err, status = git_capture3(
-          "-C", git_repo,
-          "fetch",
-          "--prune",
-          "--force",
-          "origin",
-        )
-        unless status.success?
-          raise InstallError, "Git fetch failed for #{git_repo}: #{err.to_s.strip}"
-        end
+        bundle.fetch_git_repo(git_repo)
       end
 
       def resolve_git_revision(git_repo, revision)
-        # Try origin/<revision> first so we pick up fetched branch tips.
-        out, _err, status = git_capture3("-C", git_repo, "rev-parse", "origin/#{revision}^{commit}")
-        return out.strip if status.success?
-
-        out, err, status = git_capture3("-C", git_repo, "rev-parse", "#{revision}^{commit}")
-        unless status.success?
-          raise InstallError, "Unable to resolve git revision #{revision.inspect} in #{git_repo}: #{err.to_s.strip}"
-        end
-        out.strip
+        bundle.resolve_git_revision(git_repo, revision)
       end
 
       def git_capture3(*args)
-        Open3.capture3("git", "-c", "core.fsmonitor=false", *args)
+        bundle.git_capture3(*args)
       end
 
       def compile_slots_for(worker_count)
