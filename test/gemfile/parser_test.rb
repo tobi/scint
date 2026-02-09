@@ -435,6 +435,30 @@ class GemfileParserTest < Minitest::Test
     end
   end
 
+  def test_exact_u2_debug_gem_declaration
+    with_tmpdir do |dir|
+      gemfile = File.join(dir, "Gemfile")
+      File.write(gemfile, <<~RUBY)
+        source "https://rubygems.org"
+
+        group :development, :test do
+          gem "debug", "~> 1.7", platform: :mri, require: "debug/prelude", github: "Shopify/debug", branch: "issues-workaround"
+        end
+      RUBY
+
+      result = Scint::Gemfile::Parser.parse(gemfile)
+      dep = result.dependencies.find { |d| d.name == "debug" }
+      refute_nil dep
+
+      assert_equal ["~> 1.7"], dep.version_reqs
+      assert_equal [:development, :test], dep.groups
+      assert_equal [:mri], dep.platforms
+      assert_equal ["debug/prelude"], dep.require_paths
+      assert_equal "https://github.com/Shopify/debug.git", dep.source_options[:git]
+      assert_equal "issues-workaround", dep.source_options[:branch]
+    end
+  end
+
   def test_install_if_with_truthy_condition_evaluates_block
     with_tmpdir do |dir|
       gemfile = File.join(dir, "Gemfile")

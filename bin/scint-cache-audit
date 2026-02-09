@@ -1,0 +1,188 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# scint-cache-audit — Require-probe every cached gem in a single process.
+#
+# Sets up a unified $LOAD_PATH from all cached gems, topologically sorts
+# them by declared dependencies, then requires each entry feature in
+# sequence. Each gem benefits from everything already loaded before it.
+
+require "optparse"
+require "rubygems"
+
+$LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
+require "scint"
+require "scint/cache/layout"
+require "scint/platform"
+
+EXTENSIONS = %w[.bundle .so .dll .dylib].freeze
+
+def load_spec(spec_path)
+  data = File.binread(spec_path)
+  # Try marshal first, fall back to eval as gemspec text
+  if data[0..1].bytes == [4, 8] # marshal magic
+    Marshal.load(data)
+  else
+    eval(data.force_encoding("UTF-8"), binding, spec_path) # rubocop:disable Security/Eval
+  end
+rescue StandardError
+  nil
+end
+
+def discover_entry_feature(spec, gem_dir)
+  require_paths = Array(spec.require_paths).map { |rp| File.join(gem_dir, rp) }
+
+  candidates = []
+  require_paths.each do |root|
+    next unless Dir.exist?(root)
+    Dir.glob(File.join(root, "**", "*")).each do |file|
+      next unless File.file?(file)
+      next unless file.end_with?(".rb", ".so", ".bundle", ".dll", ".dylib")
+      rel = file.delete_prefix("#{root}/")
+      next if rel.empty?
+      candidates << rel.sub(/\.(rb|so|bundle|dll|dylib)\z/, "")
+    end
+  end
+  candidates.uniq!
+  return nil if candidates.empty?
+
+  normalize = ->(v) { v.to_s.downcase.gsub(/[^a-z0-9]/, "") }
+  named = [spec.name, spec.name.tr("-", "/"), spec.name.tr("-", "_")].uniq
+  named_norms = named.map { |n| normalize.call(n) }.uniq
+  candidates.find { |f| named_norms.include?(normalize.call(f)) }
+end
+
+# Topological sort by declared dependencies (Kahn's algorithm).
+# Gems with unresolvable deps go last.
+def topo_sort(gems)
+  by_name = {}
+  gems.each { |g| by_name[g[:spec].name] = g }
+
+  # in-degree counts
+  in_degree = Hash.new(0)
+  gems.each { |g| in_degree[g[:spec].name] ||= 0 }
+  gems.each do |g|
+    g[:spec].runtime_dependencies.each do |dep|
+      in_degree[dep.name] += 1 if by_name[dep.name]
+    end
+  end
+
+  # seed queue with gems that have no in-cache deps
+  queue = gems.select { |g| in_degree[g[:spec].name] == 0 }.sort_by { |g| g[:spec].name }
+  sorted = []
+
+  until queue.empty?
+    g = queue.shift
+    sorted << g
+    # "remove" edges: for each gem that depends on g, decrement
+    gems.each do |other|
+      next if other == g
+      if other[:spec].runtime_dependencies.any? { |d| d.name == g[:spec].name }
+        in_degree[other[:spec].name] -= 1
+        if in_degree[other[:spec].name] == 0
+          queue << other
+          queue.sort_by! { |q| q[:spec].name }
+        end
+      end
+    end
+  end
+
+  # append any remaining (cycles) alphabetically
+  remaining = gems - sorted
+  sorted + remaining.sort_by { |g| g[:spec].name }
+end
+
+# ---------------------------------------------------------------------------
+
+options = { cache_root: nil, abi: Scint::Platform.abi_key, verbose: false, match: nil }
+
+OptionParser.new do |opts|
+  opts.banner = "Usage: bin/scint-cache-audit [OPTIONS]"
+  opts.on("--cache-root PATH", "Override cache root") { |p| options[:cache_root] = p }
+  opts.on("--abi ABI", "ABI key (default: current)") { |a| options[:abi] = a }
+  opts.on("--verbose", "Show passing gems too") { options[:verbose] = true }
+  opts.on("--match PATTERN", "Only audit gems matching PATTERN") do |p|
+    options[:match] = Regexp.new(p)
+  rescue RegexpError => e
+    warn "invalid --match: #{e.message}"; exit 2
+  end
+end.parse!(ARGV)
+
+layout = Scint::Cache::Layout.new(root: options[:cache_root])
+cache_abi_dir = layout.cached_abi_dir(options[:abi])
+
+unless Dir.exist?(cache_abi_dir)
+  warn "cached ABI directory not found: #{cache_abi_dir}"
+  exit 2
+end
+
+# Discover all cached gems
+gems = Dir.children(cache_abi_dir).sort.filter_map do |entry|
+  next if entry.end_with?(".spec.marshal", ".manifest")
+  gem_dir = File.join(cache_abi_dir, entry)
+  next unless File.directory?(gem_dir)
+
+  spec_path = "#{gem_dir}.spec.marshal"
+  next unless File.file?(spec_path)
+
+  spec = load_spec(spec_path)
+  next unless spec.is_a?(Gem::Specification)
+
+  { name: entry, gem_dir: gem_dir, spec: spec }
+end
+
+gems.select! { |g| g[:name].match?(options[:match]) } if options[:match]
+
+if gems.empty?
+  puts "No cached gems found in #{cache_abi_dir}"
+  exit 0
+end
+
+# Add all require paths to $LOAD_PATH
+load_path_additions = gems.flat_map do |g|
+  Array(g[:spec].require_paths).filter_map do |rp|
+    path = File.join(g[:gem_dir], rp)
+    path if Dir.exist?(path)
+  end
+end.uniq
+
+$LOAD_PATH.unshift(*load_path_additions)
+
+# Sort by dependencies so each gem's deps are loaded first
+sorted = topo_sort(gems)
+
+puts "Cache root: #{layout.root}"
+puts "ABI:        #{options[:abi]}"
+puts "Gems:       #{sorted.size}"
+puts "Load paths: #{load_path_additions.size}"
+puts
+
+ok = 0
+failed = 0
+no_entry = 0
+failures = []
+
+sorted.each do |g|
+  feature = discover_entry_feature(g[:spec], g[:gem_dir])
+  unless feature
+    no_entry += 1
+    puts "[SKIP] #{g[:name]}  (no entry feature)" if options[:verbose]
+    next
+  end
+
+  begin
+    require feature
+    ok += 1
+    puts "[OK]   #{g[:name]}  require #{feature.inspect}" if options[:verbose]
+  rescue Exception => e
+    failed += 1
+    msg = "#{e.class}: #{e.message.lines.first&.chomp}"
+    failures << { name: g[:name], feature: feature, error: msg }
+    puts "[FAIL] #{g[:name]}  require #{feature.inspect}"
+    puts "       #{msg}"
+  end
+end
+
+puts
+puts "Summary: #{ok} ok, #{failed} failed, #{no_entry} skipped (no entry feature), #{sorted.size} total"
+exit(failed.zero? ? 0 : 1)

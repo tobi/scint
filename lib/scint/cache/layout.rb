@@ -150,6 +150,11 @@ module Scint
       private
 
       def default_root
+        return Scint.cache_root if Scint.respond_to?(:cache_root)
+
+        explicit = ENV["SCINT_CACHE"]
+        return File.expand_path(explicit) unless explicit.nil? || explicit.empty?
+
         base = ENV["XDG_CACHE_HOME"] || File.join(Dir.home, ".cache")
         File.join(base, "scint")
       end

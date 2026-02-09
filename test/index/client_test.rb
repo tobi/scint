@@ -107,6 +107,23 @@ class IndexClientTest < Minitest::Test
     client.close if client
   end
 
+  def test_default_cache_dir_prefers_scint_cache_over_xdg
+    with_tmpdir do |dir|
+      scint_cache = File.join(dir, "custom-scint")
+      xdg_cache = File.join(dir, "xdg-cache")
+      with_env("SCINT_CACHE", scint_cache) do
+        with_env("XDG_CACHE_HOME", xdg_cache) do
+          Scint.cache_root = nil
+          client = Scint::Index::Client.new("https://example.test")
+          assert_equal File.join(scint_cache, "index", "example.test"), client.instance_variable_get(:@cache).directory
+        ensure
+          client.close if client
+          Scint.cache_root = nil
+        end
+      end
+    end
+  end
+
   def test_extract_etag_handles_weak_and_quoted_values
     client = Scint::Index::Client.new("https://example.test")
     response = http_response(Net::HTTPOK, headers: { "ETag" => 'W/"abc123"' })

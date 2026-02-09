@@ -67,8 +67,30 @@ class ScintTest < Minitest::Test
   def test_cache_root_uses_xdg_cache_home
     with_tmpdir do |dir|
       with_env("XDG_CACHE_HOME", dir) do
+        with_env("SCINT_CACHE", nil) do
+          Scint.cache_root = nil
+          assert_equal File.join(dir, "scint"), Scint.cache_root
+        end
+      end
+    end
+  end
+
+  def test_cache_root_prefers_scint_cache_over_xdg_cache_home
+    with_tmpdir do |dir|
+      with_env("SCINT_CACHE", File.join(dir, "custom-scint")) do
+        with_env("XDG_CACHE_HOME", File.join(dir, "xdg-cache")) do
+          Scint.cache_root = nil
+          assert_equal File.join(dir, "custom-scint"), Scint.cache_root
+        end
+      end
+    end
+  end
+
+  def test_cache_root_uses_scint_cache_when_set
+    with_tmpdir do |dir|
+      with_env("SCINT_CACHE", File.join(dir, "my-scint-cache")) do
         Scint.cache_root = nil
-        assert_equal File.join(dir, "scint"), Scint.cache_root
+        assert_equal File.join(dir, "my-scint-cache"), Scint.cache_root
       end
     end
   end
@@ -79,10 +101,12 @@ class ScintTest < Minitest::Test
   end
 
   def test_cache_root_defaults_to_home_cache_when_xdg_unset
-    with_env("XDG_CACHE_HOME", nil) do
-      Scint.cache_root = nil
-      expected = File.join(Dir.home, ".cache", "scint")
-      assert_equal expected, Scint.cache_root
+    with_env("SCINT_CACHE", nil) do
+      with_env("XDG_CACHE_HOME", nil) do
+        Scint.cache_root = nil
+        expected = File.join(Dir.home, ".cache", "scint")
+        assert_equal expected, Scint.cache_root
+      end
     end
   end
 

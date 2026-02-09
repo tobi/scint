@@ -5,6 +5,14 @@ require "scint/cli/cache"
 require "scint/cache/prewarm"
 
 class CLICacheTest < Minitest::Test
+  def setup
+    @saved_cache_root = Scint.cache_root
+  end
+
+  def teardown
+    Scint.cache_root = @saved_cache_root
+  end
+
   def with_captured_io
     old_out = $stdout
     old_err = $stderr
@@ -22,6 +30,7 @@ class CLICacheTest < Minitest::Test
   def test_dir_prints_cache_path
     with_tmpdir do |dir|
       with_env("XDG_CACHE_HOME", dir) do
+        Scint.cache_root = nil
         out, err = with_captured_io do
           status = Scint::CLI::Cache.new(["dir"]).run
           assert_equal 0, status
@@ -36,6 +45,7 @@ class CLICacheTest < Minitest::Test
   def test_size_prints_empty_message_when_cache_missing
     with_tmpdir do |dir|
       with_env("XDG_CACHE_HOME", dir) do
+        Scint.cache_root = nil
         out, _err = with_captured_io do
           status = Scint::CLI::Cache.new(["size"]).run
           assert_equal 0, status
@@ -49,6 +59,7 @@ class CLICacheTest < Minitest::Test
   def test_size_shows_subdir_breakdown
     with_tmpdir do |dir|
       with_env("XDG_CACHE_HOME", dir) do
+        Scint.cache_root = nil
         root = File.join(dir, "scint")
         inbound = File.join(root, "inbound")
 
@@ -69,6 +80,7 @@ class CLICacheTest < Minitest::Test
   def test_clear_removes_entries
     with_tmpdir do |dir|
       with_env("XDG_CACHE_HOME", dir) do
+        Scint.cache_root = nil
         root = File.join(dir, "scint")
         FileUtils.mkdir_p(File.join(root, "extracted"))
         File.write(File.join(root, "extracted", "x"), "1")
@@ -177,6 +189,7 @@ class CLICacheTest < Minitest::Test
   def test_clean_when_cache_dir_missing
     with_tmpdir do |dir|
       with_env("XDG_CACHE_HOME", dir) do
+        Scint.cache_root = nil
         out, _err = with_captured_io do
           status = Scint::CLI::Cache.new(["clean"]).run
           assert_equal 0, status
@@ -191,6 +204,7 @@ class CLICacheTest < Minitest::Test
   def test_clean_with_package_names_removes_matching
     with_tmpdir do |dir|
       with_env("XDG_CACHE_HOME", dir) do
+        Scint.cache_root = nil
         root = File.join(dir, "scint")
         inbound_gems = File.join(root, "inbound", "gems")
         abi = Scint::Platform.abi_key
@@ -220,6 +234,7 @@ class CLICacheTest < Minitest::Test
   def test_clean_with_package_names_skips_missing_subdirs
     with_tmpdir do |dir|
       with_env("XDG_CACHE_HOME", dir) do
+        Scint.cache_root = nil
         root = File.join(dir, "scint")
         FileUtils.mkdir_p(root)
         # No subdirs at all

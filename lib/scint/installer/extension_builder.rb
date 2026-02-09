@@ -20,6 +20,7 @@ module Scint
       def build(prepared_gem, bundle_path, cache_layout, abi_key: Platform.abi_key, compile_slots: 1, output_tail: nil)
         spec = prepared_gem.spec
         build_ruby_dir = cache_layout.install_ruby_dir
+        source_ruby_dir = Platform.ruby_install_dir(bundle_path)
         src_dir = prepared_gem.extracted_path
 
         marker = build_marker_path(src_dir)
@@ -47,7 +48,17 @@ module Scint
             # source-tree specific.
             ext_build_dir = File.join(build_root, idx.to_s)
             FS.mkdir_p(ext_build_dir)
-            compile_extension(ext_dir, ext_build_dir, install_dir, staged_src_dir, spec, build_ruby_dir, compile_slots, output_tail)
+            compile_extension(
+              ext_dir,
+              ext_build_dir,
+              install_dir,
+              staged_src_dir,
+              spec,
+              build_ruby_dir,
+              compile_slots,
+              output_tail,
+              source_ruby_dir,
+            )
           end
 
           sync_extensions_into_gem(install_dir, src_dir)
@@ -144,9 +155,9 @@ module Scint
         dirs.uniq
       end
 
-      def compile_extension(ext_dir, build_dir, install_dir, gem_dir, spec, build_ruby_dir, compile_slots, output_tail = nil)
+      def compile_extension(ext_dir, build_dir, install_dir, gem_dir, spec, build_ruby_dir, compile_slots, output_tail = nil, source_ruby_dir = nil)
         make_jobs = adaptive_make_jobs(compile_slots)
-        env = build_env(gem_dir, build_ruby_dir, make_jobs)
+        env = build_env(gem_dir, build_ruby_dir, make_jobs, source_ruby_dir: source_ruby_dir)
 
         if File.exist?(File.join(ext_dir, "extconf.rb"))
           compile_extconf(ext_dir, gem_dir, build_dir, install_dir, env, make_jobs, output_tail)
@@ -245,12 +256,14 @@ module Scint
         File.join(gem_dir, BUILD_MARKER)
       end
 
-      def build_env(gem_dir, build_ruby_dir, make_jobs)
+      def build_env(gem_dir, build_ruby_dir, make_jobs, source_ruby_dir: nil)
         ruby_bin = File.join(build_ruby_dir, "bin")
         path = [ruby_bin, ENV["PATH"]].compact.reject(&:empty?).join(File::PATH_SEPARATOR)
+        inherited_gem_paths = ENV.fetch("GEM_PATH", "").split(File::PATH_SEPARATOR)
+        gem_path_entries = [build_ruby_dir, source_ruby_dir, *inherited_gem_paths].compact.reject(&:empty?).uniq
         {
           "GEM_HOME" => build_ruby_dir,
-          "GEM_PATH" => build_ruby_dir,
+          "GEM_PATH" => gem_path_entries.join(File::PATH_SEPARATOR),
           "BUNDLE_PATH" => build_ruby_dir,
           "BUNDLE_GEMFILE" => "",
           "MAKEFLAGS" => "-j#{make_jobs}",
@@ -280,7 +293,7 @@ module Scint
 
         # Stream output line-by-line so the UX gets live compile progress
         # instead of waiting for the entire subprocess to finish.
-        all_output = +""
+        all_output = +"".b
         tail_lines = []
         cmd_label = "$ #{cmd.join(" ")}"
 
@@ -289,8 +302,8 @@ module Scint
           out_err.set_encoding("ASCII-8BIT")
 
           out_err.each_line do |line|
-            stripped = line.rstrip
             all_output << line
+            stripped = sanitize_output(line).rstrip
             next if stripped.empty?
 
             tail_lines << stripped
@@ -303,12 +316,23 @@ module Scint
 
           status = wait_thr.value
           unless status.success?
-            details = all_output.strip
+            details = sanitize_output(all_output).strip
             message = "Command failed (exit #{status.exitstatus}): #{cmd.join(" ")}"
             message = "#{message}\n#{details}" unless details.empty?
             raise ExtensionBuildError, message
           end
         end
+      end
+
+      def sanitize_output(raw)
+        return "" if raw.nil? || raw.empty?
+
+        raw.to_s
+           .dup
+           .force_encoding(Encoding::BINARY)
+           .encode(Encoding::UTF_8, invalid: :replace, undef: :replace, replace: "?")
+      rescue EncodingError
+        raw.to_s.encode(Encoding::UTF_8, invalid: :replace, undef: :replace, replace: "?")
       end
 
       def spec_full_name(spec)
@@ -318,7 +342,8 @@ module Scint
       private_class_method :find_extension_dirs, :compile_extension,
                            :compile_extconf, :compile_cmake, :compile_rake,
                            :find_rake_executable, :link_extensions,
-                           :build_env, :run_cmd, :prebuilt_missing_for_ruby?
+                           :build_env, :run_cmd, :sanitize_output,
+                           :prebuilt_missing_for_ruby?
     end
   end
 end

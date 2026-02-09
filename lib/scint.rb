@@ -15,15 +15,23 @@ module Scint
 
   # XDG-based cache root
   def self.cache_root
-    @cache_root ||= File.join(
-      ENV.fetch("XDG_CACHE_HOME", File.join(Dir.home, ".cache")),
-      "scint"
-    )
+    @cache_root ||= default_cache_root
   end
 
   def self.cache_root=(path)
     @cache_root = path
   end
+
+  def self.default_cache_root
+    explicit = ENV["SCINT_CACHE"]
+    return File.expand_path(explicit) unless explicit.nil? || explicit.empty?
+
+    File.join(
+      ENV.fetch("XDG_CACHE_HOME", File.join(Dir.home, ".cache")),
+      "scint"
+    )
+  end
+  private_class_method :default_cache_root
 
   # Shared data structures used across all modules
   Dependency = Struct.new(

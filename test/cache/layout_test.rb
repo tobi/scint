@@ -4,11 +4,35 @@ require_relative "../test_helper"
 require "scint/cache/layout"
 
 class CacheLayoutTest < Minitest::Test
+  def setup
+    Scint.cache_root = nil if Scint.respond_to?(:cache_root=)
+  end
+
+  def teardown
+    Scint.cache_root = nil if Scint.respond_to?(:cache_root=)
+  end
+
   def test_default_root_uses_xdg_cache_home
     with_tmpdir do |dir|
-      with_env("XDG_CACHE_HOME", dir) do
-        layout = Scint::Cache::Layout.new
-        assert_equal File.join(dir, "scint"), layout.root
+      with_env("SCINT_CACHE", nil) do
+        with_env("XDG_CACHE_HOME", dir) do
+          Scint.cache_root = nil
+          layout = Scint::Cache::Layout.new
+          assert_equal File.join(dir, "scint"), layout.root
+        end
+      end
+    end
+  end
+
+  def test_default_root_uses_scint_cache_when_set
+    with_tmpdir do |dir|
+      cache_root = File.join(dir, "custom-scint-cache")
+      with_env("SCINT_CACHE", cache_root) do
+        with_env("XDG_CACHE_HOME", File.join(dir, "xdg-cache")) do
+          Scint.cache_root = nil
+          layout = Scint::Cache::Layout.new
+          assert_equal cache_root, layout.root
+        end
       end
     end
   end

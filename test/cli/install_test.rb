@@ -183,15 +183,17 @@ class CLIInstallTest < Minitest::Test
       entries << Scint::PlanEntry.new(spec: link_b, action: :build_ext, cached_path: cache.cached_path(link_b), gem_path: nil)
 
       calls = []
-      Scint::FS.stub(:clone_many_trees, lambda { |sources, dst_parent, chunk_size: 64|
-        calls << { sources: sources, dst_parent: dst_parent, chunk_size: chunk_size }
-        2
+      Scint::FS.stub(:bulk_link_gems, lambda { |src_parent, dst_parent, gem_names|
+        calls << { src_parent: src_parent, dst_parent: dst_parent, gem_names: gem_names }
+        gem_names.size
       }) do
         install.send(:bulk_prelink_gem_files, entries, cache, bundle_path)
       end
 
       assert_equal 1, calls.length
-      assert_equal [cache.cached_path(link_a), cache.cached_path(link_b)].sort, calls.first[:sources].sort
+      assert_equal cache.cached_abi_dir, calls.first[:src_parent]
+      expected_names = [cache.full_name(link_a), cache.full_name(link_b)].sort
+      assert_equal expected_names, calls.first[:gem_names].sort
       assert_equal File.join(bundle_path, "ruby", "#{RUBY_VERSION.split(".")[0, 2].join(".")}.0", "gems"), calls.first[:dst_parent]
     end
   end
@@ -283,15 +285,17 @@ class CLIInstallTest < Minitest::Test
     assert_equal 1, limits[:binstub]
   end
 
-  def test_compile_slots_for_caps_at_two_lanes
+  def test_compile_slots_for_scales_with_cpus
     install = Scint::CLI::Install.new([])
+    cpus = Scint::Platform.cpu_count
+    base_slots = [cpus / 8, 2].max
 
+    # With 1 worker, compile slots are clamped to 1
     assert_equal 1, install.send(:compile_slots_for, 1)
-    assert_equal 1, install.send(:compile_slots_for, 2)
-    assert_equal 1, install.send(:compile_slots_for, 3)
-    assert_equal 1, install.send(:compile_slots_for, 6)
-    assert_equal 2, install.send(:compile_slots_for, 7)
-    assert_equal 2, install.send(:compile_slots_for, 20)
+
+    # With enough workers, slots scale up to base_slots (cpus/8, min 2)
+    assert_equal [base_slots, 2].min, install.send(:compile_slots_for, 2)
+    assert_equal [base_slots, 20].min, install.send(:compile_slots_for, 20)
   end
 
   def test_compile_slots_for_honors_env_override
@@ -739,11 +743,10 @@ class CLIInstallTest < Minitest::Test
       with_cwd(dir) do
         File.write(".gitignore", "tmp/\nlog/\n")
 
-        install = Scint::CLI::Install.new([])
-        with_captured_stderr do |err|
-          install.send(:warn_missing_bundle_gitignore_entry)
-          assert_includes err.string, "does not ignore .bundle"
-        end
+        out = StringIO.new
+        install = Scint::CLI::Install.new([], output: out)
+        install.send(:warn_missing_bundle_gitignore_entry)
+        assert_includes out.string, "does not ignore .bundle"
       end
     end
   end
@@ -1100,7 +1103,7 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
-  def test_clone_git_source_fetches_existing_bare_repo
+  def test_clone_git_source_fetches_existing_repo
     with_tmpdir do |dir|
       repo = init_git_repo(dir, "demo.gemspec" => "Gem::Specification.new\n", "REVISION" => "one\n")
       cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
@@ -1108,12 +1111,12 @@ class CLIInstallTest < Minitest::Test
       source = Scint::Source::Git.new(uri: repo, branch: "main")
 
       install.send(:clone_git_source, source, cache)
-      bare = cache.git_path(source.uri)
-      before = bare_rev_parse(bare, "main^{commit}")
+      cloned = cache.git_path(source.uri)
+      before = bare_rev_parse(cloned, "origin/main^{commit}")
 
       commit_file(repo, "REVISION", "two\n", "update")
       install.send(:clone_git_source, source, cache)
-      after = bare_rev_parse(bare, "main^{commit}")
+      after = bare_rev_parse(cloned, "origin/main^{commit}")
 
       refute_equal before, after
     end
@@ -1126,58 +1129,51 @@ class CLIInstallTest < Minitest::Test
       source = Scint::Source::Git.new(uri: "https://github.com/shopify/mruby-engine.git", revision: "main", submodules: true)
       spec = fake_spec(name: "mruby_engine", version: "0.0.3", source: source)
       entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
-      called = false
+      captured_submodules = nil
+
+      git_repo = cache.git_path("https://github.com/shopify/mruby-engine.git")
+      FileUtils.mkdir_p(git_repo)
 
       install.stub(:clone_git_repo, ->(*_args) {}) do
         install.stub(:fetch_git_repo, ->(*_args) {}) do
           install.stub(:resolve_git_revision, ->(*_args) { "deadbeef" }) do
-            install.stub(:checkout_git_tree_with_submodules, lambda { |_bare, destination, *_rest|
-              called = true
-              FileUtils.mkdir_p(destination)
-              File.write(File.join(destination, "mruby_engine.gemspec"), "Gem::Specification.new\n")
+            install.stub(:checkout_git_revision, lambda { |_repo, _rev, _spec, _uri, submodules:|
+              captured_submodules = submodules
+              File.write(File.join(git_repo, "mruby_engine.gemspec"), "Gem::Specification.new\n")
             }) do
-              install.stub(:checkout_git_tree, ->(*_args) { raise "unexpected" }) do
-                install.send(:assemble_git_spec, entry, cache, fetch: true)
-              end
+              install.send(:assemble_git_spec, entry, cache, fetch: true)
             end
           end
         end
       end
 
-      assert_equal true, called
+      assert_equal true, captured_submodules
     end
   end
 
-  def test_checkout_git_tree_with_submodules_runs_submodule_update
+  def test_checkout_git_revision_with_submodules_runs_submodule_update
     with_tmpdir do |dir|
       install = Scint::CLI::Install.new([])
-      bare_repo = File.join(dir, "repo.git")
-      FileUtils.mkdir_p(bare_repo)
-      destination = File.join(dir, "checkout")
+      git_repo = File.join(dir, "repo")
+      FileUtils.mkdir_p(git_repo)
       spec = fake_spec(name: "mruby_engine", version: "0.0.3")
       calls = []
 
       install.stub(:git_capture3, lambda { |*args|
         calls << args
-        if args[0..2] == ["--git-dir", bare_repo, "worktree"] && args[3] == "add"
-          worktree = args[6]
-          FileUtils.mkdir_p(worktree)
-          File.write(File.join(worktree, "mruby_engine.gemspec"), "Gem::Specification.new\n")
-          return ["", "", stub_status(true)]
-        end
         ["", "", stub_status(true)]
       }) do
         install.send(
-          :checkout_git_tree_with_submodules,
-          bare_repo,
-          destination,
+          :checkout_git_revision,
+          git_repo,
           "deadbeef",
           spec,
           "https://github.com/shopify/mruby-engine.git",
+          submodules: true,
         )
       end
 
-      assert Dir.exist?(destination)
+      assert calls.any? { |args| args.include?("checkout") && args.include?("deadbeef") }
       assert calls.any? { |args| args.include?("submodule") && args.include?("update") }
     end
   end
@@ -1190,18 +1186,20 @@ class CLIInstallTest < Minitest::Test
       spec = fake_spec(name: "mygem", version: "1.0.0", source: source)
       entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
 
+      git_repo = cache.git_path("https://github.com/test/repo.git")
+      FileUtils.mkdir_p(git_repo)
+
       install.stub(:clone_git_repo, ->(*_args) {}) do
         install.stub(:fetch_git_repo, ->(*_args) {}) do
           install.stub(:resolve_git_revision, ->(*_args) { "abc123" }) do
-            install.stub(:checkout_git_tree, lambda { |_bare, destination, *_rest|
-              FileUtils.mkdir_p(destination)
-              # Simulate .git dir and nested .git
-              FileUtils.mkdir_p(File.join(destination, ".git"))
-              File.write(File.join(destination, ".git", "HEAD"), "ref")
-              FileUtils.mkdir_p(File.join(destination, "vendor", ".git"))
-              File.write(File.join(destination, "mygem.gemspec"), "Gem::Specification.new { |s| s.name = 'mygem'; s.version = '1.0.0' }\n")
-              FileUtils.mkdir_p(File.join(destination, "lib"))
-              File.write(File.join(destination, "lib", "mygem.rb"), "")
+            install.stub(:checkout_git_revision, lambda { |_repo, *_rest, submodules:|
+              # Simulate repo working tree with .git dirs
+              FileUtils.mkdir_p(File.join(git_repo, ".git"))
+              File.write(File.join(git_repo, ".git", "HEAD"), "ref")
+              FileUtils.mkdir_p(File.join(git_repo, "vendor", ".git"))
+              File.write(File.join(git_repo, "mygem.gemspec"), "Gem::Specification.new { |s| s.name = 'mygem'; s.version = '1.0.0' }\n")
+              FileUtils.mkdir_p(File.join(git_repo, "lib"))
+              File.write(File.join(git_repo, "lib", "mygem.rb"), "")
             }) do
               install.send(:assemble_git_spec, entry, cache, fetch: true)
             end
@@ -1232,12 +1230,14 @@ class CLIInstallTest < Minitest::Test
       spec = fake_spec(name: "../../../../tmp/evil", version: "1.0.0", source: source)
       entry = Scint::PlanEntry.new(spec: spec, action: :download, cached_path: nil, gem_path: nil)
 
+      git_repo = cache.git_path("https://github.com/test/repo.git")
+      FileUtils.mkdir_p(git_repo)
+
       install.stub(:clone_git_repo, ->(*_args) {}) do
         install.stub(:fetch_git_repo, ->(*_args) {}) do
           install.stub(:resolve_git_revision, ->(*_args) { "abc" }) do
-            install.stub(:checkout_git_tree, lambda { |_bare, destination, *_rest|
-              FileUtils.mkdir_p(destination)
-              File.write(File.join(destination, "evil.gemspec"), "")
+            install.stub(:checkout_git_revision, lambda { |_repo, *_rest, submodules:|
+              File.write(File.join(git_repo, "evil.gemspec"), "")
             }) do
               assert_raises(Scint::CacheError) do
                 install.send(:assemble_git_spec, entry, cache, fetch: true)
@@ -1852,7 +1852,7 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
-  def test_load_gemspec_from_worktree_uses_isolated_loader
+  def test_load_gemspec_from_checkout_uses_isolated_loader
     with_tmpdir do |dir|
       install = Scint::CLI::Install.new([])
       worktree = File.join(dir, "worktree")
@@ -1870,7 +1870,7 @@ class CLIInstallTest < Minitest::Test
 
       calls = []
       Scint::SpecUtils.stub(:load_gemspec, ->(path, isolate: false) { calls << [path, isolate]; fake }) do
-        result = install.send(:load_gemspec_from_worktree, worktree, rel)
+        result = install.send(:load_gemspec_from_checkout, worktree, rel)
         assert_equal fake, result
       end
 
@@ -3360,7 +3360,8 @@ class CLIInstallTest < Minitest::Test
   def test_run_returns_zero_when_nothing_to_install
     with_tmpdir do |dir|
       with_cwd(dir) do
-        install = Scint::CLI::Install.new(["--path", File.join(dir, ".bundle")])
+        test_output = StringIO.new
+        install = Scint::CLI::Install.new(["--path", File.join(dir, ".bundle")], output: test_output)
 
         # Write Gemfile
         File.write("Gemfile", 'source "https://rubygems.org"\ngem "rack"\n')
@@ -3385,17 +3386,9 @@ class CLIInstallTest < Minitest::Test
             install.stub(:adjust_meta_gems, adjusted) do
               install.stub(:dedupe_resolved_specs, adjusted) do
                 Scint::Installer::Planner.stub(:plan, plan) do
-                  # Capture stdout
-                  old_stdout = $stdout
-                  $stdout = StringIO.new
-                  begin
-                    result = install.run
-                    assert_equal 0, result
-                    output = $stdout.string
-                    assert_includes output, "gems installed total"
-                  ensure
-                    $stdout = old_stdout
-                  end
+                  result = install.run
+                  assert_equal 0, result
+                  assert_includes test_output.string, "gems installed total"
                 end
               end
             end
@@ -3410,7 +3403,8 @@ class CLIInstallTest < Minitest::Test
   def test_run_installs_gems_and_writes_lockfile_on_success
     with_tmpdir do |dir|
       with_cwd(dir) do
-        install = Scint::CLI::Install.new(["--path", File.join(dir, ".bundle"), "-j", "1"])
+        test_output = StringIO.new
+        install = Scint::CLI::Install.new(["--path", File.join(dir, ".bundle"), "-j", "1"], output: test_output)
 
         File.write("Gemfile", 'source "https://rubygems.org"\ngem "rack"\n')
 
@@ -3450,17 +3444,10 @@ class CLIInstallTest < Minitest::Test
                     install.stub(:enqueue_install_dag, ->(*_a, **_k) { -> { 0 } }) do
                       install.stub(:write_lockfile, nil) do
                         install.stub(:write_runtime_config, nil) do
-                          old_stdout = $stdout
-                          $stdout = StringIO.new
-                          begin
-                            result = install.run
-                            assert_equal 0, result
-                            assert started
-                            output = $stdout.string
-                            assert_includes output, "gems installed total"
-                          ensure
-                            $stdout = old_stdout
-                          end
+                          result = install.run
+                          assert_equal 0, result
+                          assert started
+                          assert_includes test_output.string, "gems installed total"
                         end
                       end
                     end
@@ -3485,7 +3472,8 @@ class CLIInstallTest < Minitest::Test
         resolved = [spec]
 
         with_env("XDG_CACHE_HOME", cache_root) do
-          install = Scint::CLI::Install.new(["--path", bundle_path, "-j", "1"])
+          result = nil
+          install = Scint::CLI::Install.new(["--path", bundle_path, "-j", "1"], output: StringIO.new)
           install.stub(:resolve, resolved) do
             install.stub(:adjust_meta_gems, resolved) do
               install.stub(:dedupe_resolved_specs, resolved) do
@@ -3510,7 +3498,7 @@ class CLIInstallTest < Minitest::Test
 
           FileUtils.rm_rf(bundle_path)
 
-          install = Scint::CLI::Install.new(["--path", bundle_path, "-j", "1"])
+          install = Scint::CLI::Install.new(["--path", bundle_path, "-j", "1"], output: StringIO.new)
           install.stub(:resolve, resolved) do
             install.stub(:adjust_meta_gems, resolved) do
               install.stub(:dedupe_resolved_specs, resolved) do
@@ -3537,7 +3525,8 @@ class CLIInstallTest < Minitest::Test
   def test_run_returns_one_on_install_errors
     with_tmpdir do |dir|
       with_cwd(dir) do
-        install = Scint::CLI::Install.new(["--path", File.join(dir, ".bundle"), "-j", "1"])
+        test_output = StringIO.new
+        install = Scint::CLI::Install.new(["--path", File.join(dir, ".bundle"), "-j", "1"], output: test_output)
 
         File.write("Gemfile", 'source "https://rubygems.org"\ngem "rack"\n')
 
@@ -3575,19 +3564,11 @@ class CLIInstallTest < Minitest::Test
                 install.stub(:dedupe_resolved_specs, resolved) do
                   Scint::Installer::Planner.stub(:plan, plan) do
                     install.stub(:enqueue_install_dag, ->(*_a, **_k) { -> { 0 } }) do
-                      old_stdout = $stdout
-                      old_stderr = $stderr
-                      $stdout = StringIO.new
-                      $stderr = StringIO.new
-                      begin
-                        result = install.run
-                        assert_equal 1, result
-                        assert_includes $stderr.string, "failed to install"
-                        assert_includes $stdout.string, "Bundle failed"
-                      ensure
-                        $stdout = old_stdout
-                        $stderr = old_stderr
-                      end
+                      result = install.run
+                      assert_equal 1, result
+                      output = test_output.string
+                      assert_includes output, "failed to install"
+                      assert_includes output, "Bundle failed"
                     end
                   end
                 end
@@ -3604,7 +3585,8 @@ class CLIInstallTest < Minitest::Test
   def test_run_warns_on_stats_failed_without_error_details
     with_tmpdir do |dir|
       with_cwd(dir) do
-        install = Scint::CLI::Install.new(["--path", File.join(dir, ".bundle"), "-j", "1"])
+        test_output = StringIO.new
+        install = Scint::CLI::Install.new(["--path", File.join(dir, ".bundle"), "-j", "1"], output: test_output)
 
         File.write("Gemfile", 'source "https://rubygems.org"\ngem "rack"\n')
 
@@ -3638,18 +3620,9 @@ class CLIInstallTest < Minitest::Test
                 install.stub(:dedupe_resolved_specs, resolved) do
                   Scint::Installer::Planner.stub(:plan, plan) do
                     install.stub(:enqueue_install_dag, ->(*_a, **_k) { -> { 0 } }) do
-                      old_stdout = $stdout
-                      old_stderr = $stderr
-                      $stdout = StringIO.new
-                      $stderr = StringIO.new
-                      begin
-                        result = install.run
-                        assert_equal 1, result
-                        assert_includes $stderr.string, "no error details"
-                      ensure
-                        $stdout = old_stdout
-                        $stderr = old_stderr
-                      end
+                      result = install.run
+                      assert_equal 1, result
+                      assert_includes test_output.string, "no error details"
                     end
                   end
                 end
@@ -3858,7 +3831,7 @@ class CLIInstallTest < Minitest::Test
   def test_run_parses_lockfile_when_present
     with_tmpdir do |dir|
       with_cwd(dir) do
-        install = Scint::CLI::Install.new(["--path", File.join(dir, ".bundle")])
+        install = Scint::CLI::Install.new(["--path", File.join(dir, ".bundle")], output: StringIO.new)
 
         File.write("Gemfile", 'source "https://rubygems.org"\ngem "rack"\n')
         File.write("Gemfile.lock", <<~LOCK)
@@ -3902,14 +3875,8 @@ class CLIInstallTest < Minitest::Test
               install.stub(:adjust_meta_gems, adjusted) do
                 install.stub(:dedupe_resolved_specs, adjusted) do
                   Scint::Installer::Planner.stub(:plan, plan) do
-                    old_stdout = $stdout
-                    $stdout = StringIO.new
-                    begin
-                      result = install.run
-                      assert_equal 0, result
-                    ensure
-                      $stdout = old_stdout
-                    end
+                    result = install.run
+                    assert_equal 0, result
                   end
                 end
               end
@@ -3923,7 +3890,7 @@ class CLIInstallTest < Minitest::Test
   def test_run_writes_lock_and_runtime_config_when_everything_is_cached
     with_tmpdir do |dir|
       with_cwd(dir) do
-        install = Scint::CLI::Install.new(["--path", File.join(dir, ".bundle")])
+        install = Scint::CLI::Install.new(["--path", File.join(dir, ".bundle")], output: StringIO.new)
 
         File.write("Gemfile", 'source "https://rubygems.org"\ngem "rack"\n')
         File.write("Gemfile.lock", <<~LOCK)
@@ -3969,14 +3936,8 @@ class CLIInstallTest < Minitest::Test
                   Scint::Installer::Planner.stub(:plan, plan) do
                     install.stub(:write_lockfile, ->(*_args) { wrote_lock = true }) do
                       install.stub(:write_runtime_config, ->(*_args) { wrote_runtime = true }) do
-                        old_stdout = $stdout
-                        $stdout = StringIO.new
-                        begin
-                          result = install.run
-                          assert_equal 0, result
-                        ensure
-                          $stdout = old_stdout
-                        end
+                        result = install.run
+                        assert_equal 0, result
                       end
                     end
                   end
@@ -4956,8 +4917,8 @@ class CLIInstallTest < Minitest::Test
     with_cwd(repo) { run_git("rev-parse", "HEAD").strip }
   end
 
-  def bare_rev_parse(bare_repo, rev)
-    out, err, status = Open3.capture3("git", "--git-dir", bare_repo, "rev-parse", rev)
+  def bare_rev_parse(git_repo, rev)
+    out, err, status = Open3.capture3("git", "-C", git_repo, "rev-parse", rev)
     assert status.success?, "git rev-parse failed: #{err}"
     out.strip
   end

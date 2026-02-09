@@ -143,8 +143,19 @@ module Scint
       private
 
       def default_cache_dir
-        xdg = ENV["XDG_CACHE_HOME"] || File.join(Dir.home, ".cache")
-        File.join(xdg, "scint", "index", Cache.slug_for(@uri))
+        root =
+          if Scint.respond_to?(:cache_root)
+            Scint.cache_root
+          else
+            explicit = ENV["SCINT_CACHE"]
+            if explicit && !explicit.empty?
+              File.expand_path(explicit)
+            else
+              xdg = ENV["XDG_CACHE_HOME"] || File.join(Dir.home, ".cache")
+              File.join(xdg, "scint")
+            end
+          end
+        File.join(root, "index", Cache.slug_for(@uri))
       end
 
       # Fetch a top-level endpoint (names or versions).

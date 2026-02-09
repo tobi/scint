@@ -1,336 +1,209 @@
 # Scint
 
-Scint is an experimental Bundler/RubyGems replacement focused on high-throughput installs with a global cache and a fast local materialization step.
+```
+tobi ~/t/fizzy ❯❯❯ scint install
+💎 Scintellating Gemfile into ./.bundle (scint 0.7.1, ruby 4.0.1)
 
-It is written in pure Ruby with no dependencies; Ruby is plenty fast for this job.
+Fetching index https://rubygems.org
 
-Scint is designed for full backwards compatibility with Bundler workflows:
+162 gems installed total (162 cached). (1.42s, 15 workers used)
+```
 
-1. It reads `Gemfile` and `Gemfile.lock`.
-2. It writes standard `Gemfile.lock`.
-3. It interoperates with Bundler runtime layout. For example, `BUNDLE_PATH=".bundle" bundle exec ...` is expected to work.
-4. The intent is identical behavior with better install and execution throughput.
+Scint is an experimental Bundler replacement. Pure Ruby, no dependencies.
 
-The core idea is:
+It reads your `Gemfile` and `Gemfile.lock`, writes standard `Gemfile.lock`, and materializes into `.bundle/` so `bundle exec` keeps working. Same behavior, much faster installs.
+
+The core idea:
 
 1. Prepare artifacts once in a global cache (`~/.cache/scint`).
-2. Materialize project-local runtime state into `.bundle/` as efficiently as possible (hardlinks where possible).
-3. Execute work in explicit concurrent phases coordinated by a scheduler session.
+2. Materialize into `.bundle/` via clonefile/hardlink/copy.
+3. Warm installs are effectively instant because no fetch, extract, or compile happens when the cache is populated.
 
-## Why Scint
+## Why "Scint"
 
-`scint` comes from *scintillation*: short, high-energy flashes rather than continuous glow.
-
-That maps directly to the runtime model:
+From *scintillation*: short, high-energy flashes.
 
 1. Event-driven scheduling.
 2. Burst parallelism where safe.
 3. Tight phase boundaries with clear handoffs.
 
-## CLI
+## Install Pipeline
 
-```bash
-scint install
-scint exec <command>
-scint cache list
-scint cache clear
-scint cache dir
-```
-
-Benchmark helpers:
-
-```bash
-bin/scint-vs-bundler [--force] [--test-root /tmp/scint-tests] /path/to/project
-bin/scint-bench-matrix [--force] --root /path/to/projects
-```
-
-`bin/scint-bench-matrix` is a generic runner for a root directory where each
-immediate subdirectory is a Ruby project under git with both `Gemfile` and
-`Gemfile.lock`. It runs bundler cold/warm and scint cold/warm via
-`bin/scint-vs-bundler` and writes:
-
-1. `logs/bench-<timestamp>/summary.tsv`
-2. `logs/bench-<timestamp>/table.md`
-
-Optional project smoke test convention:
-
-1. If `<root>/<project>-test.sh` exists, matrix runs it after the benchmark.
-2. Execution is:
-   `cd <root>/<project> && scint exec ../<project>-test.sh`
-3. The script runs against the warm scint install and is included in
-   `summary.tsv`/`table.md` status.
-
-Performance and IO diagnostics:
-
-```bash
-# Ruby sampling profile (JSON)
-SCINT_PROFILE=/tmp/scint-profile.json SCINT_PROFILE_HZ=400 scint install --force
-
-# Ruby-level IO trace (JSONL)
-SCINT_IO_TRACE=/tmp/scint-io.jsonl scint install --force
-
-# Summarize high-volume IO operations for quick LLM review
-scint-io-summary /tmp/scint-io.jsonl
-
-# Syscall-level trace (Linux strace / macOS dtruss)
-scint-syscall-trace /tmp/scint-sys.log -- scint install --force
-```
-
-Compatibility example:
-
-```bash
-BUNDLE_PATH=".bundle" bundle exec ruby -v
-```
-
-Defaults:
-
-1. Local install/runtime directory: `.bundle/`
-2. Global cache root: `~/.cache/scint` (or `XDG_CACHE_HOME`)
-
-## Install Architecture (Target)
-
-Scint should have one clear cache lifecycle:
-
-1. `inbound`
-2. `assembling`
-3. `cached`
-4. `materialize`
-
-Resolution/planning still decides *what* to install; this pipeline defines *how* each artifact becomes globally reusable.
-
-### Phase Contract
-
-1. Fetch into `inbound`
-   - Gem payloads go to `inbound/gems/`.
-   - Git repositories go to `inbound/gits/` using deterministic names (for example `https_github_com__tobi__try`).
-2. Assemble into `assembling`
-   - For `.gem` sources: unpack into `assembling/<abi>/<full_name>/`.
-   - For git sources: fetch/checkout/submodules in `inbound/gits`, then export/copy the selected tree into `assembling/<abi>/<full_name>/`.
-3. Compile in `assembling`
-   - Native extension build happens inside the assembling directory so successful outputs are part of the final cached tree.
-4. Promote atomically to `cached`
-   - On success, move `assembling/<abi>/<full_name>/` to `cached/<abi>/<full_name>/`.
-   - Write `cached/<abi>/<full_name>.spec.marshal`.
-   - Write optional manifest metadata for fast materialization.
-5. Materialize to project path (`.bundle` or `BUNDLE_PATH`)
-   - Use clonefile/reflink/hardlink/copy fallback from `cached/<abi>/...`.
-   - Do not rebuild if cached artifact is already complete.
-
-This gives one primary truth source for warm installs: `cached/<abi>`.
+Every gem flows through a deterministic cache pipeline. Resolution decides *what* to install; the pipeline defines *how*.
 
 ```mermaid
-flowchart LR
-    A[Resolve + Plan] --> B[Fetch to inbound]
-    B --> C[Assemble in assembling]
-    C --> D[Compile in assembling]
-    D --> E[Promote to cached]
-    E --> F[Materialize to .bundle]
-    F --> G[Write Runtime + Lockfile]
+flowchart TD
+    A["Fetch + Assemble"]
+    B[Compile]
+    C[Promote]
+    D[Materialize]
+
+    A -->|"gems: download .gem, unpack\ngit: clone, checkout, export"| B
+    B -->|"native extensions built\ninside assembling tree"| C
+    C -->|"atomic move to cached/\nwrite .spec.marshal + manifest"| D
+    D -->|"clonefile / hardlink / copy\nfrom cached/ to .bundle/"| E[Done]
 ```
 
-## Scheduler as Session Object
+### Phase details
 
-The `Scheduler` is more than a queue: it is the install *session object*.
-It owns global execution state and coordinates workers with phase-aware semantics.
+1. **Fetch + Assemble** into `inbound/` and `assembling/`
+   - Download gem payloads to `inbound/gems/`.
+   - Clone/fetch git repos into `inbound/gits/<sha256-slug>/`.
+   - Unpack `.gem` files into `assembling/<abi>/<full_name>/`.
+   - For git sources: checkout, submodules, then export the tree into `assembling/<abi>/<full_name>/`.
+2. **Compile** in `assembling/`
+   - Native extension builds happen inside the assembling directory so outputs are part of the final tree.
+3. **Promote** atomically to `cached/`
+   - Move `assembling/<abi>/<full_name>/` to `cached/<abi>/<full_name>/`.
+   - Write `cached/<abi>/<full_name>.spec.marshal` and `.manifest`.
+   - Failed builds never reach `cached/`.
+4. **Materialize** to `.bundle/`
+   - Clonefile/reflink/hardlink/copy from `cached/<abi>/`.
+   - No rebuild if the cached artifact is valid.
 
-The scheduler tracks:
+One truth source for warm installs: `cached/<abi>`.
 
-1. Job graph and dependencies
-2. Priority classes by job type
-3. Worker pool scaling
-4. Job state transitions (`pending`, `running`, `completed`, `failed`)
-5. Follow-up chaining (for phase handoff)
-6. Fail-fast abort state and error collection
-7. Progress/stats snapshots used by reporting
+## Scheduler
 
-Workers do not own global install strategy. They execute task payloads with context supplied by scheduler enqueuing and phase sequencing.
+The `Scheduler` is the install session object. It owns the job graph, worker pool, and phase coordination.
 
 ```mermaid
-sequenceDiagram
-    participant U as User
-    participant C as scint install
-    participant S as Scheduler(Session)
-    participant W as WorkerPool
-    participant T as Task Worker
+flowchart TD
+    subgraph "Early Parallel"
+        FI[fetch_index]
+        GC[git_clone]
+    end
 
-    U->>C: scint install
-    C->>S: start(max_workers, fail_fast)
-    C->>S: enqueue(fetch_index/git/...)
-    S->>W: dispatch ready jobs
-    W->>T: execute payload
-    T-->>S: complete/fail + result
-    S-->>C: wait_for phase completion
-    C->>S: enqueue next phase (download/link/build_ext)
-    S-->>C: stats + errors + aborted?
-    C-->>U: summary + lockfile/runtime outputs
+    FI --> R[resolve]
+    GC --> R
+
+    R --> P[plan]
+
+    subgraph "Install DAG"
+        DL[download] --> EX[extract]
+        EX --> LN[link]
+        LN --> BE[build_ext]
+        BE --> BS[binstub]
+        LN --> BS
+    end
+
+    P --> DL
+    P --> LN2["link (cached)"]
+    LN2 --> BS2[binstub]
 ```
 
-## Job Lifecycle
+Job priorities (lower = dispatched first):
 
-```mermaid
-stateDiagram-v2
-    [*] --> pending
-    pending --> running: dependencies satisfied + worker slot available
-    running --> completed: success
-    running --> failed: exception / command failure
-    completed --> [*]
-    failed --> [*]
-```
+| Priority | Job Type | Concurrency |
+|----------|----------|-------------|
+| 0 | `fetch_index` | all workers |
+| 1 | `git_clone` | all workers |
+| 2 | `resolve` | 1 |
+| 3 | `download` | bounded (default 8) |
+| 4 | `extract` | IO-limited |
+| 5 | `link` | IO-limited |
+| 6 | `build_ext` | CPU-limited (slots x make -j) |
+| 7 | `binstub` | 1 |
 
-## Data Layout (Target)
+Workers start at 1, scale dynamically up to `cpu_count * 2` (max 50). Compile concurrency is tuned separately: a small number of slots each running `make -jN` to keep CPU saturated without thrashing.
+
+Fail-fast mode aborts scheduling after the first hard failure.
+
+## Data Layout
 
 Global cache (`~/.cache/scint`):
 
-```text
+```
 ~/.cache/scint/
   inbound/
-    gems/
-      <full_name>.gem
-    gits/
-      <deterministic_repo_slug>/
+    gems/<full_name>.gem
+    gits/<sha256-slug>/
   assembling/
-    <ruby-abi>/
-      <full_name>/
+    <ruby-abi>/<full_name>/
   cached/
     <ruby-abi>/
       <full_name>/
       <full_name>.spec.marshal
       <full_name>.manifest
   index/
+    <source-slug>/
 ```
 
-Example ABI key and gem directory:
-
-1. `cached/ruby-3.4.5-arm64-darwin24/zlib-3.2.1/`
-2. `cached/ruby-3.4.5-arm64-darwin24/zlib-3.2.1.spec.marshal`
+ABI key example: `ruby-4.0.1-arm64-darwin25`
 
 Project-local runtime (`.bundle/`):
 
-1. `ruby/<major.minor.0>/gems/` materialized gem trees
-2. `ruby/<major.minor.0>/specifications/` gemspecs
-3. `ruby/<major.minor.0>/bin/` gem binstubs
-4. `bin/` project-level wrappers
-5. `scint.lock.marshal` runtime lock for `scint exec`
+```
+.bundle/
+  ruby/<major.minor.0>/
+    gems/           # materialized gem trees
+    specifications/ # gemspecs
+    bin/            # gem binstubs
+  bin/              # project-level wrappers
+  scint.lock.marshal
+```
 
-## Cache Validity + Manifest Specification (Draft)
+Cache root precedence: `SCINT_CACHE` > `XDG_CACHE_HOME/scint` > `~/.cache/scint`.
 
-### Cache validity criteria
+## Cache Validity
 
-A cached artifact is considered valid only when *all* of the following are true:
+A cached artifact is valid when:
 
-1. `cached/<abi>/<full_name>/` exists and is a fully materialized tree.
-2. `cached/<abi>/<full_name>.spec.marshal` exists and loads successfully.
-3. `cached/<abi>/<full_name>.manifest` exists, parses, and its `version` is supported.
-4. Manifest fields `full_name` and `abi` match the requested spec/ABI.
-5. If the gem has native extensions, `ext/<abi>/<full_name>/gem.build_complete` exists.
+1. `cached/<abi>/<full_name>/` exists.
+2. `.spec.marshal` exists and loads.
+3. `.manifest` exists, parses, schema version is supported, and fields match.
+4. If the gem has native extensions, the build-complete marker exists.
 
-Any failure means the cache entry is *invalid* and must be rebuilt (fetch/assemble/compile).
-
-### Manifest schema
-
-The manifest is a single UTF-8 JSON object written to
-`cached/<abi>/<full_name>.manifest`. It is versioned and deterministically
-serialized for repeatable cache reuse.
-
-**Serialization rules**:
-
-- Top-level keys sorted lexicographically.
-- Array ordering is deterministic (see `files` below).
-- JSON is emitted without extra whitespace (canonical/minified).
-- No timestamps or host-specific values are stored.
-
-**Schema (version 1)**:
-
-- `version` (Integer, required): schema version (starting at `1`).
-- `full_name` (String, required): `name-version(-platform)`.
-- `abi` (String, required): Ruby ABI key (e.g. `ruby-3.4.5-arm64-darwin24`).
-- `source` (Object, required):
-  - `type` (String): `rubygems`, `git`, or `path`.
-  - `uri` (String): canonical source URI.
-  - `revision` (String, git only): resolved commit SHA.
-  - `path` (String, path only): absolute source path.
-- `files` (Array, required): sorted by `path` ascending. Each entry is:
-  - `path` (String): relative to the cached root.
-  - `type` (String): `file`, `dir`, or `symlink`.
-  - `mode` (Integer): numeric permission bits (e.g. `755`).
-  - `size` (Integer): bytes (directories use `0`).
-  - `sha256` (String, optional): content hash for files/symlinks.
-- `build` (Object, required):
-  - `extensions` (Boolean): whether the gem builds native extensions.
-  - `ext_complete` (String, optional): completion marker path when extensions exist.
-
-### Git slug normalization + collisions
-
-Git cache directories use a deterministic slug derived from the source URI:
-
-1. Normalize the URI to a stable string form (`uri.to_s`; callers should pass a
-   parsed URI for consistent normalization).
-2. Compute `sha256(normalized_uri)`, use the first 16 hex characters.
-
-**Collision handling**: when a slug directory already exists, validate that the
-manifest `source.uri` matches the normalized URI. If it does not, treat it as a
-collision, emit telemetry, and fall back to a longer hash (e.g. full 64 hex) or
-an additional suffix.
-
-### Legacy read-compat + telemetry
-
-Legacy cache entries that lack a manifest (or use an unsupported schema version)
-remain *read-compatible* for now:
-
-- Treat the entry as valid only if the cached tree + `.spec.marshal` exist and
-  the gemspec loads cleanly.
-- Emit telemetry counters (per run) such as `cache.manifest.missing`,
-  `cache.manifest.unsupported`, and `cache.manifest.collision`.
-- Log a single warning per run with counts and cache root to guide deprecation.
+Invalid entries are rebuilt through the full pipeline. Legacy entries without manifests are read-compatible but emit telemetry for deprecation tracking.
 
 ## Warm Path Guarantees
 
-Required behavior:
+1. If `cached/<abi>/<full_name>/` is valid, no fetch/extract/compile occurs.
+2. Deleting `.bundle/` triggers only materialization.
+3. Materialization is IO-bound and close to instantaneous on warm cache.
+4. Incomplete assemblies are never promoted.
 
-1. If `cached/<abi>/<full_name>/` exists and is valid, no fetch/extract/compile occurs for that gem.
-2. Deleting only `.bundle/` should trigger only materialization work.
-3. Materialization should be IO-bound and close to instantaneous on warm cache.
-4. Incomplete assemblies must never be promoted; promotion is atomic.
+## CLI
 
-## Concurrency Model
+```bash
+scint install           # install from Gemfile.lock
+scint add <gem>         # add to Gemfile and install
+scint remove <gem>      # remove from Gemfile and install
+scint exec <cmd>        # run command in bundle context
+scint cache list        # list cached gems
+scint cache clear       # clear global cache
+scint cache dir         # print cache root
+```
 
-Scint parallelizes all non-conflicting work aggressively:
+Options: `--jobs N`, `--path P`, `--verbose`, `--force`.
 
-1. Index fetch and git clone start early.
-2. Downloads can chain follow-up link tasks.
-3. Planner ordering prioritizes large downloads first to keep pipeline saturated.
-4. Build-ext runs after link readiness to make dependencies visible.
-5. Fail-fast mode aborts scheduling of new work after the first hard failure.
+`scint exec` sets `GEM_HOME`/`GEM_PATH`, injects load paths from `scint.lock.marshal`, and execs the command. Bundler compatibility: `BUNDLE_PATH=".bundle" bundle exec` works against the same layout.
 
-## Error Model
+## Diagnostics
 
-Scint is designed to be explicit on failure:
+```bash
+# Ruby sampling profile
+SCINT_PROFILE=/tmp/profile.json scint install --force
 
-1. Install exits non-zero on failures.
-2. Native build failures include full captured command output.
-3. Final summary reports installed/failed/skipped counts.
-4. `.gitignore` warning is emitted when `.bundle/` is not ignored.
+# Ruby IO trace
+SCINT_IO_TRACE=/tmp/io.jsonl scint install --force
 
-## `scint exec` Runtime
+# Summarize IO trace
+scint-io-summary /tmp/io.jsonl
 
-`scint exec` sets runtime env and load paths from `scint.lock.marshal`, then `exec`s the target command.
+# Syscall trace (strace/dtruss)
+scint-syscall-trace /tmp/sys.log -- scint install --force
+```
 
-Key behaviors:
+## Benchmarking
 
-1. Injects runtime load paths and bundler compatibility shim.
-2. Sets `GEM_HOME`/`GEM_PATH` to the local `.bundle` runtime.
-3. Prefers local `.bundle/bin` executables.
-4. Rebuilds runtime lock from `Gemfile.lock` + installed gems when possible if missing.
+```bash
+bin/scint-vs-bundler [--force] /path/to/project
+bin/scint-bench-matrix [--force] --root /path/to/projects
+```
 
-## Aspirational Direction
-
-The current architecture already separates phases and scheduling concerns. Planned direction is to make this even more explicit:
-
-1. First-class session object API around scheduler state and phase transitions.
-2. Isolated compile worker process with a simple line-protocol RPC (`CALL` / `RESULT`) for stronger fault isolation.
-3. More deterministic bulk operations for extraction/linking.
-4. Better per-phase telemetry for latency and saturation analysis.
+`scint-bench-matrix` runs cold/warm benchmarks for every project subdirectory and writes `logs/bench-<timestamp>/summary.tsv` and `table.md`. If `<root>/<project>-test.sh` exists, it runs as a smoke test after the benchmark.
 
 ## Status
 
-Scint is experimental and optimized for architecture iteration speed. Behavior and internals may change quickly.
+Experimental. Optimized for architecture iteration speed.

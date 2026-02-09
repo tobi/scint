@@ -108,7 +108,11 @@ module Scint
 
     def load_gemspec_direct(absolute_path)
       GEMSPEC_LOAD_MUTEX.synchronize do
+        old_stderr = $stderr
+        $stderr = StringIO.new
         ::Gem::Specification.load(absolute_path)
+      ensure
+        $stderr = old_stderr
       end
     end
     private_class_method :load_gemspec_direct

@@ -124,10 +124,27 @@ class ExtensionBuilderTest < Minitest::Test
     assert env.key?("MAKEFLAGS")
     assert env.key?("CFLAGS")
     assert_equal "/tmp/cache/install-env/ruby/3.4.0", env["GEM_HOME"]
-    assert_equal "/tmp/cache/install-env/ruby/3.4.0", env["GEM_PATH"]
+    gem_paths = env.fetch("GEM_PATH").split(File::PATH_SEPARATOR)
+    assert_includes gem_paths, "/tmp/cache/install-env/ruby/3.4.0"
     assert_equal "/tmp/cache/install-env/ruby/3.4.0", env["BUNDLE_PATH"]
     assert_equal "", env["BUNDLE_GEMFILE"]
     assert_equal "-j3", env["MAKEFLAGS"]
+  end
+
+  def test_build_env_includes_source_bundle_ruby_dir_in_gem_path
+    build_ruby_dir = "/tmp/cache/install-env/ruby/3.4.0"
+    source_ruby_dir = "/tmp/project/.bundle/ruby/3.4.0"
+    env = Scint::Installer::ExtensionBuilder.send(
+      :build_env,
+      "/tmp/src",
+      build_ruby_dir,
+      2,
+      source_ruby_dir: source_ruby_dir,
+    )
+
+    gem_paths = env.fetch("GEM_PATH").split(File::PATH_SEPARATOR)
+    assert_includes gem_paths, build_ruby_dir
+    assert_includes gem_paths, source_ruby_dir
   end
 
   def test_adaptive_make_jobs_scales_by_compile_slots
@@ -306,6 +323,67 @@ class ExtensionBuilderTest < Minitest::Test
     end
   end
 
+  def test_compile_extconf_can_require_mini_portile2_from_source_bundle
+    with_tmpdir do |dir|
+      ext_dir = File.join(dir, "ext", "sqlite3")
+      build_dir = File.join(dir, "build")
+      install_dir = File.join(dir, "install")
+      build_ruby_dir = File.join(dir, "cache", "install-env", "ruby", "4.0.0")
+      source_ruby_dir = File.join(dir, "bundle", "ruby", "4.0.0")
+      FileUtils.mkdir_p(ext_dir)
+      FileUtils.mkdir_p(build_dir)
+      FileUtils.mkdir_p(install_dir)
+
+      gem_full_name = "mini_portile2-2.8.5"
+      gem_dir = File.join(source_ruby_dir, "gems", gem_full_name)
+      spec_dir = File.join(source_ruby_dir, "specifications")
+      FileUtils.mkdir_p(File.join(gem_dir, "lib"))
+      FileUtils.mkdir_p(spec_dir)
+
+      File.write(File.join(gem_dir, "lib", "mini_portile2.rb"), "module MiniPortile2; end\n")
+      File.write(File.join(spec_dir, "#{gem_full_name}.gemspec"), <<~RUBY)
+        Gem::Specification.new do |s|
+          s.name = "mini_portile2"
+          s.version = "2.8.5"
+          s.summary = "test"
+          s.authors = ["test"]
+          s.files = ["lib/mini_portile2.rb"]
+          s.require_paths = ["lib"]
+        end
+      RUBY
+
+      File.write(File.join(ext_dir, "extconf.rb"), <<~'RUBY')
+        require "mini_portile2"
+        File.write("Makefile", <<~'MAKE')
+          all:
+          	@true
+          install:
+          	@mkdir -p "$(sitearchdir)"
+          	@printf 'ok' > "$(sitearchdir)/sqlite3_probe.bundle"
+        MAKE
+      RUBY
+
+      env = Scint::Installer::ExtensionBuilder.send(
+        :build_env,
+        dir,
+        build_ruby_dir,
+        1,
+        source_ruby_dir: source_ruby_dir,
+      )
+      Scint::Installer::ExtensionBuilder.send(
+        :compile_extconf,
+        ext_dir,
+        dir,
+        build_dir,
+        install_dir,
+        env,
+        1,
+      )
+
+      assert File.exist?(File.join(install_dir, "sqlite3_probe.bundle"))
+    end
+  end
+
   def test_run_cmd_emits_tail_callback_with_command
     seen = nil
     Scint::Installer::ExtensionBuilder.send(
@@ -320,6 +398,25 @@ class ExtensionBuilderTest < Minitest::Test
     refute_nil seen
     assert_equal true, seen.first.start_with?("$ ")
     assert_includes seen.join("\n"), "hello"
+  end
+
+  def test_run_cmd_handles_binary_output_in_tail_and_error
+    seen = nil
+    error = assert_raises(Scint::ExtensionBuildError) do
+      Scint::Installer::ExtensionBuilder.send(
+        :run_cmd,
+        {},
+        RbConfig.ruby,
+        "-e",
+        'STDOUT.binmode; STDOUT.write([98,97,100,255,108,105,110,101,10].pack("C*")); exit 1',
+        output_tail: ->(lines) { seen = lines },
+      )
+    end
+
+    refute_nil seen
+    assert_equal Encoding::UTF_8, seen.last.encoding
+    assert_includes seen.last, "bad?line"
+    assert_includes error.message, "bad?line"
   end
 
   def test_build_full_flow_cache_miss

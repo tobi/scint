@@ -43,7 +43,7 @@ module Scint
     class Install
       RUNTIME_LOCK = "scint.lock.marshal"
 
-      def initialize(argv = [], without: nil, with: nil)
+      def initialize(argv = [], without: nil, with: nil, output: $stderr)
         @argv = argv
         @jobs = nil
         @path = nil
@@ -51,6 +51,7 @@ module Scint
         @force = false
         @without_groups = nil
         @with_groups = nil
+        @output = output
         @download_pool = nil
         @download_pool_lock = Thread::Mutex.new
         @gemspec_cache = {}
@@ -63,7 +64,7 @@ module Scint
 
       def _tmark(label, t0)
         now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        $stderr.puts "  [timing] #{label}: #{((now - t0) * 1000).round}ms" if ENV["SCINT_TIMING"]
+        @output.puts "  [timing] #{label}: #{((now - t0) * 1000).round}ms" if ENV["SCINT_TIMING"]
         now
       end
 
@@ -80,14 +81,15 @@ module Scint
         compile_slots = compile_slots_for(worker_count)
         git_slots = git_slots_for(worker_count)
         per_type_limits = install_task_limits(worker_count, compile_slots, git_slots)
-        $stdout.puts "#{GREEN}💎#{RESET} Scintellating Gemfile into #{BOLD}#{bundle_display}#{RESET} #{DIM}(scint #{VERSION}, ruby #{RUBY_VERSION})#{RESET}"
-        $stdout.puts
+        @output.puts "#{GREEN}💎#{RESET} Scintellating Gemfile into #{BOLD}#{bundle_display}#{RESET} #{DIM}(scint #{VERSION}, ruby #{RUBY_VERSION})#{RESET}"
+        @output.puts
 
         # 0. Build credential store from config files (~/.bundle/config, XDG scint/credentials)
         @credentials = Credentials.new
 
         # 1. Start the scheduler with 1 worker — scale up dynamically
-        scheduler = Scheduler.new(max_workers: worker_count, fail_fast: true, per_type_limits: per_type_limits)
+        scheduler = Scheduler.new(max_workers: worker_count, fail_fast: true, per_type_limits: per_type_limits,
+                                  progress: Progress.new(output: @output))
         scheduler.start
 
         begin
@@ -160,7 +162,7 @@ module Scint
             elapsed_ms = elapsed_ms_since(start_time)
             worker_count = scheduler.stats[:workers]
             warn_missing_bundle_gitignore_entry
-            $stdout.puts "\n#{GREEN}#{total_gems}#{RESET} gems installed total#{install_breakdown(cached: cached_gems, updated: updated_gems)}. #{DIM}(#{format_run_footer(elapsed_ms, worker_count)})#{RESET}"
+            @output.puts "\n#{GREEN}#{total_gems}#{RESET} gems installed total#{install_breakdown(cached: cached_gems, updated: updated_gems)}. #{DIM}(#{format_run_footer(elapsed_ms, worker_count)})#{RESET}"
             return 0
           end
 
@@ -185,14 +187,14 @@ module Scint
           errors = scheduler.errors.dup
           stats = scheduler.stats
           if errors.any?
-            $stderr.puts "#{RED}Some gems failed to install:#{RESET}"
+            @output.puts "#{RED}Some gems failed to install:#{RESET}"
             errors.each do |err|
               error = err[:error]
-              $stderr.puts "  #{BOLD}#{err[:name]}#{RESET}: #{error.message}"
+              @output.puts "  #{BOLD}#{err[:name]}#{RESET}: #{error.message}"
               emit_network_error_details(error)
             end
           elsif stats[:failed] > 0
-            $stderr.puts "#{YELLOW}Warning: #{stats[:failed]} jobs failed but no error details captured#{RESET}"
+            @output.puts "#{YELLOW}Warning: #{stats[:failed]} jobs failed but no error details captured#{RESET}"
           end
 
           elapsed_ms = elapsed_ms_since(start_time)
@@ -205,14 +207,14 @@ module Scint
 
           if has_failures
             warn_missing_bundle_gitignore_entry
-            $stdout.puts "\n#{RED}Bundle failed!#{RESET} #{installed_total}/#{total_gems} gems installed total#{install_breakdown(cached: cached_gems, updated: updated_gems, compiled: compiled_gems, failed: failed_count)}. #{DIM}(#{format_run_footer(elapsed_ms, worker_count)})#{RESET}"
+            @output.puts "\n#{RED}Bundle failed!#{RESET} #{installed_total}/#{total_gems} gems installed total#{install_breakdown(cached: cached_gems, updated: updated_gems, compiled: compiled_gems, failed: failed_count)}. #{DIM}(#{format_run_footer(elapsed_ms, worker_count)})#{RESET}"
             1
           else
             # 10. Write lockfile + runtime config only for successful installs
             write_lockfile(resolved, gemfile, lockfile)
             write_runtime_config(resolved, bundle_path)
             warn_missing_bundle_gitignore_entry
-            $stdout.puts "\n#{GREEN}#{total_gems}#{RESET} gems installed total#{install_breakdown(cached: cached_gems, updated: updated_gems, compiled: compiled_gems)}. #{DIM}(#{format_run_footer(elapsed_ms, worker_count)})#{RESET}"
+            @output.puts "\n#{GREEN}#{total_gems}#{RESET} gems installed total#{install_breakdown(cached: cached_gems, updated: updated_gems, compiled: compiled_gems)}. #{DIM}(#{format_run_footer(elapsed_ms, worker_count)})#{RESET}"
             0
           end
         ensure
@@ -468,20 +470,20 @@ module Scint
           if opts[:git]
             git_source = find_matching_git_source(Array(lockfile&.sources), opts) || find_matching_git_source(gemfile.sources, opts)
             revision_hint = git_source&.revision || git_source&.ref || opts[:ref] || opts[:branch] || opts[:tag] || "HEAD"
-            bare_repo = cache&.git_path(opts[:git])
-            if bare_repo && !Dir.exist?(bare_repo)
-              clone_git_repo(opts[:git], bare_repo)
-            elsif bare_repo && Dir.exist?(bare_repo)
-              fetch_git_repo(bare_repo)
+            git_repo = cache&.git_path(opts[:git])
+            if git_repo && !Dir.exist?(git_repo)
+              clone_git_repo(opts[:git], git_repo)
+            elsif git_repo && Dir.exist?(git_repo)
+              fetch_git_repo(git_repo)
             end
-            if bare_repo && Dir.exist?(bare_repo)
+            if git_repo && Dir.exist?(git_repo)
               begin
-                resolved_revision = resolve_git_revision(bare_repo, revision_hint)
+                resolved_revision = resolve_git_revision(git_repo, revision_hint)
                 cache_key = "#{opts[:git]}@#{resolved_revision}"
                 git_metadata = git_source_metadata_cache[cache_key]
                 unless git_metadata
                   git_metadata = build_git_path_gems_for_revision(
-                    bare_repo,
+                    git_repo,
                     resolved_revision,
                     glob: opts[:glob],
                     source_desc: opts[:git],
@@ -552,8 +554,8 @@ module Scint
         nil
       end
 
-      def find_git_gemspec(bare_repo, revision, gem_name, glob: nil)
-        gemspec_paths = gemspec_paths_in_git_revision(bare_repo, revision)
+      def find_git_gemspec(git_repo, revision, gem_name, glob: nil)
+        gemspec_paths = gemspec_paths_in_git_revision(git_repo, revision)
         return nil if gemspec_paths.empty?
 
         path = gemspec_paths[gem_name.to_s]
@@ -564,23 +566,23 @@ module Scint
         path ||= gemspec_paths.values.first
         return nil if path.nil?
 
-        load_git_gemspec(bare_repo, revision, path)
+        load_git_gemspec(git_repo, revision, path)
       rescue StandardError
         nil
       end
 
-      def build_git_path_gems_for_revision(bare_repo, revision, glob: nil, source_desc: nil)
-        gemspec_paths = gemspec_paths_in_git_revision(bare_repo, revision)
+      def build_git_path_gems_for_revision(git_repo, revision, glob: nil, source_desc: nil)
+        gemspec_paths = gemspec_paths_in_git_revision(git_repo, revision)
         return {} if gemspec_paths.empty?
 
         glob_regex = glob ? git_glob_to_regex(glob) : nil
         data = {}
 
-        with_git_worktree(bare_repo, revision) do |worktree|
+        with_git_checkout(git_repo, revision) do |checkout_dir|
           gemspec_paths.each_value do |path|
             next if glob_regex && !path.match?(glob_regex)
 
-            gemspec = load_gemspec_from_worktree(worktree, path)
+            gemspec = load_gemspec_from_checkout(checkout_dir, path)
             next unless gemspec
 
             deps = gemspec.dependencies
@@ -725,19 +727,19 @@ module Scint
         by_source = git_specs.group_by { |s| s[:source] }
         by_source.each do |source, specs|
           uri, revision = git_source_ref(source)
-          bare_repo = cache.git_path(uri)
+          git_repo = cache.git_path(uri)
           # Do not invalidate an otherwise-usable lockfile just because this
           # git source has not been cached yet in the current machine/session.
-          next unless Dir.exist?(bare_repo)
+          next unless Dir.exist?(git_repo)
 
           resolved_revision = begin
-            resolve_git_revision(bare_repo, revision)
+            resolve_git_revision(git_repo, revision)
           rescue InstallError
             nil
           end
           return false unless resolved_revision
 
-          gemspec_paths = gemspec_paths_in_git_revision(bare_repo, resolved_revision)
+          gemspec_paths = gemspec_paths_in_git_revision(git_repo, resolved_revision)
           gemspec_names = gemspec_paths.keys.to_set
           return false if gemspec_names.empty?
 
@@ -749,9 +751,9 @@ module Scint
         true
       end
 
-      def gemspec_paths_in_git_revision(bare_repo, revision)
+      def gemspec_paths_in_git_revision(git_repo, revision)
         out, _err, status = git_capture3(
-          "--git-dir", bare_repo,
+          "-C", git_repo,
           "ls-tree",
           "-r",
           "--name-only",
@@ -771,8 +773,8 @@ module Scint
         {}
       end
 
-      def runtime_dependencies_for_git_gemspec(bare_repo, revision, gemspec_path)
-        spec = load_git_gemspec(bare_repo, revision, gemspec_path)
+      def runtime_dependencies_for_git_gemspec(git_repo, revision, gemspec_path)
+        spec = load_git_gemspec(git_repo, revision, gemspec_path)
         return nil unless spec
 
         spec.dependencies.select { |dep| dep.type == :runtime }
@@ -780,35 +782,28 @@ module Scint
         nil
       end
 
-      def load_git_gemspec(bare_repo, revision, gemspec_path)
+      def load_git_gemspec(git_repo, revision, gemspec_path)
         return nil if gemspec_path.to_s.empty?
 
-        with_git_worktree(bare_repo, revision) do |worktree|
-          load_gemspec_from_worktree(worktree, gemspec_path)
+        with_git_checkout(git_repo, revision) do |checkout_dir|
+          load_gemspec_from_checkout(checkout_dir, gemspec_path)
         end
       rescue StandardError
         nil
       end
 
-      def with_git_worktree(bare_repo, revision)
-        worktree = Dir.mktmpdir("scint-gemspec")
+      def with_git_checkout(git_repo, revision)
         _out, _err, status = git_capture3(
-          "--git-dir", bare_repo,
-          "--work-tree", worktree,
-          "checkout",
-          "--force",
-          revision,
+          "-C", git_repo,
+          "checkout", "-f", revision,
         )
         return nil unless status.success?
 
-        File.write(File.join(worktree, ".git"), "gitdir: #{bare_repo}\n")
-        yield worktree if block_given?
-      ensure
-        FileUtils.rm_rf(worktree) if worktree && !worktree.empty?
+        yield git_repo if block_given?
       end
 
-      def load_gemspec_from_worktree(worktree, gemspec_path)
-        absolute_gemspec = File.join(worktree, gemspec_path)
+      def load_gemspec_from_checkout(checkout_dir, gemspec_path)
+        absolute_gemspec = File.join(checkout_dir, gemspec_path)
         return nil unless File.exist?(absolute_gemspec)
 
         SpecUtils.load_gemspec(absolute_gemspec, isolate: true)
@@ -944,7 +939,7 @@ module Scint
         end
         return if source_uri.start_with?("/") || !source_uri.start_with?("http")
 
-        return if Cache::Validity.cached_valid?(spec, cache)
+        return if Scint::Cache::Validity.cached_valid?(spec, cache)
 
         dest_path = cache.inbound_path(spec)
         raise InstallError, "Missing cached gem file for #{spec.name}: #{dest_path}" unless File.exist?(dest_path)
@@ -1001,94 +996,72 @@ module Scint
       def ensure_git_repo_for_spec(spec, cache, fetch:)
         source = spec.source
         uri, _revision = git_source_ref(source)
-        bare_repo = cache.git_path(uri)
+        git_repo = cache.git_path(uri)
 
-        # Serialize all git operations per bare repo — git uses index.lock
+        # Serialize all git operations per repo — git uses index.lock
         # and can't handle concurrent checkouts from the same repo.
-        git_mutex_for(bare_repo).synchronize do
-          if Dir.exist?(bare_repo)
-            fetch_git_repo(bare_repo) if fetch
+        git_mutex_for(git_repo).synchronize do
+          if Dir.exist?(git_repo)
+            fetch_git_repo(git_repo) if fetch
           else
-            clone_git_repo(uri, bare_repo)
-            fetch_git_repo(bare_repo)
+            clone_git_repo(uri, git_repo)
           end
         end
 
-        bare_repo
+        git_repo
       end
 
       def assemble_git_spec(entry, cache, fetch: true)
         spec = entry.spec
-        return if Cache::Validity.cached_valid?(spec, cache)
+        return if Scint::Cache::Validity.cached_valid?(spec, cache)
 
         source = spec.source
         uri, revision = git_source_ref(source)
         submodules = git_source_submodules?(source)
 
-        bare_repo = cache.git_path(uri)
+        git_repo = cache.git_path(uri)
 
-        # Serialize all git operations per bare repo — git uses index.lock
+        # Serialize all git operations per repo — git uses index.lock
         # and can't handle concurrent checkouts from the same repo.
-        git_mutex_for(bare_repo).synchronize do
-          tmp_checkout = nil
+        git_mutex_for(git_repo).synchronize do
           tmp_assembled = nil
 
           begin
-            if Dir.exist?(bare_repo)
-              fetch_git_repo(bare_repo) if fetch
+            if Dir.exist?(git_repo)
+              fetch_git_repo(git_repo) if fetch
             else
-              clone_git_repo(uri, bare_repo)
-              fetch_git_repo(bare_repo)
+              clone_git_repo(uri, git_repo)
             end
 
-            resolved_revision = resolve_git_revision(bare_repo, revision)
+            resolved_revision = resolve_git_revision(git_repo, revision)
             assembling = cache.assembling_path(spec)
-            tmp_checkout = "#{assembling}.checkout.#{Process.pid}.#{Thread.current.object_id}.tmp"
             tmp_assembled = "#{assembling}.#{Process.pid}.#{Thread.current.object_id}.tmp"
             promoter = cache_promoter(cache)
 
             FileUtils.rm_rf(assembling)
-            FileUtils.rm_rf(tmp_checkout)
             FileUtils.rm_rf(tmp_assembled)
             FS.mkdir_p(File.dirname(assembling))
 
             promoter.validate_within_root!(cache.root, assembling, label: "assembling")
-            promoter.validate_within_root!(cache.root, tmp_checkout, label: "git-checkout")
             promoter.validate_within_root!(cache.root, tmp_assembled, label: "git-assembled")
 
-            if submodules
-              checkout_git_tree_with_submodules(
-                bare_repo,
-                tmp_checkout,
-                resolved_revision,
-                spec,
-                uri,
-              )
-            else
-              checkout_git_tree(
-                bare_repo,
-                tmp_checkout,
-                resolved_revision,
-                spec,
-                uri,
-              )
-            end
+            checkout_git_revision(git_repo, resolved_revision, spec, uri, submodules: submodules)
 
-            # Remove .git artifacts from checkout so assembled output is
-            # deterministic and contains no git internals.
-            Dir.glob(File.join(tmp_checkout, "**", ".git"), File::FNM_DOTMATCH).each do |path|
-              FileUtils.rm_rf(path)
-            end
-
-            gem_root = resolve_git_gem_subdir(tmp_checkout, spec)
-            gem_rel = git_relative_root(tmp_checkout, gem_root)
+            gem_root = resolve_git_gem_subdir(git_repo, spec)
+            gem_rel = git_relative_root(git_repo, gem_root)
             dest_root = tmp_assembled
             dest_path = gem_rel.empty? ? dest_root : File.join(dest_root, gem_rel)
 
             promoter.validate_within_root!(cache.root, dest_path, label: "git-dest")
 
             FS.clone_tree(gem_root, dest_path)
-            copy_gemspec_root_files(tmp_checkout, gem_root, dest_root, spec)
+
+            # Remove .git artifacts so assembled output is deterministic.
+            Dir.glob(File.join(tmp_assembled, "**", ".git"), File::FNM_DOTMATCH).each do |path|
+              FileUtils.rm_rf(path)
+            end
+
+            copy_gemspec_root_files(git_repo, gem_root, dest_root, spec)
             FS.atomic_move(tmp_assembled, assembling)
 
             gem_subdir = begin
@@ -1103,7 +1076,6 @@ module Scint
               promote_assembled_gem(spec, cache, assembling, gemspec, extensions: false)
             end
           ensure
-            FileUtils.rm_rf(tmp_checkout) if tmp_checkout && File.exist?(tmp_checkout)
             FileUtils.rm_rf(tmp_assembled) if tmp_assembled && File.exist?(tmp_assembled)
           end
         end
@@ -1171,61 +1143,27 @@ module Scint
         File.basename(gem_root)
       end
 
-      def checkout_git_tree(bare_repo, destination, resolved_revision, spec, uri)
-        FileUtils.mkdir_p(destination)
+      def checkout_git_revision(git_repo, resolved_revision, spec, uri, submodules: false)
         _out, err, status = git_capture3(
-          "--git-dir", bare_repo,
-          "--work-tree", destination,
-          "checkout",
-          "-f",
-          resolved_revision,
-          "--",
-          ".",
+          "-C", git_repo,
+          "checkout", "-f", resolved_revision,
         )
         unless status.success?
           raise InstallError, "Git checkout failed for #{spec.name} (#{uri}@#{resolved_revision}): #{err.to_s.strip}"
         end
-      end
 
-      def checkout_git_tree_with_submodules(bare_repo, destination, resolved_revision, spec, uri)
-        worktree = "#{destination}.worktree"
-        FileUtils.rm_rf(worktree)
+        return unless submodules
 
-        _out, err, status = git_capture3(
-          "--git-dir", bare_repo,
-          "worktree",
-          "add",
-          "--detach",
-          "--force",
-          worktree,
-          resolved_revision,
+        _sub_out, sub_err, sub_status = git_capture3(
+          "-C", git_repo,
+          "-c", "protocol.file.allow=always",
+          "submodule",
+          "update",
+          "--init",
+          "--recursive",
         )
-        unless status.success?
-          raise InstallError, "Git worktree checkout failed for #{spec.name} (#{uri}@#{resolved_revision}): #{err.to_s.strip}"
-        end
-
-        begin
-          _sub_out, sub_err, sub_status = git_capture3(
-            "-C", worktree,
-            "-c", "protocol.file.allow=always",
-            "submodule",
-            "update",
-            "--init",
-            "--recursive",
-          )
-          unless sub_status.success?
-            raise InstallError, "Git submodule update failed for #{spec.name} (#{uri}@#{resolved_revision}): #{sub_err.to_s.strip}"
-          end
-
-          FS.clone_tree(worktree, destination)
-
-          # Keep cache/extracted trees deterministic and detached from git internals.
-          Dir.glob(File.join(destination, "**", ".git"), File::FNM_DOTMATCH).each do |path|
-            FileUtils.rm_rf(path)
-          end
-        ensure
-          git_capture3("--git-dir", bare_repo, "worktree", "remove", "--force", worktree)
-          FileUtils.rm_rf(worktree)
+        unless sub_status.success?
+          raise InstallError, "Git submodule update failed for #{spec.name} (#{uri}@#{resolved_revision}): #{sub_err.to_s.strip}"
         end
       end
 
@@ -1237,32 +1175,35 @@ module Scint
         end
       end
 
-      def clone_git_repo(uri, bare_repo)
-        FS.mkdir_p(File.dirname(bare_repo))
-        _out, err, status = git_capture3("clone", "--bare", uri.to_s, bare_repo)
+      def clone_git_repo(uri, git_repo)
+        FS.mkdir_p(File.dirname(git_repo))
+        _out, err, status = git_capture3("clone", uri.to_s, git_repo)
         unless status.success?
           raise InstallError, "Git clone failed for #{uri}: #{err.to_s.strip}"
         end
       end
 
-      def fetch_git_repo(bare_repo)
+      def fetch_git_repo(git_repo)
         _out, err, status = git_capture3(
-          "--git-dir", bare_repo,
+          "-C", git_repo,
           "fetch",
           "--prune",
+          "--force",
           "origin",
-          "+refs/heads/*:refs/heads/*",
-          "+refs/tags/*:refs/tags/*",
         )
         unless status.success?
-          raise InstallError, "Git fetch failed for #{bare_repo}: #{err.to_s.strip}"
+          raise InstallError, "Git fetch failed for #{git_repo}: #{err.to_s.strip}"
         end
       end
 
-      def resolve_git_revision(bare_repo, revision)
-        out, err, status = git_capture3("--git-dir", bare_repo, "rev-parse", "#{revision}^{commit}")
+      def resolve_git_revision(git_repo, revision)
+        # Try origin/<revision> first so we pick up fetched branch tips.
+        out, _err, status = git_capture3("-C", git_repo, "rev-parse", "origin/#{revision}^{commit}")
+        return out.strip if status.success?
+
+        out, err, status = git_capture3("-C", git_repo, "rev-parse", "#{revision}^{commit}")
         unless status.success?
-          raise InstallError, "Unable to resolve git revision #{revision.inspect} in #{bare_repo}: #{err.to_s.strip}"
+          raise InstallError, "Unable to resolve git revision #{revision.inspect} in #{git_repo}: #{err.to_s.strip}"
         end
         out.strip
       end
@@ -1474,7 +1415,7 @@ module Scint
           assembling = cache.assembling_path(entry.spec)
           base = if entry.cached_path
             entry.cached_path
-          elsif Cache::Validity.cached_valid?(entry.spec, cache)
+          elsif Scint::Cache::Validity.cached_valid?(entry.spec, cache)
             cached_dir
           elsif Dir.exist?(assembling)
             assembling
@@ -1728,12 +1669,12 @@ module Scint
         return if gem_names.empty?
 
         if ENV["SCINT_TIMING"]
-          $stderr.puts "  [timing] prelink: #{gem_names.size} gems via linker"
+          @output.puts "  [timing] prelink: #{gem_names.size} gems via linker"
         end
 
         FS.bulk_link_gems(cache_abi_dir, gems_dir, gem_names)
       rescue StandardError => e
-        $stderr.puts("bulk prelink warning: #{e.message}") if ENV["SCINT_DEBUG"]
+        @output.puts("bulk prelink warning: #{e.message}") if ENV["SCINT_DEBUG"]
       end
 
       def load_cached_gemspec(spec, cache, extracted_path)
@@ -1833,7 +1774,7 @@ module Scint
           promoter.with_staging_dir(prefix: "cached") do |staging|
             FS.clone_tree(assembling_path, staging)
             manifest = build_cached_manifest(spec, cache, staging, extensions: extensions)
-            Cache::Manifest.write_dotfiles(staging, manifest)
+            Scint::Cache::Manifest.write_dotfiles(staging, manifest)
             spec_payload = gemspec ? gemspec.to_ruby : nil
             result = promoter.promote_tree(
               staging_path: staging,
@@ -1858,11 +1799,11 @@ module Scint
         FS.mkdir_p(File.dirname(spec_path))
 
         FS.atomic_write(spec_path, spec_payload) if spec_payload
-        Cache::Manifest.write(manifest_path, manifest)
+        Scint::Cache::Manifest.write(manifest_path, manifest)
       end
 
       def build_cached_manifest(spec, cache, gem_dir, extensions:)
-        Cache::Manifest.build(
+        Scint::Cache::Manifest.build(
           spec: spec,
           gem_dir: gem_dir,
           abi_key: Platform.abi_key,
@@ -2402,17 +2343,17 @@ module Scint
         return if (headers.nil? || headers.empty?) && body.empty?
 
         if headers && !headers.empty?
-          $stderr.puts "    headers:"
+          @output.puts "    headers:"
           headers.sort.each do |key, value|
-            $stderr.puts "      #{key}: #{value}"
+            @output.puts "      #{key}: #{value}"
           end
         end
 
         return if body.empty?
 
-        $stderr.puts "    body:"
+        @output.puts "    body:"
         body.each_line do |line|
-          $stderr.puts "      #{line.rstrip}"
+          @output.puts "      #{line.rstrip}"
         end
       end
 
@@ -2421,7 +2362,7 @@ module Scint
         return unless File.file?(path)
         return if gitignore_has_bundle_entry?(path)
 
-        $stderr.puts "#{YELLOW}Warning: .gitignore exists but does not ignore .bundle (add `.bundle/`).#{RESET}"
+        @output.puts "#{YELLOW}Warning: .gitignore exists but does not ignore .bundle (add `.bundle/`).#{RESET}"
       end
 
       def gitignore_has_bundle_entry?(path)

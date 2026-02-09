@@ -12,6 +12,31 @@ SimpleCov.start do
 end
 
 require "minitest/autorun"
+
+# Report slow tests at the end of the run.
+SLOW_THRESHOLD = ENV.fetch("SLOW_THRESHOLD", "0.5").to_f
+SLOW_RESULTS = []
+
+module SlowTestTracker
+  def record(result)
+    super
+    SLOW_RESULTS << result if result.time > SLOW_THRESHOLD
+  end
+
+  def report
+    super
+
+    return if SLOW_RESULTS.empty?
+    SLOW_RESULTS.sort_by! { |r| -r.time }
+    io.puts
+    io.puts "\e[33mSlow tests (>#{SLOW_THRESHOLD}s):\e[0m"
+    SLOW_RESULTS.each do |r|
+      io.printf "  %6.2fs  %s#%s\n", r.time, r.class_name, r.name
+    end
+  end
+end
+
+Minitest::CompositeReporter.prepend(SlowTestTracker)
 require "tmpdir"
 require "fileutils"
 require "stringio"
@@ -53,6 +78,16 @@ end
 Object.include(LegacyStub)
 
 module ScintTestHelpers
+  def capture_io
+    old_out, old_err = $stdout, $stderr
+    $stdout = StringIO.new
+    $stderr = StringIO.new
+    yield
+    [$stdout.string, $stderr.string]
+  ensure
+    $stdout, $stderr = old_out, old_err
+  end
+
   def with_tmpdir(prefix = "scint-test")
     Dir.mktmpdir(prefix) do |dir|
       yield dir
@@ -185,4 +220,11 @@ end
 
 class Minitest::Test
   include ScintTestHelpers
+
+  def before_setup
+    super
+    # Reset memoized state so tests don't leak into each other.
+    Scint::FS.instance_variable_set(:@copy_strategy, nil) if defined?(Scint::FS)
+    Scint.cache_root = nil
+  end
 end

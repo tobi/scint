@@ -6,6 +6,14 @@ require "scint/cli/add"
 require "scint/cli/remove"
 
 class CLITest < Minitest::Test
+  def setup
+    @saved_cache_root = Scint.cache_root
+  end
+
+  def teardown
+    Scint.cache_root = @saved_cache_root
+  end
+
   def with_captured_io
     old_out = $stdout
     old_err = $stderr
@@ -43,6 +51,7 @@ class CLITest < Minitest::Test
   def test_run_cache_command_dispatches
     with_tmpdir do |dir|
       with_env("XDG_CACHE_HOME", dir) do
+        Scint.cache_root = nil
         out, err = with_captured_io do
           status = Scint::CLI.run(["cache", "dir"])
           assert_equal 0, status

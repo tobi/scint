@@ -7,6 +7,7 @@ require "scint/platform"
 class FSTest < Minitest::Test
   def setup
     Scint::FS.instance_variable_set(:@mkdir_cache, {})
+    Scint::FS.instance_variable_set(:@copy_strategy, nil)
   end
 
   def test_mkdir_p_is_memoized
@@ -51,19 +52,21 @@ class FSTest < Minitest::Test
       File.write(src, "hello")
 
       called = false
-      Scint::Platform.stub(:macos?, false) do
-        Scint::Platform.stub(:linux?, true) do
-          Scint::FS.stub(:system, lambda { |*args|
-            called = true
-            assert_equal "cp", args[0]
-            assert_equal "--reflink=always", args[1]
-            assert_equal src, args[2]
-            assert_equal dst, args[3]
-            assert_equal({ [:out, :err] => File::NULL }, args[4])
-            FileUtils.cp(src, dst)
-            true
-          }) do
-            Scint::FS.clonefile(src, dst)
+      Scint::FS.stub(:detect_copy_strategy, :reflink) do
+        Scint::Platform.stub(:macos?, false) do
+          Scint::Platform.stub(:linux?, true) do
+            Scint::FS.stub(:system, lambda { |*args|
+              called = true
+              assert_equal "cp", args[0]
+              assert_equal "--reflink=always", args[1]
+              assert_equal src, args[2]
+              assert_equal dst, args[3]
+              assert_equal({ [:out, :err] => File::NULL }, args[4])
+              FileUtils.cp(src, dst)
+              true
+            }) do
+              Scint::FS.clonefile(src, dst)
+            end
           end
         end
       end
@@ -157,19 +160,21 @@ class FSTest < Minitest::Test
       File.binwrite(File.join(src, "a.txt"), "a")
 
       called = false
-      Scint::Platform.stub(:macos?, true) do
-        Scint::FS.stub(:system, lambda { |*args|
-          called = true
-          assert_equal "cp", args[0]
-          assert_equal "-cR", args[1]
-          assert_equal File.join(src, "."), args[2]
-          assert_equal dst, args[3]
-          assert_equal({ [:out, :err] => File::NULL }, args[4])
-          FileUtils.mkdir_p(dst)
-          FileUtils.cp_r(File.join(src, "."), dst)
-          true
-        }) do
-          Scint::FS.clone_tree(src, dst)
+      Scint::FS.stub(:detect_copy_strategy, :reflink) do
+        Scint::Platform.stub(:macos?, true) do
+          Scint::FS.stub(:system, lambda { |*args|
+            called = true
+            assert_equal "cp", args[0]
+            assert_equal "-cR", args[1]
+            assert_equal File.join(src, "."), args[2]
+            assert_equal dst, args[3]
+            assert_equal({ [:out, :err] => File::NULL }, args[4])
+            FileUtils.mkdir_p(dst)
+            FileUtils.cp_r(File.join(src, "."), dst)
+            true
+          }) do
+            Scint::FS.clone_tree(src, dst)
+          end
         end
       end
 
@@ -186,14 +191,16 @@ class FSTest < Minitest::Test
       File.binwrite(File.join(src, "a.txt"), "a")
 
       fallback_called = false
-      Scint::Platform.stub(:macos?, true) do
-        Scint::FS.stub(:system, ->(*_args) { false }) do
-          Scint::FS.stub(:hardlink_tree, lambda { |s, d|
+      Scint::FS.stub(:detect_copy_strategy, :reflink) do
+        Scint::Platform.stub(:macos?, true) do
+          Scint::FS.stub(:system, ->(*_args) { false }) do
+            Scint::FS.stub(:hardlink_tree, lambda { |s, d|
             fallback_called = true
             FileUtils.mkdir_p(d)
-            FileUtils.cp_r(File.join(s, "."), d)
-          }) do
-            Scint::FS.clone_tree(src, dst)
+              FileUtils.cp_r(File.join(s, "."), d)
+            }) do
+              Scint::FS.clone_tree(src, dst)
+            end
           end
         end
       end
@@ -211,21 +218,23 @@ class FSTest < Minitest::Test
       File.binwrite(File.join(src, "a.txt"), "a")
 
       called = false
-      Scint::Platform.stub(:macos?, false) do
-        Scint::Platform.stub(:linux?, true) do
-          Scint::FS.stub(:system, lambda { |*args|
-            called = true
-            assert_equal "cp", args[0]
-            assert_equal "--reflink=always", args[1]
-            assert_equal "-R", args[2]
-            assert_equal File.join(src, "."), args[3]
-            assert_equal dst, args[4]
-            assert_equal({ [:out, :err] => File::NULL }, args[5])
-            FileUtils.mkdir_p(dst)
-            FileUtils.cp_r(File.join(src, "."), dst)
-            true
-          }) do
-            Scint::FS.clone_tree(src, dst)
+      Scint::FS.stub(:detect_copy_strategy, :reflink) do
+        Scint::Platform.stub(:macos?, false) do
+          Scint::Platform.stub(:linux?, true) do
+            Scint::FS.stub(:system, lambda { |*args|
+              called = true
+              assert_equal "cp", args[0]
+              assert_equal "--reflink=always", args[1]
+              assert_equal "-R", args[2]
+              assert_equal File.join(src, "."), args[3]
+              assert_equal dst, args[4]
+              assert_equal({ [:out, :err] => File::NULL }, args[5])
+              FileUtils.mkdir_p(dst)
+              FileUtils.cp_r(File.join(src, "."), dst)
+              true
+            }) do
+              Scint::FS.clone_tree(src, dst)
+            end
           end
         end
       end
@@ -247,19 +256,21 @@ class FSTest < Minitest::Test
       end
 
       calls = []
-      Scint::Platform.stub(:macos?, true) do
-        Scint::Platform.stub(:linux?, false) do
-          Scint::FS.stub(:system, lambda { |*args|
-            calls << args
-            # cp -cR src... dst {redir}
-            sources = args[2..-3]
-            destination = args[-2]
-            FileUtils.mkdir_p(destination)
-            sources.each { |src| FileUtils.cp_r(src, destination) }
-            true
-          }) do
-            copied = Scint::FS.clone_many_trees([src_a, src_b, src_c], dst, chunk_size: 2)
-            assert_equal 3, copied
+      Scint::FS.stub(:detect_copy_strategy, :reflink) do
+        Scint::Platform.stub(:macos?, true) do
+          Scint::Platform.stub(:linux?, false) do
+            Scint::FS.stub(:system, lambda { |*args|
+              calls << args
+              # cp -cR src... dst {redir}
+              sources = args[2..-3]
+              destination = args[-2]
+              FileUtils.mkdir_p(destination)
+              sources.each { |src| FileUtils.cp_r(src, destination) }
+              true
+            }) do
+              copied = Scint::FS.clone_many_trees([src_a, src_b, src_c], dst, chunk_size: 2)
+              assert_equal 3, copied
+            end
           end
         end
       end
@@ -282,15 +293,17 @@ class FSTest < Minitest::Test
       end
 
       fallback_calls = []
-      Scint::Platform.stub(:macos?, true) do
-        Scint::FS.stub(:system, ->(*_args) { false }) do
-          Scint::FS.stub(:clone_tree, lambda { |src, out|
-            fallback_calls << [src, out]
-            FileUtils.mkdir_p(out)
-            FileUtils.cp_r(File.join(src, "."), out)
-          }) do
-            copied = Scint::FS.clone_many_trees([src_a, src_b], dst, chunk_size: 10)
-            assert_equal 2, copied
+      Scint::FS.stub(:detect_copy_strategy, :reflink) do
+        Scint::Platform.stub(:macos?, true) do
+          Scint::FS.stub(:system, ->(*_args) { false }) do
+            Scint::FS.stub(:clone_tree, lambda { |src, out|
+              fallback_calls << [src, out]
+              FileUtils.mkdir_p(out)
+              FileUtils.cp_r(File.join(src, "."), out)
+            }) do
+              copied = Scint::FS.clone_many_trees([src_a, src_b], dst, chunk_size: 10)
+              assert_equal 2, copied
+            end
           end
         end
       end
