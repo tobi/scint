@@ -57,6 +57,8 @@ module Scint
           write_file(versions_path, data)
         end
         write_file(versions_etag_path, etag) if etag
+        # Invalidate binary cache when versions file changes
+        FileUtils.rm_f(versions_binary_path)
       end
 
       # Read the ETag for versions.
@@ -67,6 +69,29 @@ module Scint
       # Size of the versions file (for Range requests).
       def versions_size
         File.exist?(versions_path) ? File.size(versions_path) : 0
+      end
+
+      # Binary cache for parsed versions index — avoids re-parsing the
+      # versions file (~30% of cold-resolve wall time is String#split + GC).
+      def read_parsed_versions
+        bin = versions_binary_path
+        ver = versions_path
+        return nil unless File.exist?(bin) && File.exist?(ver)
+        # Invalidate if versions file changed since binary was written
+        return nil if File.mtime(ver) > File.mtime(bin)
+
+        data = File.binread(bin)
+        Marshal.load(data)
+      rescue ArgumentError, TypeError, Errno::ENOENT
+        nil
+      end
+
+      def write_parsed_versions(versions_by_name, info_checksums)
+        # Convert to plain hash (default_proc can't be marshaled)
+        plain = Hash[versions_by_name]
+        File.binwrite(versions_binary_path, Marshal.dump([plain, info_checksums]))
+      rescue Errno::ENOENT, Errno::EACCES, TypeError
+        nil
       end
 
       # Read cached info for a gem.
@@ -122,6 +147,7 @@ module Scint
       def names_etag_path = File.join(@directory, "names.etag")
       def versions_path = File.join(@directory, "versions")
       def versions_etag_path = File.join(@directory, "versions.etag")
+      def versions_binary_path = File.join(@directory, "versions.bin")
 
       def info_path(name)
         name = name.to_s

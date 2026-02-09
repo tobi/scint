@@ -293,17 +293,18 @@ module Scint
 
         # Stream output line-by-line so the UX gets live compile progress
         # instead of waiting for the entire subprocess to finish.
-        all_output = +"".b
+        all_output = +""
         tail_lines = []
         cmd_label = "$ #{cmd.join(" ")}"
 
         Open3.popen2e(env, *cmd, **opts) do |stdin, out_err, wait_thr|
           stdin.close
-          out_err.set_encoding("ASCII-8BIT")
+          out_err.set_encoding(Encoding::UTF_8, invalid: :replace, undef: :replace, replace: "?")
 
           out_err.each_line do |line|
+            line = line.scrub("?")
             all_output << line
-            stripped = sanitize_output(line).rstrip
+            stripped = line.rstrip
             next if stripped.empty?
 
             tail_lines << stripped
@@ -316,23 +317,12 @@ module Scint
 
           status = wait_thr.value
           unless status.success?
-            details = sanitize_output(all_output).strip
+            details = all_output.strip
             message = "Command failed (exit #{status.exitstatus}): #{cmd.join(" ")}"
             message = "#{message}\n#{details}" unless details.empty?
             raise ExtensionBuildError, message
           end
         end
-      end
-
-      def sanitize_output(raw)
-        return "" if raw.nil? || raw.empty?
-
-        raw.to_s
-           .dup
-           .force_encoding(Encoding::BINARY)
-           .encode(Encoding::UTF_8, invalid: :replace, undef: :replace, replace: "?")
-      rescue EncodingError
-        raw.to_s.encode(Encoding::UTF_8, invalid: :replace, undef: :replace, replace: "?")
       end
 
       def spec_full_name(spec)
@@ -342,7 +332,7 @@ module Scint
       private_class_method :find_extension_dirs, :compile_extension,
                            :compile_extconf, :compile_cmake, :compile_rake,
                            :find_rake_executable, :link_extensions,
-                           :build_env, :run_cmd, :sanitize_output,
+                           :build_env, :run_cmd,
                            :prebuilt_missing_for_ruby?
     end
   end

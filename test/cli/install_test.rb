@@ -556,11 +556,10 @@ class CLIInstallTest < Minitest::Test
       checksums: nil,
     )
 
-    install.stub(:preferred_platforms_for_locked_specs, { "nokogiri-1.18.10" => "arm64-darwin" }) do
-      resolved = install.send(:lockfile_to_resolved, lockfile)
-      assert_equal 1, resolved.size
-      assert_equal "arm64-darwin", resolved.first.platform
-    end
+    resolved = install.send(:lockfile_to_resolved, lockfile)
+    assert_equal 1, resolved.size
+    # lockfile_to_resolved uses the lockfile platform as-is (no index round-trip)
+    assert_equal "ruby", resolved.first.platform
   end
 
   def test_warm_compiled_cache_is_reused_for_ruby_lockfile_variant
@@ -615,7 +614,7 @@ class CLIInstallTest < Minitest::Test
     end
   end
 
-  def test_warm_compiled_cache_is_reused_after_platform_upgrade_from_lockfile
+  def test_warm_compiled_cache_is_reused_for_lockfile_platform
     with_tmpdir do |dir|
       install = Scint::CLI::Install.new([])
       cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
@@ -632,44 +631,42 @@ class CLIInstallTest < Minitest::Test
         checksums: nil,
       )
 
-      install.stub(:preferred_platforms_for_locked_specs, { "ffi-1.17.0" => "arm64-darwin" }) do
-        resolved = install.send(:lockfile_to_resolved, lockfile)
-        spec = resolved.first
-        assert_equal "arm64-darwin", spec.platform
+      resolved = install.send(:lockfile_to_resolved, lockfile)
+      spec = resolved.first
+      assert_equal "ruby", spec.platform
 
-        cached_dir = cache.cached_path(spec)
-        ext_src = File.join(cached_dir, "ext", "ffi_c")
-        FileUtils.mkdir_p(ext_src)
-        File.write(File.join(ext_src, "extconf.rb"), "")
-        FileUtils.mkdir_p(File.join(cached_dir, "lib"))
-        File.write(File.join(cached_dir, "lib", "ffi.rb"), "")
+      cached_dir = cache.cached_path(spec)
+      ext_src = File.join(cached_dir, "ext", "ffi_c")
+      FileUtils.mkdir_p(ext_src)
+      File.write(File.join(ext_src, "extconf.rb"), "")
+      FileUtils.mkdir_p(File.join(cached_dir, "lib"))
+      File.write(File.join(cached_dir, "lib", "ffi.rb"), "")
 
-        gemspec = Gem::Specification.new do |s|
-          s.name = "ffi"
-          s.version = Gem::Version.new("1.17.0")
-          s.summary = "ffi"
-          s.require_paths = ["lib"]
-        end
-        FileUtils.mkdir_p(File.dirname(cache.cached_spec_path(spec)))
-        File.binwrite(cache.cached_spec_path(spec), Marshal.dump(gemspec))
-        manifest = Scint::Cache::Manifest.build(
-          spec: spec,
-          gem_dir: cached_dir,
-          abi_key: Scint::Platform.abi_key,
-          source: { "type" => "rubygems", "uri" => "https://rubygems.org" },
-          extensions: true,
-        )
-        Scint::Cache::Manifest.write(cache.cached_manifest_path(spec), manifest)
-
-        File.write(File.join(cached_dir, Scint::Installer::ExtensionBuilder::BUILD_MARKER), "")
-
-        plan = Scint::Installer::Planner.plan(resolved, File.join(dir, ".bundle"), cache)
-        assert_equal :link, plan.first.action
+      gemspec = Gem::Specification.new do |s|
+        s.name = "ffi"
+        s.version = Gem::Version.new("1.17.0")
+        s.summary = "ffi"
+        s.require_paths = ["lib"]
       end
+      FileUtils.mkdir_p(File.dirname(cache.cached_spec_path(spec)))
+      File.binwrite(cache.cached_spec_path(spec), Marshal.dump(gemspec))
+      manifest = Scint::Cache::Manifest.build(
+        spec: spec,
+        gem_dir: cached_dir,
+        abi_key: Scint::Platform.abi_key,
+        source: { "type" => "rubygems", "uri" => "https://rubygems.org" },
+        extensions: true,
+      )
+      Scint::Cache::Manifest.write(cache.cached_manifest_path(spec), manifest)
+
+      File.write(File.join(cached_dir, Scint::Installer::ExtensionBuilder::BUILD_MARKER), "")
+
+      plan = Scint::Installer::Planner.plan(resolved, File.join(dir, ".bundle"), cache)
+      assert_equal :link, plan.first.action
     end
   end
 
-  def test_warm_compiled_cache_is_reused_when_lockfile_platform_is_normalized
+  def test_warm_compiled_cache_is_reused_with_versioned_platform_from_lockfile
     with_tmpdir do |dir|
       install = Scint::CLI::Install.new([])
       cache = Scint::Cache::Layout.new(root: File.join(dir, "cache"))
@@ -686,40 +683,39 @@ class CLIInstallTest < Minitest::Test
         checksums: nil,
       )
 
-      install.stub(:preferred_platforms_for_locked_specs, { "ffi-1.17.0" => "arm64-darwin" }) do
-        resolved = install.send(:lockfile_to_resolved, lockfile)
-        spec = resolved.first
-        assert_equal "arm64-darwin", spec.platform
+      resolved = install.send(:lockfile_to_resolved, lockfile)
+      spec = resolved.first
+      # Lockfile platform is used as-is
+      assert_equal "arm64-darwin-24", spec.platform
 
-        cached_dir = cache.cached_path(spec)
-        ext_src = File.join(cached_dir, "ext", "ffi_c")
-        FileUtils.mkdir_p(ext_src)
-        File.write(File.join(ext_src, "extconf.rb"), "")
-        FileUtils.mkdir_p(File.join(cached_dir, "lib"))
-        File.write(File.join(cached_dir, "lib", "ffi.rb"), "")
+      cached_dir = cache.cached_path(spec)
+      ext_src = File.join(cached_dir, "ext", "ffi_c")
+      FileUtils.mkdir_p(ext_src)
+      File.write(File.join(ext_src, "extconf.rb"), "")
+      FileUtils.mkdir_p(File.join(cached_dir, "lib"))
+      File.write(File.join(cached_dir, "lib", "ffi.rb"), "")
 
-        gemspec = Gem::Specification.new do |s|
-          s.name = "ffi"
-          s.version = Gem::Version.new("1.17.0")
-          s.summary = "ffi"
-          s.require_paths = ["lib"]
-        end
-        FileUtils.mkdir_p(File.dirname(cache.cached_spec_path(spec)))
-        File.binwrite(cache.cached_spec_path(spec), Marshal.dump(gemspec))
-        manifest = Scint::Cache::Manifest.build(
-          spec: spec,
-          gem_dir: cached_dir,
-          abi_key: Scint::Platform.abi_key,
-          source: { "type" => "rubygems", "uri" => "https://rubygems.org" },
-          extensions: true,
-        )
-        Scint::Cache::Manifest.write(cache.cached_manifest_path(spec), manifest)
-
-        File.write(File.join(cached_dir, Scint::Installer::ExtensionBuilder::BUILD_MARKER), "")
-
-        plan = Scint::Installer::Planner.plan(resolved, File.join(dir, ".bundle"), cache)
-        assert_equal :link, plan.first.action
+      gemspec = Gem::Specification.new do |s|
+        s.name = "ffi"
+        s.version = Gem::Version.new("1.17.0")
+        s.summary = "ffi"
+        s.require_paths = ["lib"]
       end
+      FileUtils.mkdir_p(File.dirname(cache.cached_spec_path(spec)))
+      File.binwrite(cache.cached_spec_path(spec), Marshal.dump(gemspec))
+      manifest = Scint::Cache::Manifest.build(
+        spec: spec,
+        gem_dir: cached_dir,
+        abi_key: Scint::Platform.abi_key,
+        source: { "type" => "rubygems", "uri" => "https://rubygems.org" },
+        extensions: true,
+      )
+      Scint::Cache::Manifest.write(cache.cached_manifest_path(spec), manifest)
+
+      File.write(File.join(cached_dir, Scint::Installer::ExtensionBuilder::BUILD_MARKER), "")
+
+      plan = Scint::Installer::Planner.plan(resolved, File.join(dir, ".bundle"), cache)
+      assert_equal :link, plan.first.action
     end
   end
 

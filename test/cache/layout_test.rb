@@ -82,7 +82,7 @@ class CacheLayoutTest < Minitest::Test
     layout = Scint::Cache::Layout.new(root: "/tmp/cache")
     path = layout.git_path("https://github.com/ruby/ruby.git")
 
-    assert_match %r{/tmp/cache/inbound/gits/[0-9a-f]{16}$}, path
+    assert_equal "/tmp/cache/inbound/gits/github.com-ruby-ruby", path
   end
 
   def test_git_path_normalizes_uri_objects

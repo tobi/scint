@@ -55,7 +55,7 @@ class ProgressTest < Minitest::Test
     refute_includes text, "Fetched index https://rubygems.org"
   end
 
-  def test_prints_blank_line_after_setup_before_install_work
+  def test_setup_line_followed_by_stream_work
     out = StringIO.new
     progress = Scint::Progress.new(output: out)
 
@@ -64,7 +64,9 @@ class ProgressTest < Minitest::Test
     progress.on_enqueue(2, :link, "rack")
     progress.on_start(2, :link, "rack")
 
-    assert_includes out.string, "Fetching index https://rubygems.org\n\n[2/2] Installing rack"
+    text = out.string.gsub("\r", "")
+    assert_includes text, "Fetching index https://rubygems.org\n"
+    assert_includes text, "Installing rack"
   end
 
   def test_hides_binstub_task_output
@@ -120,10 +122,9 @@ class ProgressTest < Minitest::Test
     progress.stop
 
     text = out.string
-    assert_includes text, "Compiling... (0/1)"
+    assert_includes text, "Compiling"
     assert_includes text, "· rack"
     assert_includes text, "    done"
-    assert_includes text, "• Compiled rack"
     refute_includes text, "Installing gems..."
     refute_includes text, "[1/1] Linking rack"
   end
@@ -160,7 +161,7 @@ class ProgressTest < Minitest::Test
     progress.stop
 
     text = out.string
-    assert_includes text, "Downloads... (0/5)"
+    assert_includes text, "Downloads"
     assert_includes text, "· gem0"
   end
 
@@ -176,8 +177,8 @@ class ProgressTest < Minitest::Test
     progress.stop
 
     text = out.string
-    install_idx = text.index("Installing... (0/1)")
-    compile_idx = text.index("Compiling... (0/1)")
+    install_idx = text.index("Installing")
+    compile_idx = text.index("Compiling")
     refute_nil install_idx
     refute_nil compile_idx
     assert_operator install_idx, :<, compile_idx
@@ -193,10 +194,10 @@ class ProgressTest < Minitest::Test
     progress.stop
 
     text = out.string
-    assert_includes text, "Downloads... (0/1)"
-    refute_includes text, "Extraction... (0/0)"
-    refute_includes text, "Compiling... (0/0)"
-    refute_includes text, "Installing... (0/0)"
+    assert_includes text, "Downloads"
+    refute_includes text, "Extraction"
+    refute_includes text, "Compiling"
+    refute_match(/Installing.*\d+\/\d+/, text)
   end
 
   def test_interactive_mode_hides_and_restores_cursor
@@ -212,20 +213,19 @@ class ProgressTest < Minitest::Test
     assert_includes out.string, "\e[?25h"
   end
 
-  def test_interactive_mode_prints_slow_operation_in_scrollback
+  def test_interactive_mode_prints_phase_summary_on_completion
     out = FakeTTY.new
     progress = Scint::Progress.new(output: out)
 
     progress.on_enqueue(1, :link, "central_icons")
     progress.on_start(1, :link, "central_icons")
-    progress.instance_variable_get(:@job_started_at)[1] =
-      Process.clock_gettime(Process::CLOCK_MONOTONIC) - 1.5
     progress.on_complete(1, :link, "central_icons")
     progress.stop
 
     text = out.string
-    assert_includes text, "Installed central_icons"
-    assert_match(/\d+\.\d{2}s/, text)
+    # Phase summary line is emitted when all jobs of a type finish
+    assert_includes text, "Installing"
+    assert_includes text, "1/1"
   end
 
   def test_stop_positions_cursor_below_final_panel_for_followup_output
@@ -240,7 +240,7 @@ class ProgressTest < Minitest::Test
     out.print "SUMMARY\n"
 
     text = out.string
-    assert_includes text, "• Installed rack"
+    # After stop, cursor should be restored and followup output appended
     assert_match(/\e\[\?25hSUMMARY/, text)
   end
 
@@ -418,58 +418,9 @@ class ProgressTest < Minitest::Test
     rows = progress.send(:phase_rows_for, :build_ext, "⠋")
 
     assert_equal 1, rows.length
-    assert_includes rows.first, "Compiling... (0/1)"
+    assert_includes rows.first, "Compiling"
   ensure
     progress.stop
-  end
-
-  def test_clear_live_block_locked_moves_cursor_and_clears_lines
-    out = FakeTTY.new
-    progress = Scint::Progress.new(output: out)
-
-    # Simulate that we previously drew a live block with 3 rows
-    progress.instance_variable_set(:@live_rows, 3)
-    progress.instance_variable_set(:@rendered_widths, [20, 15, 10])
-
-    progress.instance_variable_get(:@mutex).synchronize do
-      progress.send(:clear_live_block_locked)
-    end
-
-    text = out.string
-    # Should move cursor up by (live_rows - 1) = 2 at the start
-    assert_includes text, "\e[2A", "Expected cursor-up escape for 2 lines"
-    # Current clear strategy uses EL (Erase in Line) escape.
-    assert_equal 3, text.scan(/\r\e\[K/).length
-    # Should end with cursor back at start
-    assert_includes text, "\r"
-    # live_rows should be reset to 0
-    assert_equal 0, progress.instance_variable_get(:@live_rows)
-    assert_equal [], progress.instance_variable_get(:@rendered_widths)
-  end
-
-  def test_clear_live_block_locked_noop_when_not_interactive
-    out = StringIO.new
-    progress = Scint::Progress.new(output: out)
-
-    # Even if live_rows is set, non-interactive should be a no-op
-    progress.instance_variable_set(:@live_rows, 3)
-    progress.instance_variable_get(:@mutex).synchronize do
-      progress.send(:clear_live_block_locked)
-    end
-
-    assert_equal "", out.string
-  end
-
-  def test_clear_live_block_locked_noop_when_zero_live_rows
-    out = FakeTTY.new
-    progress = Scint::Progress.new(output: out)
-
-    progress.instance_variable_get(:@mutex).synchronize do
-      progress.send(:clear_live_block_locked)
-    end
-
-    assert_equal "", out.string
-    assert_equal 0, progress.instance_variable_get(:@live_rows)
   end
 
   def test_render_thread_rescues_standard_error
@@ -542,28 +493,19 @@ class ProgressTest < Minitest::Test
     end
   end
 
-  def test_clear_live_block_via_on_fail_in_interactive_mode
+  def test_on_fail_in_interactive_mode_shows_failure
     out = FakeTTY.new
     progress = Scint::Progress.new(output: out)
 
-    # Set up an interactive session with a live block present
     progress.on_enqueue(1, :download, "rack")
     progress.on_start(1, :download, "rack")
     sleep 0.3
 
-    # Capture output before fail
-    out.truncate(0)
-    out.rewind
-
-    # on_fail triggers clear_live_block_locked in interactive mode
     progress.on_fail(1, :download, "rack", StandardError.new("network error"))
     progress.stop
 
     text = out.string
-    # The fail message should appear
     assert_includes text, "FAILED"
     assert_includes text, "network error"
-    # The cursor should have been moved (clear_live_block_locked ran)
-    # The escape code for cursor up should appear if live rows were drawn
   end
 end

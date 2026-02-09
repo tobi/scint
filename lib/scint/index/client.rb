@@ -37,8 +37,18 @@ module Scint
       # Fetch the versions list. Returns { name => [[name, version, platform], ...] }
       # Also populates info checksums for cache validation.
       def fetch_versions
+        # Try binary cache first (avoids re-parsing ~60% of resolve time)
+        cached = @cache.read_parsed_versions
+        if cached
+          versions_by_name, info_checksums = cached
+          @parser.restore_versions(versions_by_name, info_checksums)
+          return versions_by_name
+        end
+
         data = fetch_endpoint("versions")
-        @parser.parse_versions(data)
+        result = @parser.parse_versions(data)
+        @cache.write_parsed_versions(@parser.versions_by_name_raw, @parser.info_checksums)
+        result
       end
 
       # Fetch info for a single gem. Returns parsed info entries.

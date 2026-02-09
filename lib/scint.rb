@@ -9,6 +9,7 @@ module Scint
   GREEN  = COLOR ? "\e[32m" : ""
   RED    = COLOR ? "\e[31m" : ""
   YELLOW = COLOR ? "\e[33m" : ""
+  BLUE   = COLOR ? "\e[34m" : ""
   BOLD   = COLOR ? "\e[1m"  : ""
   DIM    = COLOR ? "\e[2m"  : ""
   RESET  = COLOR ? "\e[0m"  : ""

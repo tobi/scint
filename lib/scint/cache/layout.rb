@@ -175,12 +175,23 @@ module Scint
         end
       end
 
-      # Git slugs are SHA256 of the normalized URI string (uri.to_s), truncated
-      # to 16 hex chars. Callers must validate `source.uri` in the manifest to
-      # detect collisions and fall back to a longer hash if needed.
+      # Human-decodable git slug: "github.com-Shopify-debug" for
+      # https://github.com/Shopify/debug.git.  Falls back to truncated
+      # SHA256 for URIs that don't parse cleanly.
       def git_slug(uri)
         normalized = normalize_uri(uri)
-        Digest::SHA256.hexdigest(normalized)[0, 16]
+        parsed = URI.parse(normalized) rescue nil
+        if parsed && parsed.host
+          path = parsed.path.to_s
+            .sub(/\.git\z/, "")        # strip trailing .git
+            .gsub("/", "-")            # slashes to dashes
+            .sub(/\A-/, "")            # strip leading dash
+          slug = parsed.host
+          slug += "-#{path}" unless path.empty?
+          slug
+        else
+          Digest::SHA256.hexdigest(normalized)[0, 16]
+        end
       end
 
       def normalize_uri(uri)

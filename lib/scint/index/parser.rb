@@ -11,6 +11,18 @@ module Scint
         lines
       end
 
+      # Restore pre-parsed versions from binary cache.
+      def restore_versions(versions_by_name, info_checksums)
+        @versions_by_name = versions_by_name
+        @info_checksums = info_checksums
+        @versions_by_name
+      end
+
+      # Raw hash for binary cache serialization.
+      def versions_by_name_raw
+        @versions_by_name
+      end
+
       # Parse the compact index "versions" endpoint response.
       # Returns a hash:
       #   { name => [[name, version, platform], ...], ... }

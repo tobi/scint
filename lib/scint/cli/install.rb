@@ -81,7 +81,11 @@ module Scint
         compile_slots = compile_slots_for(worker_count)
         git_slots = git_slots_for(worker_count)
         per_type_limits = install_task_limits(worker_count, compile_slots, git_slots)
-        @output.puts "#{GREEN}💎#{RESET} Scintellating Gemfile into #{BOLD}#{bundle_display}#{RESET} #{DIM}(scint #{VERSION}, ruby #{RUBY_VERSION})#{RESET}"
+        cache_display = cache.root.sub(Dir.home, "~")
+        @output.puts "💎 #{BLUE}Scintellating#{RESET} Gemfile"
+        @output.puts "  #{DIM}into#{RESET}  #{BOLD}#{bundle_display}#{RESET}"
+        @output.puts "  #{DIM}cache#{RESET} #{cache_display}"
+        @output.puts "  #{DIM}scint #{VERSION}, ruby #{RUBY_VERSION}#{RESET}"
         @output.puts
 
         # 0. Build credential store from config files (~/.bundle/config, XDG scint/credentials)
@@ -133,10 +137,14 @@ module Scint
           scheduler.wait_for(:git_clone)
           _t = _tmark("wait_git", _t)
 
+          progress = scheduler.progress
+          progress.on_enqueue(-1, :resolve, "dependencies")
+          progress.on_start(-1, :resolve, "dependencies")
           resolved = resolve(gemfile, lockfile, cache)
           resolved = dedupe_resolved_specs(adjust_meta_gems(resolved))
           resolved = filter_excluded_gems(resolved, gemfile)
           force_purge_artifacts(resolved, bundle_path, cache) if @force
+          progress.on_complete(-1, :resolve, "dependencies")
 
           _t = _tmark("resolve", _t)
           # 7. Plan: diff resolved vs installed
@@ -397,8 +405,8 @@ module Scint
         return unless source.respond_to?(:uri)
         git_dir = cache.git_path(source.uri)
         if Dir.exist?(git_dir)
-          fetch_git_repo(git_dir)
-          return
+          result = fetch_git_repo(git_dir)
+          return unless result == :reclone
         end
 
         clone_git_repo(source.uri, git_dir)
@@ -471,10 +479,11 @@ module Scint
             git_source = find_matching_git_source(Array(lockfile&.sources), opts) || find_matching_git_source(gemfile.sources, opts)
             revision_hint = git_source&.revision || git_source&.ref || opts[:ref] || opts[:branch] || opts[:tag] || "HEAD"
             git_repo = cache&.git_path(opts[:git])
-            if git_repo && !Dir.exist?(git_repo)
+            if git_repo && Dir.exist?(git_repo)
+              result = fetch_git_repo(git_repo)
+              clone_git_repo(opts[:git], git_repo) if result == :reclone
+            elsif git_repo
               clone_git_repo(opts[:git], git_repo)
-            elsif git_repo && Dir.exist?(git_repo)
-              fetch_git_repo(git_repo)
             end
             if git_repo && Dir.exist?(git_repo)
               begin
@@ -715,7 +724,7 @@ module Scint
           )
         end
 
-        apply_locked_platform_preferences(resolved)
+        resolved
       end
 
       def lockfile_git_source_mapping_valid?(lockfile, cache)
@@ -1001,11 +1010,11 @@ module Scint
         # Serialize all git operations per repo — git uses index.lock
         # and can't handle concurrent checkouts from the same repo.
         git_mutex_for(git_repo).synchronize do
-          if Dir.exist?(git_repo)
-            fetch_git_repo(git_repo) if fetch
-          else
-            clone_git_repo(uri, git_repo)
+          needs_clone = !Dir.exist?(git_repo)
+          if !needs_clone && fetch
+            needs_clone = fetch_git_repo(git_repo) == :reclone
           end
+          clone_git_repo(uri, git_repo) if needs_clone
         end
 
         git_repo
@@ -1027,11 +1036,11 @@ module Scint
           tmp_assembled = nil
 
           begin
-            if Dir.exist?(git_repo)
-              fetch_git_repo(git_repo) if fetch
-            else
-              clone_git_repo(uri, git_repo)
+            needs_clone = !Dir.exist?(git_repo)
+            if !needs_clone && fetch
+              needs_clone = fetch_git_repo(git_repo) == :reclone
             end
+            clone_git_repo(uri, git_repo) if needs_clone
 
             resolved_revision = resolve_git_revision(git_repo, revision)
             assembling = cache.assembling_path(spec)
@@ -1184,6 +1193,13 @@ module Scint
       end
 
       def fetch_git_repo(git_repo)
+        # Detect stale bare repos left by older scint versions and nuke them
+        # so the caller falls through to a fresh clone.
+        if Dir.exist?(git_repo) && !File.exist?(File.join(git_repo, ".git"))
+          FileUtils.rm_rf(git_repo)
+          return :reclone
+        end
+
         _out, err, status = git_capture3(
           "-C", git_repo,
           "fetch",

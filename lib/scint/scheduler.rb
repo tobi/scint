@@ -7,14 +7,17 @@ require_relative "platform"
 module Scint
   class Scheduler
     # Job types in priority order (lower index = higher priority)
+    # Lower number = dispatched first when ready.
+    # build_ext runs before IO work so compilation starts ASAP once deps are
+    # met, while downloads/extracts/links fill remaining worker slots.
     PRIORITIES = {
       fetch_index: 0,
       git_clone:   1,
       resolve:     2,
-      download:    3,
-      extract:     4,
-      link:        5,
-      build_ext:   6,
+      build_ext:   3,
+      download:    4,
+      extract:     5,
+      link:        6,
       binstub:     7,
     }.freeze
 
