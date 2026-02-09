@@ -136,14 +136,22 @@ echo "  Ruby:            $(ruby --version)"
 echo ""
 
 # ── apply clean flags ────────────────────────────────────────────
+force_remove() {
+  local dir="$1"
+  # rm -rf can fail on macOS/APFS with large clonefile trees;
+  # fall back to find -depth -delete which handles it reliably.
+  rm -rf "$dir" 2>/dev/null || find "$dir" -depth -delete 2>/dev/null || true
+  rm -rf "$dir" 2>/dev/null || true
+}
+
 if [[ "$CLEAN_CACHE" -eq 1 && -d "$XDG_CACHE" ]]; then
   echo "Removing cache: $XDG_CACHE"
-  rm -rf "$XDG_CACHE"
+  force_remove "$XDG_CACHE"
 fi
 
 if [[ "$CLEAN_BUNDLE" -eq 1 && -d "$BUNDLE_PATH" ]]; then
   echo "Removing .bundle: $BUNDLE_PATH"
-  rm -rf "$BUNDLE_PATH"
+  force_remove "$BUNDLE_PATH"
 fi
 
 SYSTEM_GEM_DIR="$(ruby -e 'puts Gem.default_dir')"
