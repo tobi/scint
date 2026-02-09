@@ -75,5 +75,52 @@ module Scint
     def linux?
       !!(os =~ /linux/)
     end
+
+    # Map a system triple (Nix-style or GNU-style) to the RubyGems platform
+    # string that Bundler uses in lockfiles.
+    #
+    #   gem_platform_for_system("x86_64-linux")      => "x86_64-linux-gnu"
+    #   gem_platform_for_system("aarch64-linux")      => "aarch64-linux-gnu"
+    #   gem_platform_for_system("aarch64-darwin")      => "arm64-darwin"
+    #   gem_platform_for_system("x86_64-darwin")       => "x86_64-darwin"
+    #   gem_platform_for_system(nil)                   => local_platform.to_s
+    #
+    def gem_platform_for_system(system = nil)
+      return local_platform.to_s.sub(/-?\d+\z/, "") if system.nil?
+
+      parts = system.to_s.split("-", 2)
+      cpu = parts[0]
+      kernel = parts[1] || ""
+
+      # Darwin: RubyGems uses "arm64" not "aarch64", and no OS version suffix
+      if kernel.start_with?("darwin")
+        cpu = "arm64" if cpu == "aarch64"
+        "#{cpu}-darwin"
+      elsif kernel.start_with?("linux")
+        # RubyGems appends "-gnu" for glibc Linux
+        "#{cpu}-linux-gnu"
+      else
+        "#{cpu}-#{kernel}"
+      end
+    end
+
+    # Nix expression fragment that computes the gem platform from
+    # stdenv.hostPlatform at eval time. Returns a string of Nix code
+    # that evaluates to the gem platform string.
+    #
+    # Usage in generated .nix:
+    #   let gemPlatform = <this expression>; in ...
+    #
+    def nix_gem_platform_expr
+      <<~NIX.strip
+        let hp = pkgs.stdenv.hostPlatform; in
+          if hp.isDarwin then
+            (if hp.isAarch64 then "arm64" else hp.parsed.cpu.name) + "-darwin"
+          else if hp.isLinux then
+            hp.parsed.cpu.name + "-linux-gnu"
+          else
+            hp.parsed.cpu.name + "-" + hp.parsed.kernel.name
+      NIX
+    end
   end
 end

@@ -90,7 +90,9 @@ module Scint
   module Resolver; end
   module Index; end
   module Downloader; end
-  module Cache; end
+  module Cache
+    autoload :Export, "scint/cache/export"
+  end
   module Installer; end
   module Source; end
   module Runtime; end
