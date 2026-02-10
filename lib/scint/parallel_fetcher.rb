@@ -62,9 +62,11 @@ module Scint
     def fetch_one(item)
       name = item[:name]
       version = item[:version]
+      platform = item[:platform]
       source_uri = item[:source_uri] || "https://rubygems.org/"
 
-      dest_path = File.join(@dest_dir, "#{name}-#{version}.gem")
+      slug = platform && platform != "ruby" ? "#{name}-#{version}-#{platform}" : "#{name}-#{version}"
+      dest_path = File.join(@dest_dir, "#{slug}.gem")
 
       # Already downloaded?
       if File.exist?(dest_path) && File.size(dest_path) > 0
@@ -73,8 +75,7 @@ module Scint
 
       FS.mkdir_p(@dest_dir)
 
-      # Try platform-agnostic first, then any platform
-      uri = gem_uri(source_uri, name, version)
+      uri = gem_uri(source_uri, slug)
       result = @pool.download(uri, dest_path)
       { name: name, version: version, path: result[:path], error: nil, cached: false }
 
@@ -82,9 +83,9 @@ module Scint
       { name: name, version: version, path: nil, error: e, cached: false }
     end
 
-    def gem_uri(source_uri, name, version)
+    def gem_uri(source_uri, slug)
       base = source_uri.chomp("/")
-      "#{base}/gems/#{name}-#{version}.gem"
+      "#{base}/gems/#{slug}.gem"
     end
   end
 end

@@ -8,6 +8,7 @@ require_relative "gem/package"
 require_relative "fs"
 require "fileutils"
 require "json"
+require "open3"
 
 module Scint
   # Materializer takes parsed lockfile specs and produces a flat directory of
@@ -64,15 +65,15 @@ module Scint
           path_gems << { name: spec[:name], version: spec[:version], path: spec[:source].path }
 
         else
-          # Rubygems source — skip platform-specific dupes
-          existing = rubygems.find { |s| s[:name] == spec[:name] }
-          if existing
-            rubygems.delete(existing) if (spec[:platform] || "ruby") == "ruby"
-            next unless (spec[:platform] || "ruby") == "ruby"
-          end
-          rubygems << { name: spec[:name], version: spec[:version] }
+          # Rubygems source — collect all platform variants, pick best later
+          source_uri = spec[:source].respond_to?(:uri) ? spec[:source].uri : "https://rubygems.org/"
+          platform = spec[:platform] || "ruby"
+          rubygems << { name: spec[:name], version: spec[:version], platform: platform, source_uri: source_uri }
         end
       end
+
+      # Deduplicate rubygems: prefer "ruby" platform, else pick best match for current host
+      rubygems = select_best_platform(rubygems)
 
       { rubygems: rubygems, git: git_repos, path: path_gems }
     end
@@ -99,10 +100,9 @@ module Scint
       end
 
       extract_metadata(gem_path, name, version)
-      true
+      [true, nil]
     rescue => e
-      $stderr.puts "  WARN: materialize #{name}-#{version}: #{e.message}"
-      false
+      [false, "materialize #{name}-#{version}: #{e.message}"]
     end
 
     # Materialize a git repo: clone, checkout rev, copy into source dirs.
@@ -110,31 +110,35 @@ module Scint
     def materialize_git(repo)
       gems = repo[:gems]
       all_exist = gems.all? { |g| Dir.exist?(File.join(@source_dir, "#{g[:name]}-#{g[:version]}")) }
-      return true if all_exist
+      return [true, nil] if all_exist
 
       clone_dir = File.join(@git_clones_dir, repo[:base])
       FS.mkdir_p(File.dirname(clone_dir))
 
       unless Dir.exist?(clone_dir)
-        ok = system("git", "clone", "--quiet", repo[:uri], clone_dir,
-                    [:out, :err] => File::NULL)
-        return false unless ok
+        out, status = Open3.capture2e("git", "clone", "--quiet", repo[:uri], clone_dir)
+        return [false, "git clone failed: #{out.strip}"] unless status.success?
       end
 
-      system("git", "-C", clone_dir, "fetch", "--quiet", "origin",
-             [:out, :err] => File::NULL)
-      ok = system("git", "-C", clone_dir, "checkout", "--quiet", "--force", repo[:rev],
-                  [:out, :err] => File::NULL)
-      return false unless ok
+      out, status = Open3.capture2e("git", "-C", clone_dir, "fetch", "--quiet", "origin")
+      return [false, "git fetch failed: #{out.strip}"] unless status.success?
+
+      out, status = Open3.capture2e("git", "-C", clone_dir, "checkout", "--quiet", "--force", repo[:rev])
+      return [false, "git checkout #{repo[:rev]} failed: #{out.strip}"] unless status.success?
 
       gems.each do |g|
         target = File.join(@source_dir, "#{g[:name]}-#{g[:version]}")
         next if Dir.exist?(target)
-        FileUtils.cp_r(clone_dir, target)
-        FileUtils.rm_rf(File.join(target, ".git"))
+        # Use git checkout-index to export a clean copy without .git
+        # (avoids copying unix sockets that exceed macOS 104-byte path limit)
+        FileUtils.mkdir_p(target)
+        out, status = Open3.capture2e("git", "-C", clone_dir, "checkout-index", "-a", "-f", "--prefix=#{target}/")
+        return [false, "git checkout-index failed for #{g[:name]}: #{out.strip}"] unless status.success?
       end
 
-      true
+      [true, nil]
+    rescue => e
+      [false, e.message]
     end
 
     # Read metadata from a materialized gem's JSON file.
@@ -155,6 +159,22 @@ module Scint
     end
 
     private
+
+    # Given a flat list of {name:, version:, platform:, source_uri:}, group by name+version
+    # and pick the best platform for each: prefer "ruby", else match the current host.
+    def select_best_platform(gems)
+      local = Gem::Platform.local
+      grouped = gems.group_by { |g| "#{g[:name]}-#{g[:version]}" }
+      grouped.map do |_key, variants|
+        ruby_variant = variants.find { |v| v[:platform] == "ruby" }
+        next ruby_variant if ruby_variant
+
+        # No pure-ruby variant — pick platform matching this host
+        best = variants.find { |v| local =~ Gem::Platform.new(v[:platform]) } ||
+               variants.first
+        best
+      end.compact
+    end
 
     def extract_metadata(gem_path, name, version)
       meta_file = File.join(@meta_dir, "#{name}-#{version}.json")
