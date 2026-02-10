@@ -162,16 +162,21 @@ module Scint
 
     # Given a flat list of {name:, version:, platform:, source_uri:}, group by name+version
     # and pick the best platform for each: prefer "ruby", else match the current host.
+    # Adds :platform_specific => true when the gem has no "ruby" variant.
     def select_best_platform(gems)
       local = Gem::Platform.local
       grouped = gems.group_by { |g| "#{g[:name]}-#{g[:version]}" }
       grouped.map do |_key, variants|
         ruby_variant = variants.find { |v| v[:platform] == "ruby" }
-        next ruby_variant if ruby_variant
+        if ruby_variant
+          ruby_variant[:platform_specific] = false
+          next ruby_variant
+        end
 
         # No pure-ruby variant — pick platform matching this host
         best = variants.find { |v| local =~ Gem::Platform.new(v[:platform]) } ||
                variants.first
+        best[:platform_specific] = true
         best
       end.compact
     end
