@@ -13,7 +13,7 @@ module Scint
 
     def mkdir_p(path)
       path = path.to_s
-      return if @mkdir_cache[path]
+      return if @mkdir_cache[path] && Dir.exist?(path)
 
       # Do the filesystem call outside the cache mutex so unrelated directory
       # creation can proceed in parallel across worker threads.

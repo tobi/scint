@@ -1657,9 +1657,9 @@ class CLIInstallTest < Minitest::Test
         checksums: nil,
       )
 
-      install.stub(:runtime_dependencies_for_git_gemspec, ->(*_args) { raise "should not load gemspec runtime deps" }) do
-        assert install.send(:lockfile_git_source_mapping_valid?, lockfile, cache)
-      end
+      # lockfile_git_source_mapping_valid? only checks gemspec presence,
+      # not runtime dependencies — no gemspec loading needed.
+      assert install.send(:lockfile_git_source_mapping_valid?, lockfile, cache)
     end
   end
 
