@@ -67,7 +67,9 @@ module Scint
   autoload :Scheduler,   "scint/scheduler"
   autoload :WorkerPool,  "scint/worker_pool"
   autoload :Progress,    "scint/progress"
-  autoload :FS,          "scint/fs"
+  autoload :FS,              "scint/fs"
+  autoload :Materializer,   "scint/materializer"
+  autoload :ParallelFetcher, "scint/parallel_fetcher"
   autoload :Platform,    "scint/platform"
   autoload :SpecUtils,   "scint/spec_utils"
 
