@@ -8,12 +8,21 @@ class ResolverTest < Minitest::Test
   class FakeIndexClient
     attr_reader :source_uri
 
-    def initialize(source_uri = "https://example.test")
+    def initialize(source_uri = "https://example.test", data: {})
       @source_uri = source_uri
+      @data = data
     end
 
     def fetch_versions
       {}
+    end
+
+    def prefetch(_names)
+      nil
+    end
+
+    def fetch_info(name)
+      @data.fetch(name, [])
     end
   end
 
@@ -206,6 +215,44 @@ class ResolverTest < Minitest::Test
   end
 
   # --- Full resolve test ---
+
+  # Transitive deps of a source-pinned gem must resolve from that same source.
+  def test_resolve_with_inline_source_propagates_to_transitive_deps
+    default_client = FakeIndexClient.new("https://rubygems.org", data: {
+      "rack" => [["rack", "2.0.0", "ruby", {}, {}]],
+    })
+    private_client = FakeIndexClient.new("https://private.example.com", data: {
+      "database_documentation" => [
+        ["database_documentation", "2.0.0", "ruby", { "services_db-client" => "~> 0.24.2" }, {}],
+      ],
+      "services_db-client" => [["services_db-client", "0.24.3", "ruby", {}, {}]],
+    })
+
+    provider = Scint::Resolver::Provider.new(
+      default_client,
+      clients: {
+        "https://rubygems.org" => default_client,
+        "https://private.example.com" => private_client,
+      },
+      source_map: { "database_documentation" => "https://private.example.com" },
+      platforms: ["ruby"],
+    )
+
+    deps = [
+      Scint::Gemfile::Dependency.new("rack", version_reqs: [">= 1.0"]),
+      Scint::Gemfile::Dependency.new("database_documentation", version_reqs: ["~> 2.0"]),
+    ]
+
+    resolver = Scint::Resolver::Resolver.new(provider: provider, dependencies: deps)
+    result = resolver.resolve
+    resolved = result.each_with_object({}) { |spec, h| h[spec.name] = spec }
+
+    assert_includes resolved.keys, "services_db-client"
+    assert_equal "0.24.3", resolved["services_db-client"].version
+    assert_equal "https://private.example.com", resolved["services_db-client"].source
+    assert_equal "2.0.0", resolved["rack"].version
+    assert_equal "https://rubygems.org", resolved["rack"].source
+  end
 
   def test_resolve_with_simple_dependency_graph
     # Set up a small dependency graph:

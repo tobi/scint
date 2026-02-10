@@ -108,6 +108,11 @@ module Scint
               end
             end
 
+            # Transitive deps inherit the parent's source.
+            if (parent_source = @source_map[name])
+              deps.each_key { |dep_name| @source_map[dep_name] ||= parent_source }
+            end
+
             deps
           end
         end
